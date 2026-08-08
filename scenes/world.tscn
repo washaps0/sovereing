@@ -1,6 +1,7 @@
 [gd_scene format=3 uid="uid://b7ujr3dbqctcr"]
 
-[ext_resource type="Script" uid="uid://b2vnp2sbywgol" path="res://scripts/land/world.gd" id="1_nnsk1"]
+[ext_resource type="Script" uid="uid://4laychbl83fg" path="res://scripts/land/generation.gd" id="1_nnsk1"]
+[ext_resource type="Script" uid="uid://dkbrrpckqawat" path="res://scripts/land/camera_2d.gd" id="2_rwgxs"]
 
 [node name="world" type="Node2D" unique_id=1067150204]
 script = ExtResource("1_nnsk1")
@@ -9,5 +10,6 @@ script = ExtResource("1_nnsk1")
 
 [node name="Camera2D" type="Camera2D" parent="." unique_id=1790570228]
 position = Vector2(576, 321)
+script = ExtResource("2_rwgxs")
 
 [node name="trees" type="Node2D" parent="." unique_id=2132397720]
