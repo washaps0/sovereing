@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://ca7d2g7r4wh7p"
-path="res://.godot/imported/grass3.png-ae5f5b8f24388d2d2392ac01dbd8334a.ctex"
+uid="uid://d2hulafnne7vb"
+path="res://.godot/imported/tree1_ocap.png-c6a0abbf46b6fc4eff8afe7456365eb2.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://assets/terrain/grass3.png"
-dest_files=["res://.godot/imported/grass3.png-ae5f5b8f24388d2d2392ac01dbd8334a.ctex"]
+source_file="res://assets/objects/nature/trees/tree1_ocap.png"
+dest_files=["res://.godot/imported/tree1_ocap.png-c6a0abbf46b6fc4eff8afe7456365eb2.ctex"]
 
 [params]
 
