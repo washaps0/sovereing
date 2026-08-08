@@ -34,6 +34,7 @@ var tree_textures = [
 ]
 
 const TREE_SCENE := preload("res://scenes/objects/tree.tscn")
+const ROCK_SCENE := preload("res://scenes/objects/rock.tscn")
 
 var rng := RandomNumberGenerator.new()
 
@@ -53,6 +54,26 @@ func spawn_tree(pos: Vector2):
 	tree.position = pos
 	$trees.add_child(tree)
 
+
+func spawn_rock(pos: Vector2):
+	var rock = ROCK_SCENE.instantiate()
+	rock.rock_variant = rng.randi_range(0, 2)
+	rock.position = pos
+	$rocks.add_child(rock)
+
+
+func generate_rock_deposits():
+	# Редкие небольшие залежи по 2–5 камней.
+	for x in range(96, MAP_WIDTH * TILE_SIZE, 192):
+		for y in range(96, MAP_HEIGHT * TILE_SIZE, 192):
+			if rng.randf() > 0.06:
+				continue
+			var center := Vector2(x, y) + Vector2(rng.randf_range(-64, 64), rng.randf_range(-64, 64))
+			for i in range(rng.randi_range(2, 5)):
+				var angle := rng.randf_range(0.0, TAU)
+				var offset := Vector2.from_angle(angle) * rng.randf_range(10.0, 35.0)
+				spawn_rock(center + offset)
+
 func generate_forest():
 	for x in range(0, MAP_WIDTH * TILE_SIZE, TREE_SPACING):
 		for y in range(0, MAP_HEIGHT * TILE_SIZE, TREE_SPACING):
@@ -71,6 +92,7 @@ func _ready():
 
 	generate_ground()
 	generate_forest()
+	generate_rock_deposits()
 	spawn_starting_units()
 
 

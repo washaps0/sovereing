@@ -1,0 +1,24 @@
+[gd_scene format=3 uid="uid://uu6j2h5jgtto"]
+
+[ext_resource type="Script" uid="uid://c05qc8hphk6bd" path="res://scripts/objects/road.gd" id="1_road"]
+[ext_resource type="Texture2D" uid="uid://ddb830faej0lu" path="res://assets/objects/buildings/road.png" id="2_road"]
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_road"]
+size = Vector2(64, 16)
+
+[node name="road" type="Area2D" unique_id=1920712489]
+scale = Vector2(1, 0.875)
+script = ExtResource("1_road")
+display_name = "Дорога"
+building_kind = "road"
+wood_required = 0
+stone_required = 1
+build_time = 1.5
+
+[node name="Sprite2D" type="Sprite2D" parent="." unique_id=2016977352]
+position = Vector2(0, 2.3841858e-07)
+scale = Vector2(3.0476189, 1.9999999)
+texture = ExtResource("2_road")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="." unique_id=352245143]
+shape = SubResource("RectangleShape2D_road")
