@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://bbo1bmrkiomrf"
-path="res://.godot/imported/tree3s.png-9e2df454f2540a1f0147a5e5ba4106d3.ctex"
+uid="uid://b7h15is7ncyar"
+path="res://.godot/imported/warehouse.png-083fccdf99ac69795ac512ba615a7ecb.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://assets/objects/nature/trees/tree3s.png"
-dest_files=["res://.godot/imported/tree3s.png-9e2df454f2540a1f0147a5e5ba4106d3.ctex"]
+source_file="res://assets/objects/buildings/warehouse.png"
+dest_files=["res://.godot/imported/warehouse.png-083fccdf99ac69795ac512ba615a7ecb.ctex"]
 
 [params]
 

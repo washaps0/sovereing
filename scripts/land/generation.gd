@@ -6,6 +6,18 @@ const TILE_SIZE := 64
 const FOREST_NOISE_FREQUENCY := 0.0003
 const FOREST_THRESHOLD := 0.2
 const TREE_SPACING := 32
+const UNIT_SCENE := preload("res://scenes/objects/unit.tscn")
+
+@export var starting_unit_count := 5
+@export var unit_spawn_position := Vector2(300, 300)
+@export var unit_spacing := 40.0
+
+
+func spawn_starting_units():
+	for i in range(starting_unit_count):
+		var unit = UNIT_SCENE.instantiate()
+		unit.position = unit_spawn_position + Vector2(i * unit_spacing, 0)
+		add_child(unit)
 
 var forest_noise := FastNoiseLite.new()
 
@@ -21,6 +33,8 @@ var tree_textures = [
 	preload("res://assets/objects/nature/trees/tree3.png")
 ]
 
+const TREE_SCENE := preload("res://scenes/objects/tree.tscn")
+
 var rng := RandomNumberGenerator.new()
 
 func generate_ground():
@@ -34,11 +48,9 @@ func generate_ground():
 
 
 func spawn_tree(pos: Vector2):
-	var tree = Sprite2D.new()
-	
-	tree.texture = tree_textures[rng.randi_range(0, tree_textures.size() - 1)]
+	var tree = TREE_SCENE.instantiate()
+	tree.tree_variant = rng.randi_range(0, tree_textures.size() - 1)
 	tree.position = pos
-	
 	$trees.add_child(tree)
 
 func generate_forest():
@@ -53,9 +65,15 @@ func generate_forest():
 				
 func _ready():
 	rng.seed = 12345
-	
+
 	forest_noise.seed = 12345
 	forest_noise.frequency = FOREST_NOISE_FREQUENCY
-	
+
 	generate_ground()
 	generate_forest()
+	spawn_starting_units()
+
+
+func _unhandled_input(event: InputEvent):
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
+		get_tree().call_group("units", "deselect")

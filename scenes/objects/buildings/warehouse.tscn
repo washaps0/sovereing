@@ -1,0 +1,16 @@
+[gd_scene format=3 uid="uid://c6xcvtk0ow4j7"]
+
+[ext_resource type="Texture2D" uid="uid://b7h15is7ncyar" path="res://assets/objects/buildings/warehouse.png" id="1_gdsal"]
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_qu7ja"]
+size = Vector2(31.666666, 19.166666)
+
+[node name="residence" type="Area2D" unique_id=732566616]
+scale = Vector2(1.2, 1.2)
+
+[node name="Sprite2D" type="Sprite2D" parent="." unique_id=1570788124]
+texture = ExtResource("1_gdsal")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="." unique_id=1407389209]
+position = Vector2(-3.973643e-07, -0.416667)
+shape = SubResource("RectangleShape2D_qu7ja")

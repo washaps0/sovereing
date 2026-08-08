@@ -1,0 +1,14 @@
+[gd_scene load_steps=3 format=3 uid="uid://b5m8vt74ci5rw"]
+
+[ext_resource type="Script" path="res://scripts/objects/tree.gd" id="1_tree"]
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_tree"]
+size = Vector2(28, 28)
+
+[node name="tree" type="Area2D" unique_id=1635939362]
+script = ExtResource("1_tree")
+
+[node name="Sprite2D" type="Sprite2D" parent="." unique_id=1871621905]
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="."]
+shape = SubResource("RectangleShape2D_tree")
