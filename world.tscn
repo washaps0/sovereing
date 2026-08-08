@@ -1,0 +1,13 @@
+[gd_scene format=3 uid="uid://b7ujr3dbqctcr"]
+
+[ext_resource type="Script" uid="uid://b2vnp2sbywgol" path="res://scripts/land/world.gd" id="1_f3sb7"]
+
+[node name="world" type="Node2D" unique_id=1067150204]
+script = ExtResource("1_f3sb7")
+
+[node name="ground" type="Node2D" parent="." unique_id=1069387884]
+
+[node name="vegetation" type="Node2D" parent="." unique_id=851222186]
+
+[node name="Camera2D" type="Camera2D" parent="." unique_id=1790570228]
+position = Vector2(576, 321)
