@@ -15,6 +15,9 @@ const STREET_NAMES: Array[String] = [
 ]
 
 var menu: PanelContainer
+var controls_panel: PanelContainer
+var unit_panel: PanelContainer
+var resource_panel: PanelContainer
 var ghost: Building
 var selected_scene: PackedScene
 var placement_valid := false
@@ -39,6 +42,7 @@ var selection_additive := false
 var forming := false
 var formation_start := Vector2.ZERO
 var building_panel: PanelContainer
+var building_scroll: ScrollContainer
 var building_title: Label
 var building_status: Label
 var warehouse_settings: VBoxContainer
@@ -46,12 +50,14 @@ var factory_settings: VBoxContainer
 var factory_diagnostic: Label
 var residents_settings: VBoxContainer
 var residents_list: VBoxContainer
-var quota_spins := {}
+var quota_sliders := {}
+var quota_value_labels := {}
 var recipe_picker: OptionButton
 var release_occupants_button: Button
 var updating_building_controls := false
 var residents_list_key := ""
 var building_rotation_offset := 0.0
+var interface_theme: Theme
 
 @onready var world: Node2D = get_parent()
 @onready var buildings: Node2D = world.get_node("buildings")
@@ -60,6 +66,7 @@ var building_rotation_offset := 0.0
 
 func _ready():
 	naming_rng.randomize()
+	interface_theme = SovereignUITheme.create_theme()
 	tactical_overlay = TacticalOverlay.new()
 	tactical_overlay.z_index = 100
 	world.add_child.call_deferred(tactical_overlay)
@@ -68,6 +75,7 @@ func _ready():
 
 func _panel(position: Vector2, minimum_size: Vector2) -> VBoxContainer:
 	var panel := PanelContainer.new()
+	panel.theme = interface_theme
 	panel.position = position
 	panel.custom_minimum_size = minimum_size
 	add_child(panel)
@@ -78,18 +86,21 @@ func _panel(position: Vector2, minimum_size: Vector2) -> VBoxContainer:
 
 func _create_interface():
 	var controls_box := _panel(Vector2(16, 16), Vector2(360, 0))
+	controls_panel = controls_box.get_parent() as PanelContainer
 	var controls := Label.new()
 	controls.text = "ЛКМ: выбор/меню здания | ПКМ: приказ | B: стройка | Q/E: поворот | R: добыча"
 	controls_box.add_child(controls)
 
 	var unit_box := _panel(Vector2(16, 58), Vector2(300, 0))
+	unit_panel = unit_box.get_parent() as PanelContainer
 	unit_status = Label.new()
 	unit_status.text = "Юнит не выбран"
 	unit_box.add_child(unit_status)
 
-	var resource_panel := PanelContainer.new()
-	resource_panel.set_anchors_preset(Control.PRESET_TOP_RIGHT)
-	resource_panel.position = Vector2(-270, 16)
+	resource_panel = PanelContainer.new()
+	resource_panel.theme = interface_theme
+	resource_panel.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	resource_panel.position = Vector2(16, 16)
 	resource_panel.custom_minimum_size = Vector2(250, 0)
 	add_child(resource_panel)
 	var resource_box := VBoxContainer.new()
@@ -106,6 +117,7 @@ func _create_interface():
 	_update_auto_work_button()
 
 	menu = PanelContainer.new()
+	menu.theme = interface_theme
 	menu.position = Vector2(16, 220)
 	menu.visible = false
 	add_child(menu)
@@ -129,13 +141,18 @@ func _create_interface():
 
 func _create_building_panel():
 	building_panel = PanelContainer.new()
-	building_panel.set_anchors_preset(Control.PRESET_TOP_RIGHT)
-	building_panel.position = Vector2(-315, 190)
+	building_panel.theme = interface_theme
+	building_panel.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	building_panel.position = Vector2(16, 190)
 	building_panel.custom_minimum_size = Vector2(295, 0)
 	building_panel.visible = false
 	add_child(building_panel)
+	building_scroll = ScrollContainer.new()
+	building_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	building_scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	building_panel.add_child(building_scroll)
 	var box := VBoxContainer.new()
-	building_panel.add_child(box)
+	building_scroll.add_child(box)
 	var header := HBoxContainer.new()
 	box.add_child(header)
 	building_title = Label.new()
@@ -163,20 +180,26 @@ func _create_building_panel():
 	quota_hint.text = "Квоты хранения (всего не более 300)"
 	warehouse_settings.add_child(quota_hint)
 	for resource_type in Building.RESOURCE_TYPES:
-		var row := HBoxContainer.new()
+		var row := VBoxContainer.new()
 		warehouse_settings.add_child(row)
+		var row_header := HBoxContainer.new()
+		row.add_child(row_header)
 		var label := Label.new()
 		label.text = Building.RESOURCE_NAMES[resource_type]
-		label.custom_minimum_size.x = 125
-		row.add_child(label)
-		var spin := SpinBox.new()
-		spin.min_value = 0
-		spin.max_value = 300
-		spin.step = 5
-		spin.custom_minimum_size.x = 110
-		spin.value_changed.connect(_on_storage_quota_changed.bind(resource_type))
-		row.add_child(spin)
-		quota_spins[resource_type] = spin
+		label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		row_header.add_child(label)
+		var value_label := Label.new()
+		value_label.add_theme_color_override("font_color", SovereignUITheme.ACCENT_BRIGHT)
+		row_header.add_child(value_label)
+		var slider := HSlider.new()
+		slider.min_value = 0
+		slider.max_value = 300
+		slider.step = 1
+		slider.custom_minimum_size = Vector2(260, 18)
+		slider.value_changed.connect(_on_storage_quota_changed.bind(resource_type))
+		row.add_child(slider)
+		quota_sliders[resource_type] = slider
+		quota_value_labels[resource_type] = value_label
 
 	factory_settings = VBoxContainer.new()
 	box.add_child(factory_settings)
@@ -220,6 +243,65 @@ func _process(_delta: float):
 	if forming:
 		tactical_overlay.show_formation(_get_formation_positions(formation_start, world.get_global_mouse_position()))
 	_update_hud()
+	_update_responsive_layout()
+
+
+func _update_responsive_layout():
+	var viewport_size := get_viewport().get_visible_rect().size
+	var narrow := viewport_size.x < 760.0
+	var building_open := is_instance_valid(Building.selected_building)
+	var unit_open := is_instance_valid(Unit.get_selected_unit())
+	var margin := 8.0
+	var right_width := minf(315.0, viewport_size.x - margin * 2.0)
+
+	if narrow:
+		controls_panel.visible = false
+		if menu.visible:
+			resource_panel.visible = false
+			unit_panel.visible = false
+			building_panel.visible = false
+			menu.position = Vector2(margin, margin)
+			menu.custom_minimum_size.x = viewport_size.x - margin * 2.0
+			return
+
+		menu.custom_minimum_size.x = 0.0
+		if building_open:
+			resource_panel.visible = false
+			unit_panel.visible = false
+			building_panel.visible = true
+			building_panel.position = Vector2(viewport_size.x - right_width - margin, margin)
+			building_panel.custom_minimum_size.x = right_width
+			building_panel.size = Vector2(right_width, maxf(viewport_size.y - margin * 2.0, 0.0))
+		elif unit_open:
+			resource_panel.visible = false
+			building_panel.visible = false
+			unit_panel.visible = true
+			unit_panel.position = Vector2(margin, margin)
+			unit_panel.custom_minimum_size.x = viewport_size.x - margin * 2.0
+		else:
+			unit_panel.visible = false
+			building_panel.visible = false
+			resource_panel.visible = true
+			resource_panel.position = Vector2(viewport_size.x - right_width - margin, margin)
+			resource_panel.custom_minimum_size.x = right_width
+		return
+
+	controls_panel.visible = true
+	controls_panel.position = Vector2(16, 16)
+	unit_panel.visible = true
+	unit_panel.position = Vector2(16, 58)
+	unit_panel.custom_minimum_size.x = 300.0
+	resource_panel.visible = true
+	resource_panel.position = Vector2(viewport_size.x - right_width - 16.0, 16.0)
+	resource_panel.custom_minimum_size.x = right_width
+	menu.position = Vector2(16, 220)
+	menu.custom_minimum_size.x = 0.0
+	building_panel.visible = building_open
+	if building_open:
+		var building_top := resource_panel.position.y + resource_panel.size.y + 10.0
+		building_panel.position = Vector2(viewport_size.x - right_width - 16.0, building_top)
+		building_panel.custom_minimum_size.x = right_width
+		building_panel.size = Vector2(right_width, maxf(viewport_size.y - building_top - 8.0, 0.0))
 
 
 func _update_hud():
@@ -266,13 +348,18 @@ func _update_building_panel():
 	release_occupants_button.visible = building.is_completed() and (building.is_factory() or building.is_residence())
 	release_occupants_button.disabled = building.occupants.is_empty()
 	if warehouse_settings.visible:
-		building_status.text = "Занято %d/300" % building.get_total_stored()
+		var allocated := building.get_total_storage_limits()
+		building_status.text = "Занято %d/%d  •  Квоты %d/%d  •  Свободно %d" % [building.get_total_stored(), building.storage_capacity, allocated, building.storage_capacity, maxi(building.storage_capacity - allocated, 0)]
 		updating_building_controls = true
 		for resource_type in Building.RESOURCE_TYPES:
-			var spin: SpinBox = quota_spins[resource_type]
-			if not spin.get_line_edit().has_focus():
-				spin.value = building.get_storage_limit(resource_type)
-			spin.suffix = " (есть %d)" % building.get_stored_resource(resource_type)
+			var slider: HSlider = quota_sliders[resource_type]
+			var current_limit := building.get_storage_limit(resource_type)
+			var stored_amount := building.get_stored_resource(resource_type)
+			slider.min_value = 0
+			slider.max_value = building.storage_capacity
+			slider.value = current_limit
+			var value_label: Label = quota_value_labels[resource_type]
+			value_label.text = "квота %d  •  есть %d" % [current_limit, stored_amount]
 		updating_building_controls = false
 	elif factory_settings.visible:
 		building_status.text = "Работают %d/%d | рецепт: %s" % [building.occupants.size(), building.max_workers, building.get_recipe_name(building.selected_recipe)]
@@ -353,6 +440,12 @@ func _on_storage_quota_changed(value: float, resource_type: StringName):
 	var building := Building.selected_building
 	if is_instance_valid(building) and building.is_warehouse():
 		building.set_storage_limit(resource_type, int(value))
+		updating_building_controls = true
+		var slider: HSlider = quota_sliders[resource_type]
+		slider.value = building.get_storage_limit(resource_type)
+		var value_label: Label = quota_value_labels[resource_type]
+		value_label.text = "квота %d  •  есть %d" % [building.get_storage_limit(resource_type), building.get_stored_resource(resource_type)]
+		updating_building_controls = false
 
 
 func _on_recipe_selected(index: int):
@@ -556,6 +649,7 @@ func _begin_building_placement(scene: PackedScene):
 	building_rotation_offset = 0.0
 	selected_scene = scene
 	ghost = scene.instantiate() as Building
+	ghost.placement_preview = true
 	ghost.collision_layer = 0
 	ghost.collision_mask = 0
 	ghost.monitoring = false
@@ -611,6 +705,7 @@ func _place_building():
 	if not placement_valid or not is_instance_valid(snapped_road):
 		return
 	ghost.modulate = Color.WHITE
+	ghost.placement_preview = false
 	ghost.collision_layer = 1
 	ghost.collision_mask = 1
 	ghost.monitoring = true

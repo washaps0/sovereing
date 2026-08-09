@@ -11,9 +11,13 @@ config_version=5
 [application]
 
 config/name="Sovereing"
-run/main_scene="uid://b7ujr3dbqctcr"
+run/main_scene="res://scenes/main_menu.tscn"
 config/features=PackedStringArray("4.7", "GL Compatibility")
 config/icon="res://icon.svg"
+
+[autoload]
+
+SaveManager="*res://scripts/save/save_manager.gd"
 
 [display]
 

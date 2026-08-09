@@ -54,6 +54,7 @@ var status_label: Label
 var active_builders: Array[Unit] = []
 var selected_recipe: StringName = &"planks"
 var mouse_is_over := false
+var placement_preview := false
 
 @onready var building_sprite: Sprite2D = $Sprite2D
 
@@ -62,7 +63,7 @@ func _ready():
 	add_to_group("buildings")
 	if is_warehouse():
 		storage_capacity = 300
-		storage_limits = {&"wood": 120, &"stone": 100, &"planks": 40, &"tools": 40}
+		storage_limits = {&"wood": 40, &"stone": 200, &"planks": 40, &"tools": 20}
 	_create_progress_bar()
 	_create_address_label()
 	_create_status_label()
@@ -155,6 +156,7 @@ func _create_progress_bar():
 
 
 func begin_construction():
+	placement_preview = false
 	under_construction = true
 	delivered_wood = 0
 	delivered_stone = 0
@@ -223,7 +225,7 @@ func add_build_progress(delta: float):
 
 
 func is_completed() -> bool:
-	return not under_construction
+	return not placement_preview and not under_construction
 
 
 func get_interaction_radius() -> float:
@@ -309,6 +311,13 @@ func get_storage_limit(resource_type: StringName) -> int:
 	return int(storage_limits.get(resource_type, 0))
 
 
+func get_total_storage_limits() -> int:
+	var total := 0
+	for resource_type in RESOURCE_TYPES:
+		total += get_storage_limit(resource_type)
+	return total
+
+
 func set_storage_limit(resource_type: StringName, amount: int):
 	if not is_warehouse() or resource_type not in RESOURCE_TYPES:
 		return
@@ -316,7 +325,9 @@ func set_storage_limit(resource_type: StringName, amount: int):
 	for other_type in RESOURCE_TYPES:
 		if other_type != resource_type:
 			used_by_other_limits += get_storage_limit(other_type)
-	storage_limits[resource_type] = clampi(amount, 0, maxi(storage_capacity - used_by_other_limits, 0))
+	var stored_minimum := get_stored_resource(resource_type)
+	var available_maximum := maxi(storage_capacity - used_by_other_limits, stored_minimum)
+	storage_limits[resource_type] = clampi(amount, stored_minimum, available_maximum)
 
 
 func has_storage_space() -> bool:
@@ -399,7 +410,7 @@ func take_resource(resource_type: StringName, amount: int) -> int:
 
 func try_enter(unit: Unit) -> bool:
 	_cleanup_occupants()
-	if not is_completed() or (not is_factory() and not is_residence()):
+	if placement_preview or not is_completed() or (not is_factory() and not is_residence()):
 		return false
 	if unit in occupants:
 		return true

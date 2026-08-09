@@ -27,6 +27,8 @@ func _run():
 	assert(warehouse.get_stored_resource(&"tools") == 1)
 	warehouse.set_storage_limit(&"wood", 0)
 	assert(not warehouse.has_resource_space(&"wood"))
+	warehouse.set_storage_limit(&"planks", 300)
+	assert(warehouse.get_total_storage_limits() <= warehouse.storage_capacity)
 	var unit := preload("res://scenes/objects/unit.tscn").instantiate() as Unit
 	test_root.add_child(unit)
 	assert(not unit.unit_name.is_empty())
@@ -74,6 +76,11 @@ func _run():
 	rotation_world.add_child(rotation_roads)
 	var build_manager = preload("res://scripts/controls/build_manager.gd").new()
 	rotation_world.add_child(build_manager)
+	build_manager._begin_building_placement(preload("res://scenes/objects/buildings/residence.tscn"))
+	assert(build_manager.ghost.placement_preview)
+	assert(not build_manager.ghost.is_completed())
+	assert(not build_manager.ghost.try_enter(unit))
+	build_manager._cancel_building_placement()
 	var road := preload("res://scenes/objects/buildings/road.tscn").instantiate() as RoadSegment
 	road.global_position = Vector2(1100, 1100)
 	rotation_roads.add_child(road)
@@ -101,5 +108,52 @@ func _run():
 	build_manager._close_building_menu()
 	assert(not factory.get_factory_status_text().is_empty())
 	rotation_world.queue_free()
+
+	var save_world := _make_minimal_world()
+	var saved_warehouse := preload("res://scenes/objects/buildings/warehouse.tscn").instantiate() as Building
+	saved_warehouse.position = Vector2(120, 240)
+	save_world.get_node("buildings").add_child(saved_warehouse)
+	saved_warehouse.store_resource(&"wood", 25)
+	var saved_unit := preload("res://scenes/objects/unit.tscn").instantiate() as Unit
+	saved_unit.unit_name = "Тестовый житель"
+	saved_unit.position = Vector2(300, 320)
+	save_world.add_child(saved_unit)
+	var saved_tree = preload("res://scenes/objects/tree.tscn").instantiate()
+	saved_tree.position = Vector2(420, 440)
+	saved_tree.wood_amount = 7
+	save_world.get_node("trees").add_child(saved_tree)
+	var save_manager := root.get_node("SaveManager")
+	save_manager.current_seed = 24680
+	var test_save_name := "__sovereign_smoke_test__"
+	assert(save_manager.save_game(test_save_name, save_world).is_empty())
+	var saved_entry: Dictionary = {}
+	for entry in save_manager.list_saves():
+		if entry.get("name", "") == test_save_name:
+			saved_entry = entry
+			break
+	assert(not saved_entry.is_empty())
+	var saved_file: Dictionary = save_manager._read_save(str(saved_entry.path))
+	assert(saved_file.world.buildings.size() == 1)
+	assert(saved_file.world.units.size() == 1)
+	assert(saved_file.world.resources.size() == 1)
+	var restored_world := _make_minimal_world()
+	restored_world.apply_save_data(saved_file.world)
+	assert(restored_world.get_node("buildings").get_child_count() == 1)
+	assert(restored_world.get_node("trees").get_child_count() == 1)
+	assert(restored_world.get_tree().get_nodes_in_group("units").any(func(candidate): return restored_world.is_ancestor_of(candidate) and candidate.unit_name == "Тестовый житель"))
+	assert(save_manager.delete_save(str(saved_entry.path)))
+	save_world.queue_free()
+	restored_world.queue_free()
 	print("SMOKE_TEST_OK")
 	quit()
+
+
+func _make_minimal_world() -> Node2D:
+	var minimal_world = preload("res://scripts/land/generation.gd").new()
+	minimal_world.generate_world_on_ready = false
+	for node_name in ["ground", "trees", "rocks", "roads", "buildings"]:
+		var container := Node2D.new()
+		container.name = node_name
+		minimal_world.add_child(container)
+	root.add_child(minimal_world)
+	return minimal_world
