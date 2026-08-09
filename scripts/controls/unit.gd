@@ -1,22 +1,36 @@
 class_name Unit
 extends CharacterBody2D
 
-enum Task { IDLE, MOVE, HARVEST, BUILD, DELIVER_TO_WAREHOUSE, FETCH_FROM_WAREHOUSE }
+enum Task { IDLE, MOVE, HARVEST, BUILD, DELIVER_TO_WAREHOUSE, FETCH_FROM_WAREHOUSE, ENTER_BUILDING, FACTORY_WORK, REST }
 
 @export var speed := 100.0
 @export var carry_capacity := 10
 @export var interaction_distance := 20.0
 @export var harvest_interval := 0.5
+@export var unit_name := ""
+@export var max_health := 100
+@export var health := 100
+
+const UNIT_NAMES: Array[String] = [
+	"Алексей", "Борис", "Виктор", "Григорий", "Даниил", "Егор",
+	"Иван", "Кирилл", "Лев", "Максим", "Николай", "Олег",
+	"Павел", "Роман", "Семён", "Тимофей", "Фёдор", "Юрий",
+	"Анна", "Вера", "Дарья", "Елена", "Ирина", "Мария",
+	"Надежда", "Ольга", "Полина", "София", "Татьяна", "Юлия",
+]
 
 static var selected_unit: Unit
 static var selected_units: Array[Unit] = []
 static var continuous_harvest_mode := false
+static var auto_work_enabled := true
+static var next_name_index := 0
 
 var target_position := Vector2.ZERO
 var selected := false
 var task := Task.IDLE
 var carried_wood := 0
 var carried_stone := 0
+var profession := "Безработный"
 var harvest_resource_type: StringName = &"wood"
 var mining_job_resource_type: StringName = &"wood"
 var work_timer := 0.0
@@ -29,22 +43,38 @@ var build_job_kind := ""
 var path_points := PackedVector2Array()
 var path_index := 0
 var path_destination := Vector2(INF, INF)
+var inside_building: Building
+var idle_check_timer := 1.0
+var production_timer := 0.0
+var produced_items := 0
+var last_motion_position := Vector2.ZERO
+var stuck_timer := 0.0
 
 const PATH_CELL_SIZE := 32.0
 const PATH_MAP_SIZE := Vector2i(400, 400)
+const BUILDING_AVOIDANCE_WEIGHT := 9.0
 
 @onready var selection: Sprite2D = $selection
 
 
 func _ready():
 	add_to_group("units")
+	if unit_name.is_empty():
+		var base_name := UNIT_NAMES[next_name_index % UNIT_NAMES.size()]
+		var duplicate_number := next_name_index / UNIT_NAMES.size() + 1
+		unit_name = base_name if duplicate_number == 1 else "%s %d" % [base_name, duplicate_number]
+		next_name_index += 1
+	health = clampi(health, 0, max_health)
 	target_position = global_position
+	last_motion_position = global_position
 	selection.visible = false
 
 
 func _exit_tree():
 	if is_instance_valid(target_tree):
 		target_tree.stop_harvest(self)
+	if is_instance_valid(inside_building):
+		inside_building.leave(self)
 	_release_warehouse()
 
 
@@ -61,8 +91,15 @@ func _physics_process(delta: float):
 			_process_warehouse_delivery()
 		Task.FETCH_FROM_WAREHOUSE:
 			_process_warehouse_fetch()
+		Task.ENTER_BUILDING:
+			_process_enter_building()
+		Task.FACTORY_WORK:
+			_process_factory_work(delta)
+		Task.REST:
+			_process_rest(delta)
 		_:
-			velocity = Vector2.ZERO
+			_process_idle(delta)
+	_update_motion_recovery(delta)
 
 
 func _move_toward(destination: Vector2, stop_distance := 3.0) -> bool:
@@ -114,6 +151,31 @@ func _navigate_toward(destination: Vector2, stop_distance := 3.0) -> bool:
 	return _move_toward(destination, stop_distance)
 
 
+func _update_motion_recovery(delta: float):
+	var is_moving_task := task in [Task.MOVE, Task.HARVEST, Task.BUILD, Task.DELIVER_TO_WAREHOUSE, Task.FETCH_FROM_WAREHOUSE, Task.ENTER_BUILDING]
+	if not is_moving_task or is_instance_valid(inside_building) or velocity.is_zero_approx():
+		stuck_timer = 0.0
+		last_motion_position = global_position
+		return
+	if global_position.distance_to(last_motion_position) < 0.35:
+		stuck_timer += delta
+	else:
+		stuck_timer = 0.0
+		last_motion_position = global_position
+	if stuck_timer < 1.0:
+		return
+
+	# Перестраиваем маршрут и слегка смещаем юнита вбок, чтобы разорвать
+	# взаимную блокировку нескольких CharacterBody2D в узком проходе.
+	stuck_timer = 0.0
+	var desired := velocity.normalized()
+	if desired.is_zero_approx():
+		desired = global_position.direction_to(path_destination)
+	global_position += desired.orthogonal() * (10.0 if get_instance_id() % 2 == 0 else -10.0)
+	path_points = PackedVector2Array()
+	path_index = 0
+	path_destination = Vector2(INF, INF)
+	last_motion_position = global_position
 func _calculate_path(destination: Vector2):
 	path_destination = destination
 	var grid := AStarGrid2D.new()
@@ -129,22 +191,28 @@ func _calculate_path(destination: Vector2):
 		var collision := building.get_node_or_null("CollisionShape2D") as CollisionShape2D
 		if collision == null or collision.shape is not RectangleShape2D:
 			continue
-		var half_size: Vector2 = collision.shape.size * building.global_scale.abs() * 0.5 + Vector2.ONE * 12.0
-		var minimum := _world_to_cell(collision.global_position - half_size)
-		var maximum := _world_to_cell(collision.global_position + half_size)
+		var half_size: Vector2 = collision.shape.size * 0.5
+		var world_minimum := Vector2(INF, INF)
+		var world_maximum := Vector2(-INF, -INF)
+		for corner in [Vector2(-half_size.x, -half_size.y), Vector2(half_size.x, -half_size.y), Vector2(half_size.x, half_size.y), Vector2(-half_size.x, half_size.y)]:
+			var world_corner: Vector2 = collision.global_transform * corner
+			world_minimum = world_minimum.min(world_corner)
+			world_maximum = world_maximum.max(world_corner)
+		var minimum := _world_to_cell(world_minimum - Vector2.ONE * 12.0)
+		var maximum := _world_to_cell(world_maximum + Vector2.ONE * 12.0)
 		for x in range(minimum.x, maximum.x + 1):
 			for y in range(minimum.y, maximum.y + 1):
 				var cell := Vector2i(x, y)
 				if grid.region.has_point(cell):
-					grid.set_point_solid(cell, true)
+					grid.set_point_weight_scale(cell, BUILDING_AVOIDANCE_WEIGHT)
 
 	var start := _world_to_cell(global_position)
 	var finish := _world_to_cell(destination)
 	if not grid.region.has_point(start) or not grid.region.has_point(finish):
 		path_points = PackedVector2Array()
 		return
-	grid.set_point_solid(start, false)
-	grid.set_point_solid(finish, false)
+	grid.set_point_weight_scale(start, 1.0)
+	grid.set_point_weight_scale(finish, 1.0)
 	path_points = grid.get_point_path(start, finish)
 	path_index = 0
 
@@ -269,6 +337,188 @@ func _process_warehouse_fetch():
 	task = Task.BUILD
 
 
+func _process_idle(delta: float):
+	velocity = Vector2.ZERO
+	if not auto_work_enabled:
+		return
+	idle_check_timer -= delta
+	if idle_check_timer > 0.0:
+		return
+	idle_check_timer = 1.5 + float(get_instance_id() % 7) * 0.1
+	_assign_automatic_job(true)
+
+
+func _assign_automatic_job(allow_residence: bool) -> bool:
+	var construction := _find_auto_construction()
+	if is_instance_valid(construction):
+		command_build(construction)
+		return true
+
+	var factory := _find_available_factory()
+	if is_instance_valid(factory):
+		command_enter_building(factory)
+		return true
+
+	if allow_residence:
+		var residence := _find_available_residence()
+		if is_instance_valid(residence):
+			command_enter_building(residence)
+			return true
+	return false
+
+
+func _find_auto_construction() -> Building:
+	var nearest: Building
+	var nearest_distance := INF
+	for building in get_tree().get_nodes_in_group("buildings"):
+		if building is not Building or not building.under_construction:
+			continue
+		var limit: int = 1 if building.building_kind == "road" else building.max_builders
+		if building.active_builders.size() >= limit:
+			continue
+		var distance := global_position.distance_squared_to(building.global_position)
+		if distance < nearest_distance:
+			nearest_distance = distance
+			nearest = building
+	return nearest
+
+
+func _find_available_factory() -> Building:
+	var nearest: Building
+	var nearest_distance := INF
+	for building in get_tree().get_nodes_in_group("buildings"):
+		if building is not Building or not building.is_factory() or not building.is_completed():
+			continue
+		if building.occupants.size() >= building.max_workers or not building.can_produce_selected_recipe():
+			continue
+		var distance := global_position.distance_squared_to(building.global_position)
+		if distance < nearest_distance:
+			nearest_distance = distance
+			nearest = building
+	return nearest
+
+
+func _find_available_residence() -> Building:
+	var nearest: Building
+	var nearest_distance := INF
+	for building in get_tree().get_nodes_in_group("buildings"):
+		if building is not Building or not building.is_residence() or not building.is_completed():
+			continue
+		if building.occupants.size() >= building.max_occupants:
+			continue
+		var distance := global_position.distance_squared_to(building.global_position)
+		if distance < nearest_distance:
+			nearest_distance = distance
+			nearest = building
+	return nearest
+
+
+func _process_enter_building():
+	if not is_instance_valid(target_building) or not target_building.is_completed():
+		target_building = null
+		task = Task.IDLE
+		return
+	var entrance := target_building.get_approach_position(global_position)
+	if not _navigate_toward(entrance, 6.0):
+		return
+	if not target_building.try_enter(self):
+		target_building = null
+		task = Task.IDLE
+		return
+	inside_building = target_building
+	global_position = inside_building.global_position
+	velocity = Vector2.ZERO
+	visible = false
+	$CollisionShape2D.set_deferred("disabled", true)
+	if inside_building.is_factory():
+		production_timer = inside_building.get_production_time()
+		task = Task.FACTORY_WORK
+	else:
+		idle_check_timer = 2.0
+		task = Task.REST
+
+
+func _process_factory_work(delta: float):
+	velocity = Vector2.ZERO
+	if not is_instance_valid(inside_building) or not inside_building.is_factory():
+		_exit_current_building()
+		task = Task.IDLE
+		return
+	if not inside_building.can_produce_selected_recipe():
+		production_timer -= delta
+		if production_timer <= -2.0:
+			_exit_current_building()
+			task = Task.IDLE
+		return
+	production_timer -= delta
+	if production_timer > 0.0:
+		return
+	if inside_building.produce_selected_recipe():
+		produced_items += 1
+	production_timer = inside_building.get_production_time()
+
+
+func _process_rest(delta: float):
+	velocity = Vector2.ZERO
+	if not is_instance_valid(inside_building) or not inside_building.is_residence():
+		_exit_current_building()
+		task = Task.IDLE
+		return
+	if not auto_work_enabled:
+		return
+	idle_check_timer -= delta
+	if idle_check_timer > 0.0:
+		return
+	idle_check_timer = 2.0
+	if _has_automatic_work():
+		_exit_current_building()
+		task = Task.IDLE
+		_assign_automatic_job(false)
+
+
+func _has_automatic_work() -> bool:
+	return is_instance_valid(_find_auto_construction()) or is_instance_valid(_find_available_factory())
+
+
+func command_enter_building(building: Building):
+	_cancel_task()
+	if not is_instance_valid(building) or not building.is_completed():
+		return
+	if building.is_factory():
+		profession = "Рабочий завода"
+	target_building = building
+	path_destination = Vector2(INF, INF)
+	task = Task.ENTER_BUILDING
+
+
+func _exit_current_building():
+	if not is_instance_valid(inside_building):
+		inside_building = null
+		visible = true
+		$CollisionShape2D.set_deferred("disabled", false)
+		return
+	var building := inside_building
+	var exit_position := building.get_exit_position(self)
+	building.leave(self)
+	inside_building = null
+	global_position = exit_position
+	target_position = global_position
+	path_points = PackedVector2Array()
+	path_index = 0
+	path_destination = Vector2(INF, INF)
+	visible = true
+	$CollisionShape2D.set_deferred("disabled", false)
+	last_motion_position = global_position
+
+
+func force_exit_building(building: Building):
+	if inside_building != building:
+		return
+	_exit_current_building()
+	target_building = null
+	task = Task.IDLE
+
+
 func _start_next_tree():
 	var nearest_resource: Node2D = _find_nearest_resource(mining_job_resource_type)
 	if is_instance_valid(nearest_resource) and is_instance_valid(target_warehouse) and target_warehouse.has_resource_space(mining_job_resource_type):
@@ -357,6 +607,8 @@ func _get_collection_target(resource_type: StringName) -> int:
 
 
 func _cancel_task():
+	if is_instance_valid(inside_building):
+		_exit_current_building()
 	if is_instance_valid(target_tree):
 		target_tree.stop_harvest(self)
 	target_tree = null
@@ -377,15 +629,23 @@ func _release_warehouse():
 
 func command_move(destination: Vector2):
 	_cancel_task()
-	target_position = destination
-	_calculate_path(destination)
+	target_position = _get_reachable_destination(destination)
+	_calculate_path(target_position)
 	task = Task.MOVE
+
+
+func _get_reachable_destination(destination: Vector2) -> Vector2:
+	for building in get_tree().get_nodes_in_group("buildings"):
+		if building is Building and building.building_kind != "road" and building.contains_world_point(destination, 4.0):
+			return building.get_approach_position(global_position)
+	return destination
 
 
 func command_harvest(tree: Node2D):
 	_cancel_task()
 	harvest_resource_type = tree.get_resource_type()
 	mining_job_resource_type = harvest_resource_type
+	profession = "Каменотёс" if harvest_resource_type == &"stone" else "Лесоруб"
 	var warehouse := _find_free_warehouse(harvest_resource_type)
 	if continuous_harvest_mode and is_instance_valid(warehouse) and warehouse.assign_worker(self):
 		target_warehouse = warehouse
@@ -395,6 +655,7 @@ func command_harvest(tree: Node2D):
 
 func command_build(building: Building):
 	_cancel_task()
+	profession = "Строитель"
 	build_job_kind = building.building_kind
 	if building.try_assign_builder(self):
 		target_building = building
@@ -405,6 +666,7 @@ func command_build(building: Building):
 
 func command_build_line(segments: Array[Building]):
 	_cancel_task()
+	profession = "Строитель"
 	if not segments.is_empty():
 		build_job_kind = segments[0].building_kind
 	for segment in segments:
@@ -491,6 +753,7 @@ func _issue_context_command(mouse_position: Vector2):
 func select(additive := false):
 	if not additive:
 		clear_selection()
+	Building.selected_building = null
 	selected_unit = self
 	if self not in selected_units:
 		selected_units.append(self)
@@ -509,11 +772,18 @@ func deselect():
 func get_task_text() -> String:
 	match task:
 		Task.MOVE: return "Идёт"
-		Task.HARVEST: return "Рубит дерево"
+		Task.HARVEST: return "Добывает камень" if harvest_resource_type == &"stone" else "Рубит дерево"
 		Task.BUILD: return "Строит"
-		Task.DELIVER_TO_WAREHOUSE: return "Несёт древесину"
-		Task.FETCH_FROM_WAREHOUSE: return "Берёт древесину со склада"
+		Task.DELIVER_TO_WAREHOUSE: return "Несёт ресурс на склад"
+		Task.FETCH_FROM_WAREHOUSE: return "Берёт материал со склада"
+		Task.ENTER_BUILDING: return "Заходит в здание"
+		Task.FACTORY_WORK: return "Работает на заводе"
+		Task.REST: return "Находится дома"
 		_: return "Свободен"
+
+
+func get_profession_text() -> String:
+	return profession
 
 
 func get_carried_total() -> int:
@@ -553,6 +823,8 @@ static func clear_selection():
 
 static func set_selection(units: Array[Unit]):
 	clear_selection()
+	if not units.is_empty():
+		Building.selected_building = null
 	for unit in units:
 		if is_instance_valid(unit):
 			unit.selected = true

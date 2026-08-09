@@ -9,7 +9,13 @@ size = Vector2(65.333336, 32)
 [node name="fabric" type="Area2D" unique_id=732566616]
 scale = Vector2(1.5, 1.5)
 script = ExtResource("1_dp3xv")
-display_name = "Жилой дом"
+display_name = "Завод"
+building_kind = "factory"
+wood_required = 25
+stone_required = 10
+build_time = 10.0
+max_workers = 3
+max_occupants = 0
 
 [node name="Sprite2D" type="Sprite2D" parent="." unique_id=1570788124]
 scale = Vector2(1.5, 1.5)

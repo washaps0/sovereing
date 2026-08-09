@@ -2,6 +2,7 @@ extends CanvasLayer
 
 const RESIDENCE_SCENE := preload("res://scenes/objects/buildings/residence.tscn")
 const WAREHOUSE_SCENE := preload("res://scenes/objects/buildings/warehouse.tscn")
+const FACTORY_SCENE := preload("res://scenes/objects/buildings/fabric.tscn")
 const ROAD_SCENE := preload("res://scenes/objects/buildings/road.tscn")
 const STREET_NAMES: Array[String] = [
 	"Садовая", "Лесная", "Полевая", "Речная", "Озёрная",
@@ -21,6 +22,7 @@ var snapped_road: RoadSegment
 var unit_status: Label
 var resource_status: Label
 var mode_button: Button
+var auto_work_button: Button
 var street_input: LineEdit
 var road_mode := false
 var road_start: Variant = null
@@ -36,6 +38,20 @@ var selection_start := Vector2.ZERO
 var selection_additive := false
 var forming := false
 var formation_start := Vector2.ZERO
+var building_panel: PanelContainer
+var building_title: Label
+var building_status: Label
+var warehouse_settings: VBoxContainer
+var factory_settings: VBoxContainer
+var factory_diagnostic: Label
+var residents_settings: VBoxContainer
+var residents_list: VBoxContainer
+var quota_spins := {}
+var recipe_picker: OptionButton
+var release_occupants_button: Button
+var updating_building_controls := false
+var residents_list_key := ""
+var building_rotation_offset := 0.0
 
 @onready var world: Node2D = get_parent()
 @onready var buildings: Node2D = world.get_node("buildings")
@@ -63,10 +79,10 @@ func _panel(position: Vector2, minimum_size: Vector2) -> VBoxContainer:
 func _create_interface():
 	var controls_box := _panel(Vector2(16, 16), Vector2(360, 0))
 	var controls := Label.new()
-	controls.text = "ЛКМ: выбор | ПКМ: приказ | B: стройка | R: добыча"
+	controls.text = "ЛКМ: выбор/меню здания | ПКМ: приказ | B: стройка | Q/E: поворот | R: добыча"
 	controls_box.add_child(controls)
 
-	var unit_box := _panel(Vector2(16, 58), Vector2(250, 0))
+	var unit_box := _panel(Vector2(16, 58), Vector2(300, 0))
 	unit_status = Label.new()
 	unit_status.text = "Юнит не выбран"
 	unit_box.add_child(unit_status)
@@ -84,9 +100,13 @@ func _create_interface():
 	mode_button.pressed.connect(_toggle_harvest_mode)
 	resource_box.add_child(mode_button)
 	_update_mode_button()
+	auto_work_button = Button.new()
+	auto_work_button.pressed.connect(_toggle_auto_work)
+	resource_box.add_child(auto_work_button)
+	_update_auto_work_button()
 
 	menu = PanelContainer.new()
-	menu.position = Vector2(16, 105)
+	menu.position = Vector2(16, 220)
 	menu.visible = false
 	add_child(menu)
 	var build_box := VBoxContainer.new()
@@ -96,6 +116,7 @@ func _create_interface():
 	build_box.add_child(title)
 	_add_build_button(build_box, "Жилой дом — 10 дерева", RESIDENCE_SCENE)
 	_add_build_button(build_box, "Склад — 15 дерева", WAREHOUSE_SCENE)
+	_add_build_button(build_box, "Завод — 25 дерева, 10 камня", FACTORY_SCENE)
 	street_input = LineEdit.new()
 	street_input.placeholder_text = "Название улицы (пусто = автоматически)"
 	build_box.add_child(street_input)
@@ -103,6 +124,82 @@ func _create_interface():
 	road_button.text = "Построить дорогу линией"
 	road_button.pressed.connect(_begin_road_mode)
 	build_box.add_child(road_button)
+	_create_building_panel()
+
+
+func _create_building_panel():
+	building_panel = PanelContainer.new()
+	building_panel.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	building_panel.position = Vector2(-315, 190)
+	building_panel.custom_minimum_size = Vector2(295, 0)
+	building_panel.visible = false
+	add_child(building_panel)
+	var box := VBoxContainer.new()
+	building_panel.add_child(box)
+	var header := HBoxContainer.new()
+	box.add_child(header)
+	building_title = Label.new()
+	building_title.add_theme_font_size_override("font_size", 18)
+	building_title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	header.add_child(building_title)
+	var close_button := Button.new()
+	close_button.text = "✕"
+	close_button.tooltip_text = "Закрыть меню здания"
+	close_button.pressed.connect(_close_building_menu)
+	header.add_child(close_button)
+	building_status = Label.new()
+	box.add_child(building_status)
+	residents_settings = VBoxContainer.new()
+	box.add_child(residents_settings)
+	var residents_title := Label.new()
+	residents_title.text = "Жильцы (нажмите для выбора):"
+	residents_settings.add_child(residents_title)
+	residents_list = VBoxContainer.new()
+	residents_settings.add_child(residents_list)
+
+	warehouse_settings = VBoxContainer.new()
+	box.add_child(warehouse_settings)
+	var quota_hint := Label.new()
+	quota_hint.text = "Квоты хранения (всего не более 300)"
+	warehouse_settings.add_child(quota_hint)
+	for resource_type in Building.RESOURCE_TYPES:
+		var row := HBoxContainer.new()
+		warehouse_settings.add_child(row)
+		var label := Label.new()
+		label.text = Building.RESOURCE_NAMES[resource_type]
+		label.custom_minimum_size.x = 125
+		row.add_child(label)
+		var spin := SpinBox.new()
+		spin.min_value = 0
+		spin.max_value = 300
+		spin.step = 5
+		spin.custom_minimum_size.x = 110
+		spin.value_changed.connect(_on_storage_quota_changed.bind(resource_type))
+		row.add_child(spin)
+		quota_spins[resource_type] = spin
+
+	factory_settings = VBoxContainer.new()
+	box.add_child(factory_settings)
+	var recipe_label := Label.new()
+	recipe_label.text = "Производить:"
+	factory_settings.add_child(recipe_label)
+	recipe_picker = OptionButton.new()
+	for recipe_type in Building.FACTORY_RECIPES:
+		recipe_picker.add_item(Building.FACTORY_RECIPES[recipe_type]["name"])
+		recipe_picker.set_item_metadata(recipe_picker.item_count - 1, recipe_type)
+	recipe_picker.item_selected.connect(_on_recipe_selected)
+	factory_settings.add_child(recipe_picker)
+	var recipes_hint := Label.new()
+	recipes_hint.text = "Доски: 2 дерева\nИнструменты: 1 дерево + 2 камня"
+	factory_settings.add_child(recipes_hint)
+	factory_diagnostic = Label.new()
+	factory_diagnostic.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	factory_diagnostic.custom_minimum_size.x = 270
+	factory_settings.add_child(factory_diagnostic)
+	release_occupants_button = Button.new()
+	release_occupants_button.text = "Выпустить всех юнитов"
+	release_occupants_button.pressed.connect(_release_selected_building_occupants)
+	box.add_child(release_occupants_button)
 
 
 func _add_build_button(box: VBoxContainer, text: String, scene: PackedScene):
@@ -128,22 +225,159 @@ func _process(_delta: float):
 func _update_hud():
 	var unit := Unit.get_selected_unit()
 	if is_instance_valid(unit):
-		unit_status.text = "%s | дерево %d, камень %d | груз %d/%d" % [unit.get_task_text(), unit.carried_wood, unit.carried_stone, unit.get_carried_total(), unit.carry_capacity]
+		unit_status.text = "Имя: %s\nЗдоровье: %d/%d\nПрофессия: %s\nСейчас: %s\nГруз: дерево %d, камень %d (%d/%d)\nПроизведено предметов: %d" % [unit.unit_name, unit.health, unit.max_health, unit.get_profession_text(), unit.get_task_text(), unit.carried_wood, unit.carried_stone, unit.get_carried_total(), unit.carry_capacity, unit.produced_items]
 	else:
 		unit_status.text = "Юнит не выбран"
 	var wood := 0
 	var stone := 0
+	var planks := 0
+	var tools := 0
+	var total_capacity := 0
 	var workers := 0
+	var factory_workers := 0
 	for building in get_tree().get_nodes_in_group("buildings"):
 		if building is Building and building.is_warehouse() and building.is_completed():
 			wood += building.stored_wood
 			stone += building.stored_stone
+			planks += building.get_stored_resource(&"planks")
+			tools += building.get_stored_resource(&"tools")
+			total_capacity += building.storage_capacity
 			workers += building.assigned_workers.size()
-	resource_status.text = "Ресурсы\nДерево: %d   Камень: %d\nРабочие на добыче: %d" % [wood, stone, workers]
+		elif building is Building and building.is_factory() and building.is_completed():
+			factory_workers += building.occupants.size()
+	resource_status.text = "Ресурсы: %d/%d\nДерево %d | Камень %d\nДоски %d | Инструменты %d\nДобыча %d | Заводы %d" % [wood + stone + planks + tools, total_capacity, wood, stone, planks, tools, workers, factory_workers]
+	_update_building_panel()
+
+
+func _update_building_panel():
+	var building := Building.selected_building
+	if not is_instance_valid(building):
+		building_panel.visible = false
+		return
+	building_panel.visible = true
+	building_title.text = building.address if not building.address.is_empty() else building.display_name
+	if building.under_construction:
+		building_status.text = "Строится: дерево %d/%d, камень %d/%d" % [building.delivered_wood, building.wood_required, building.delivered_stone, building.stone_required]
+	else:
+		building_status.text = "Готово"
+	warehouse_settings.visible = building.is_warehouse() and building.is_completed()
+	factory_settings.visible = building.is_factory() and building.is_completed()
+	residents_settings.visible = building.is_residence() and building.is_completed()
+	release_occupants_button.visible = building.is_completed() and (building.is_factory() or building.is_residence())
+	release_occupants_button.disabled = building.occupants.is_empty()
+	if warehouse_settings.visible:
+		building_status.text = "Занято %d/300" % building.get_total_stored()
+		updating_building_controls = true
+		for resource_type in Building.RESOURCE_TYPES:
+			var spin: SpinBox = quota_spins[resource_type]
+			if not spin.get_line_edit().has_focus():
+				spin.value = building.get_storage_limit(resource_type)
+			spin.suffix = " (есть %d)" % building.get_stored_resource(resource_type)
+		updating_building_controls = false
+	elif factory_settings.visible:
+		building_status.text = "Работают %d/%d | рецепт: %s" % [building.occupants.size(), building.max_workers, building.get_recipe_name(building.selected_recipe)]
+		factory_diagnostic.text = building.get_factory_status_text()
+		updating_building_controls = true
+		for index in range(recipe_picker.item_count):
+			if StringName(recipe_picker.get_item_metadata(index)) == building.selected_recipe:
+				recipe_picker.select(index)
+				break
+		updating_building_controls = false
+	elif building.is_residence() and building.is_completed():
+		building_status.text = "Жильцы %d/%d" % [building.occupants.size(), building.max_occupants]
+		_update_residents_list(building)
+
+
+func _update_residents_list(building: Building):
+	var new_key := str(building.get_instance_id())
+	for unit in building.occupants:
+		if is_instance_valid(unit):
+			new_key += ":%d:%d:%d" % [unit.get_instance_id(), unit.health, unit.task]
+	if new_key == residents_list_key:
+		return
+	residents_list_key = new_key
+	for child in residents_list.get_children():
+		child.queue_free()
+	if building.occupants.is_empty():
+		var empty_label := Label.new()
+		empty_label.text = "Дом пока пуст"
+		residents_list.add_child(empty_label)
+		return
+	for unit in building.occupants:
+		if not is_instance_valid(unit):
+			continue
+		var resident_button := Button.new()
+		resident_button.text = "%s — %s, здоровье %d/%d" % [unit.unit_name, unit.get_profession_text(), unit.health, unit.max_health]
+		resident_button.pressed.connect(_select_resident.bind(unit))
+		residents_list.add_child(resident_button)
+
+
+func _select_resident(unit: Unit):
+	if not is_instance_valid(unit):
+		return
+	Building.selected_building = null
+	var units: Array[Unit] = [unit]
+	Unit.set_selection(units)
+
+
+func _try_open_building_menu(point: Vector2) -> bool:
+	var query := PhysicsPointQueryParameters2D.new()
+	query.position = point
+	query.collide_with_areas = true
+	query.collide_with_bodies = false
+	query.collision_mask = 1
+	for hit in world.get_world_2d().direct_space_state.intersect_point(query, 32):
+		if hit.collider is Building and hit.collider.building_kind in ["warehouse", "residence", "factory"]:
+			_open_building_menu(hit.collider)
+			return true
+	return false
+
+
+func _open_building_menu(building: Building):
+	if not is_instance_valid(building):
+		return
+	Unit.clear_selection()
+	Building.selected_building = building
+	residents_list_key = ""
+	_update_building_panel()
+
+
+func _close_building_menu():
+	Building.selected_building = null
+	building_panel.visible = false
+
+
+func _on_storage_quota_changed(value: float, resource_type: StringName):
+	if updating_building_controls:
+		return
+	var building := Building.selected_building
+	if is_instance_valid(building) and building.is_warehouse():
+		building.set_storage_limit(resource_type, int(value))
+
+
+func _on_recipe_selected(index: int):
+	if updating_building_controls:
+		return
+	var building := Building.selected_building
+	if is_instance_valid(building) and building.is_factory():
+		building.set_recipe(StringName(recipe_picker.get_item_metadata(index)))
+
+
+func _release_selected_building_occupants():
+	var building := Building.selected_building
+	if not is_instance_valid(building):
+		return
+	for unit in building.occupants.duplicate():
+		if is_instance_valid(unit):
+			unit.force_exit_building(building)
 
 
 func _input(event: InputEvent):
 	if event is InputEventKey and event.pressed and not event.echo:
+		if is_instance_valid(ghost) and event.keycode in [KEY_Q, KEY_E]:
+			_rotate_building_preview(-PI * 0.5 if event.keycode == KEY_Q else PI * 0.5)
+			get_viewport().set_input_as_handled()
+			return
 		if event.keycode == KEY_R:
 			_toggle_harvest_mode()
 			get_viewport().set_input_as_handled()
@@ -170,6 +404,10 @@ func _input(event: InputEvent):
 			_place_building()
 		elif event.button_index == MOUSE_BUTTON_RIGHT:
 			_cancel_building_placement()
+		elif event.button_index == MOUSE_BUTTON_WHEEL_UP:
+			_rotate_building_preview(-PI * 0.5)
+		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+			_rotate_building_preview(PI * 0.5)
 		get_viewport().set_input_as_handled()
 		return
 
@@ -192,7 +430,11 @@ func _handle_tactical_release(event: InputEventMouseButton):
 	if event.button_index == MOUSE_BUTTON_LEFT and selecting:
 		selecting = false
 		tactical_overlay.hide_selection()
-		_apply_box_selection(selection_start, world.get_global_mouse_position(), selection_additive)
+		var finish := world.get_global_mouse_position()
+		if selection_start.distance_to(finish) < 8.0 and not _has_visible_unit_at(finish) and _try_open_building_menu(finish):
+			get_viewport().set_input_as_handled()
+			return
+		_apply_box_selection(selection_start, finish, selection_additive)
 		get_viewport().set_input_as_handled()
 	elif event.button_index == MOUSE_BUTTON_RIGHT and forming:
 		forming = false
@@ -206,6 +448,13 @@ func _handle_tactical_release(event: InputEventMouseButton):
 			for index in range(mini(units.size(), points.size())):
 				units[index].command_move(points[index])
 		get_viewport().set_input_as_handled()
+
+
+func _has_visible_unit_at(point: Vector2) -> bool:
+	for unit in get_tree().get_nodes_in_group("units"):
+		if unit is Unit and unit.visible and unit.global_position.distance_to(point) <= 16.0:
+			return true
+	return false
 
 
 func _apply_box_selection(from: Vector2, to: Vector2, additive: bool):
@@ -257,6 +506,11 @@ func _issue_group_context_command(point: Vector2) -> bool:
 			for unit in Unit.get_selected_units():
 				unit.command_build(hit.collider)
 			return true
+	for hit in hits:
+		if hit.collider is Building and hit.collider.is_completed() and (hit.collider.is_factory() or hit.collider.is_residence()):
+			for unit in Unit.get_selected_units():
+				unit.command_enter_building(hit.collider)
+			return true
 	if Unit.continuous_harvest_mode:
 		var selected_resource: Node2D
 		var nearest_distance := INF
@@ -282,8 +536,24 @@ func _update_mode_button():
 	mode_button.text = "Добыча ИИ: ВКЛ (R)" if Unit.continuous_harvest_mode else "Добыча ИИ: ВЫКЛ (R)"
 
 
+func _toggle_auto_work():
+	Unit.auto_work_enabled = not Unit.auto_work_enabled
+	if not Unit.auto_work_enabled:
+		for building in get_tree().get_nodes_in_group("buildings"):
+			if building is Building and building.is_residence():
+				for unit in building.occupants.duplicate():
+					if is_instance_valid(unit):
+						unit.force_exit_building(building)
+	_update_auto_work_button()
+
+
+func _update_auto_work_button():
+	auto_work_button.text = "Авторабота: ВКЛ" if Unit.auto_work_enabled else "Авторабота: ВЫКЛ"
+
+
 func _begin_building_placement(scene: PackedScene):
 	_cancel_all_placement()
+	building_rotation_offset = 0.0
 	selected_scene = scene
 	ghost = scene.instantiate() as Building
 	ghost.collision_layer = 0
@@ -298,6 +568,7 @@ func _snap_building_to_road(mouse_position: Vector2):
 	snapped_road = _nearest_road(mouse_position, 100.0)
 	if not is_instance_valid(snapped_road):
 		ghost.global_position = mouse_position
+		ghost.rotation = building_rotation_offset
 		return
 	var direction: Vector2 = Vector2.RIGHT.rotated(snapped_road.rotation)
 	var perpendicular := Vector2(-direction.y, direction.x)
@@ -306,6 +577,16 @@ func _snap_building_to_road(mouse_position: Vector2):
 	if side == 0.0:
 		side = 1.0
 	ghost.global_position = snapped_road.global_position + direction * along + perpendicular * 40.0 * side
+	# Нулевая ориентация здания смотрит входом вниз. Поэтому здание над
+	# дорогой повторяет её угол, а здание под дорогой разворачивается на 180°.
+	var automatic_rotation := snapped_road.rotation + (PI if side > 0.0 else 0.0)
+	ghost.rotation = wrapf(automatic_rotation + building_rotation_offset, -PI, PI)
+
+
+func _rotate_building_preview(angle: float):
+	building_rotation_offset = wrapf(building_rotation_offset + angle, -PI, PI)
+	if is_instance_valid(ghost):
+		_snap_building_to_road(world.get_global_mouse_position())
 
 
 func _update_placement_validity():
@@ -499,6 +780,7 @@ func _cancel_building_placement():
 		ghost.queue_free()
 	ghost = null
 	selected_scene = null
+	building_rotation_offset = 0.0
 
 
 func _cancel_road_mode():

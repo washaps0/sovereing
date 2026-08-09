@@ -13,7 +13,7 @@ display_name = "Склад"
 building_kind = "warehouse"
 wood_required = 15
 build_time = 7.0
-storage_capacity = 100
+storage_capacity = 300
 max_workers = 3
 
 [node name="Sprite2D" type="Sprite2D" parent="." unique_id=1570788124]
