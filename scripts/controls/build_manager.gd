@@ -30,6 +30,12 @@ var street_counter := 1
 var used_street_names := {}
 var house_numbers := {}
 var naming_rng := RandomNumberGenerator.new()
+var tactical_overlay: TacticalOverlay
+var selecting := false
+var selection_start := Vector2.ZERO
+var selection_additive := false
+var forming := false
+var formation_start := Vector2.ZERO
 
 @onready var world: Node2D = get_parent()
 @onready var buildings: Node2D = world.get_node("buildings")
@@ -38,6 +44,9 @@ var naming_rng := RandomNumberGenerator.new()
 
 func _ready():
 	naming_rng.randomize()
+	tactical_overlay = TacticalOverlay.new()
+	tactical_overlay.z_index = 100
+	world.add_child.call_deferred(tactical_overlay)
 	_create_interface()
 
 
@@ -109,6 +118,10 @@ func _process(_delta: float):
 		_update_placement_validity()
 	if road_mode and road_start != null and is_instance_valid(road_preview):
 		road_preview.points = PackedVector2Array([road_start, _snap_road_axis(road_start, world.get_global_mouse_position())])
+	if selecting:
+		tactical_overlay.show_selection(selection_start, world.get_global_mouse_position())
+	if forming:
+		tactical_overlay.show_formation(_get_formation_positions(formation_start, world.get_global_mouse_position()))
 	_update_hud()
 
 
@@ -142,6 +155,8 @@ func _input(event: InputEvent):
 			return
 
 	if event is not InputEventMouseButton or not event.pressed:
+		if event is InputEventMouseButton and not event.pressed:
+			_handle_tactical_release(event)
 		return
 	if road_mode:
 		if event.button_index == MOUSE_BUTTON_LEFT:
@@ -156,6 +171,106 @@ func _input(event: InputEvent):
 		elif event.button_index == MOUSE_BUTTON_RIGHT:
 			_cancel_building_placement()
 		get_viewport().set_input_as_handled()
+		return
+
+	if get_viewport().gui_get_hovered_control() != null:
+		return
+	if event.button_index == MOUSE_BUTTON_LEFT:
+		selecting = true
+		selection_start = world.get_global_mouse_position()
+		selection_additive = event.shift_pressed
+		tactical_overlay.show_selection(selection_start, selection_start)
+		get_viewport().set_input_as_handled()
+	elif event.button_index == MOUSE_BUTTON_RIGHT and not Unit.get_selected_units().is_empty():
+		forming = true
+		formation_start = world.get_global_mouse_position()
+		tactical_overlay.show_formation(_get_formation_positions(formation_start, formation_start))
+		get_viewport().set_input_as_handled()
+
+
+func _handle_tactical_release(event: InputEventMouseButton):
+	if event.button_index == MOUSE_BUTTON_LEFT and selecting:
+		selecting = false
+		tactical_overlay.hide_selection()
+		_apply_box_selection(selection_start, world.get_global_mouse_position(), selection_additive)
+		get_viewport().set_input_as_handled()
+	elif event.button_index == MOUSE_BUTTON_RIGHT and forming:
+		forming = false
+		var finish := world.get_global_mouse_position()
+		var points := _get_formation_positions(formation_start, finish)
+		tactical_overlay.hide_formation()
+		if formation_start.distance_to(finish) < 10.0 and _issue_group_context_command(formation_start):
+			pass
+		else:
+			var units := Unit.get_selected_units()
+			for index in range(mini(units.size(), points.size())):
+				units[index].command_move(points[index])
+		get_viewport().set_input_as_handled()
+
+
+func _apply_box_selection(from: Vector2, to: Vector2, additive: bool):
+	var selected: Array[Unit] = []
+	if additive:
+		for already_selected in Unit.get_selected_units():
+			selected.append(already_selected)
+	var rect := Rect2(from, to - from).abs()
+	if rect.size.length() < 8.0:
+		for unit in get_tree().get_nodes_in_group("units"):
+			if unit.global_position.distance_to(to) <= 16.0:
+				if unit not in selected:
+					selected.append(unit)
+				break
+	else:
+		for unit in get_tree().get_nodes_in_group("units"):
+			if rect.has_point(unit.global_position) and unit not in selected:
+				selected.append(unit)
+	Unit.set_selection(selected)
+
+
+func _get_formation_positions(origin: Vector2, drag_end: Vector2) -> Array[Vector2]:
+	var count := Unit.get_selected_units().size()
+	var result: Array[Vector2] = []
+	var drag := drag_end - origin
+	if drag.length() >= 20.0:
+		var direction := drag.normalized()
+		var spacing := 0.0 if count <= 1 else drag.length() / float(count - 1)
+		for index in range(count):
+			result.append(origin + direction * spacing * index)
+	else:
+		var columns := maxi(1, ceili(sqrt(float(count))))
+		var rows := ceili(float(count) / columns)
+		for index in range(count):
+			var column := index % columns
+			var row := index / columns
+			result.append(origin + Vector2((column - (columns - 1) * 0.5) * 18.0, (row - (rows - 1) * 0.5) * 18.0))
+	return result
+
+
+func _issue_group_context_command(point: Vector2) -> bool:
+	var query := PhysicsPointQueryParameters2D.new()
+	query.position = point
+	query.collide_with_areas = true
+	query.collide_with_bodies = true
+	var hits := world.get_world_2d().direct_space_state.intersect_point(query, 32)
+	for hit in hits:
+		if hit.collider is Building and hit.collider.under_construction:
+			for unit in Unit.get_selected_units():
+				unit.command_build(hit.collider)
+			return true
+	if Unit.continuous_harvest_mode:
+		var selected_resource: Node2D
+		var nearest_distance := INF
+		for hit in hits:
+			if hit.collider is Node and hit.collider.is_in_group("resources"):
+				var distance: float = point.distance_squared_to(hit.collider.global_position)
+				if distance < nearest_distance:
+					nearest_distance = distance
+					selected_resource = hit.collider
+		if is_instance_valid(selected_resource):
+			for unit in Unit.get_selected_units():
+				unit.command_harvest(selected_resource)
+			return true
+	return false
 
 
 func _toggle_harvest_mode():
@@ -278,8 +393,7 @@ func _create_road_line(start: Vector2, end: Vector2):
 		_clear_resources_for_shape(segment.get_node("CollisionShape2D"))
 		segment.begin_construction()
 		segments.append(segment)
-	var builder := Unit.get_selected_unit()
-	if is_instance_valid(builder):
+	for builder in Unit.get_selected_units():
 		builder.command_build_line(segments)
 
 

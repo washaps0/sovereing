@@ -4,7 +4,7 @@
 [ext_resource type="Texture2D" uid="uid://cf1lyt3rinyto" path="res://assets/objects/buildings/fabric.png" id="2_dp3xv"]
 
 [sub_resource type="RectangleShape2D" id="RectangleShape2D_qu7ja"]
-size = Vector2(43.333332, 19.166666)
+size = Vector2(65.333336, 32)
 
 [node name="fabric" type="Area2D" unique_id=732566616]
 scale = Vector2(1.5, 1.5)
@@ -12,8 +12,9 @@ script = ExtResource("1_dp3xv")
 display_name = "Жилой дом"
 
 [node name="Sprite2D" type="Sprite2D" parent="." unique_id=1570788124]
+scale = Vector2(1.5, 1.5)
 texture = ExtResource("2_dp3xv")
 
 [node name="CollisionShape2D" type="CollisionShape2D" parent="." unique_id=1407389209]
-position = Vector2(-3.973643e-07, -0.416667)
+position = Vector2(1.2715658e-06, 6.357829e-07)
 shape = SubResource("RectangleShape2D_qu7ja")

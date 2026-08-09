@@ -6,6 +6,7 @@
 size = Vector2(28, 28)
 
 [node name="tree" type="Area2D" unique_id=1635939362]
+collision_mask = 2
 script = ExtResource("1_tree")
 
 [node name="Sprite2D" type="Sprite2D" parent="." unique_id=1871621905]

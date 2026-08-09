@@ -10,6 +10,8 @@ radius = 9.0
 [node name="unit" type="CharacterBody2D" unique_id=1967091442]
 scale = Vector2(0.8, 0.8)
 input_pickable = true
+collision_layer = 2
+collision_mask = 1
 script = ExtResource("1_a08q0")
 
 [node name="CollisionShape2D" type="CollisionShape2D" parent="." unique_id=1279065553]

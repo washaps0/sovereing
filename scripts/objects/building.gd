@@ -19,6 +19,9 @@ var assigned_workers: Array[Unit] = []
 var progress_bar: WorldProgressBar
 var address := ""
 var address_label: Label
+var physical_body: StaticBody2D
+var physical_collision: CollisionShape2D
+var active_builders: Array[Unit] = []
 
 @onready var building_sprite: Sprite2D = $Sprite2D
 
@@ -27,6 +30,25 @@ func _ready():
 	add_to_group("buildings")
 	_create_progress_bar()
 	_create_address_label()
+	_create_physical_collision()
+
+
+func _create_physical_collision():
+	if building_kind == "road":
+		return
+	var source := get_node_or_null("CollisionShape2D") as CollisionShape2D
+	if source == null or source.shape == null:
+		return
+	physical_body = StaticBody2D.new()
+	physical_body.collision_layer = 1
+	physical_body.collision_mask = 1
+	physical_collision = CollisionShape2D.new()
+	physical_collision.position = source.position
+	physical_collision.rotation = source.rotation
+	physical_collision.shape = source.shape
+	physical_collision.disabled = true
+	physical_body.add_child(physical_collision)
+	add_child(physical_body)
 
 
 func _create_address_label():
@@ -63,6 +85,8 @@ func begin_construction():
 	build_progress = 0.0
 	progress_bar.visible = true
 	_update_visuals()
+	if is_instance_valid(physical_collision):
+		physical_collision.set_deferred("disabled", false)
 
 
 func _input_event(_viewport: Node, event: InputEvent, _shape_idx: int):
@@ -112,10 +136,46 @@ func add_build_progress(delta: float):
 		under_construction = false
 		building_sprite.modulate.a = 1.0
 		progress_bar.visible = false
+		if is_instance_valid(physical_collision):
+			physical_collision.set_deferred("disabled", false)
 
 
 func is_completed() -> bool:
 	return not under_construction
+
+
+func get_interaction_radius() -> float:
+	var collision := get_node_or_null("CollisionShape2D") as CollisionShape2D
+	if collision != null and collision.shape is RectangleShape2D:
+		return maxf(collision.shape.size.x * absf(global_scale.x), collision.shape.size.y * absf(global_scale.y)) * 0.5 + 10.0
+	return 24.0
+
+
+func get_approach_position(from: Vector2) -> Vector2:
+	var direction := global_position.direction_to(from)
+	if direction.is_zero_approx():
+		direction = Vector2.DOWN
+	return global_position + direction * get_interaction_radius()
+
+
+func try_assign_builder(unit: Unit) -> bool:
+	_cleanup_builders()
+	if unit in active_builders:
+		return true
+	if building_kind == "road" and not active_builders.is_empty():
+		return false
+	active_builders.append(unit)
+	return true
+
+
+func release_builder(unit: Unit):
+	active_builders.erase(unit)
+
+
+func _cleanup_builders():
+	for index in range(active_builders.size() - 1, -1, -1):
+		if not is_instance_valid(active_builders[index]):
+			active_builders.remove_at(index)
 
 
 func is_warehouse() -> bool:

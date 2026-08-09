@@ -4,7 +4,7 @@
 [ext_resource type="Script" uid="uid://dygb2sujx2rvw" path="res://scripts/objects/building.gd" id="2_building"]
 
 [sub_resource type="RectangleShape2D" id="RectangleShape2D_qu7ja"]
-size = Vector2(31.666666, 19.166666)
+size = Vector2(48, 30)
 
 [node name="warehouse" type="Area2D" unique_id=732566616]
 scale = Vector2(1.5, 1.5)
@@ -17,8 +17,9 @@ storage_capacity = 100
 max_workers = 3
 
 [node name="Sprite2D" type="Sprite2D" parent="." unique_id=1570788124]
+scale = Vector2(1.5, 1.5)
 texture = ExtResource("1_gdsal")
 
 [node name="CollisionShape2D" type="CollisionShape2D" parent="." unique_id=1407389209]
-position = Vector2(-3.973643e-07, -0.416667)
+position = Vector2(0, -0.33333397)
 shape = SubResource("RectangleShape2D_qu7ja")
