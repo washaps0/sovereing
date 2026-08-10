@@ -1,0 +1,24 @@
+[gd_scene load_steps=4 format=3]
+
+[ext_resource type="Script" path="res://scripts/objects/government.gd" id="1_government"]
+[ext_resource type="Texture2D" uid="uid://cap16ukiu2g0x" path="res://assets/objects/buildings/goverment.png" id="2_government"]
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_government"]
+size = Vector2(44, 21)
+
+[node name="government" type="Area2D"]
+scale = Vector2(1.5, 1.5)
+script = ExtResource("1_government")
+display_name = "Правительство"
+building_kind = "government"
+wood_required = 30
+stone_required = 20
+build_time = 12.0
+max_occupants = 0
+
+[node name="Sprite2D" type="Sprite2D" parent="."]
+scale = Vector2(1.5, 1.5)
+texture = ExtResource("2_government")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="."]
+shape = SubResource("RectangleShape2D_government")

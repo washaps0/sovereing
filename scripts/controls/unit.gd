@@ -25,6 +25,8 @@ const UNIT_NAMES: Array[String] = [
 	"Анна", "Вера", "Дарья", "Елена", "Ирина", "Мария",
 	"Надежда", "Ольга", "Полина", "София", "Татьяна", "Юлия",
 ]
+const FOOD_CONSUMPTION_INTERVAL := 45.0
+const STARVATION_DAMAGE := 10
 
 static var selected_unit: Unit
 static var selected_units: Array[Unit] = []
@@ -54,6 +56,8 @@ var inside_building: Building
 var idle_check_timer := 1.0
 var production_timer := 0.0
 var produced_items := 0
+var food_timer := FOOD_CONSUMPTION_INTERVAL
+var missed_meals := 0
 var last_motion_position := Vector2.ZERO
 var stuck_timer := 0.0
 var simulation_lod := SimulationLOD.FULL
@@ -129,6 +133,9 @@ func _exit_tree():
 func _physics_process(delta: float):
 	if simulation_lod != SimulationLOD.FULL:
 		return
+	_process_food_needs(delta)
+	if health <= 0:
+		return
 	match task:
 		Task.MOVE:
 			if _follow_path():
@@ -184,6 +191,9 @@ func simulate_lod(delta: float):
 	# теми же, поэтому возврат камеры не пересоздаёт и не разбрасывает людей.
 	if delta <= 0.0 or simulation_lod == SimulationLOD.FULL:
 		return
+	_process_food_needs(delta)
+	if health <= 0:
+		return
 	match task:
 		Task.MOVE:
 			_lod_process_move(delta)
@@ -205,6 +215,51 @@ func simulate_lod(delta: float):
 			_process_idle(delta)
 	last_motion_position = global_position
 	stuck_timer = 0.0
+
+
+func _process_food_needs(delta: float):
+	if delta <= 0.0 or health <= 0:
+		return
+	food_timer -= delta
+	var meal_events := 0
+	while food_timer <= 0.0 and meal_events < 64:
+		if _consume_food_from_storage():
+			missed_meals = 0
+		else:
+			missed_meals += 1
+			health = maxi(health - STARVATION_DAMAGE, 0)
+			if health <= 0:
+				_die_from_starvation()
+				return
+		food_timer += FOOD_CONSUMPTION_INTERVAL
+		meal_events += 1
+	if meal_events >= 64 and food_timer <= 0.0:
+		food_timer = FOOD_CONSUMPTION_INTERVAL
+
+
+func _consume_food_from_storage() -> bool:
+	var warehouses: Array[Building] = []
+	for building in get_tree().get_nodes_in_group("buildings"):
+		if building is Building and building.faction_id == faction_id and building.is_warehouse() and building.is_completed() and building.has_stored_resource(&"food"):
+			warehouses.append(building)
+	warehouses.sort_custom(func(a: Building, b: Building): return global_position.distance_squared_to(a.global_position) < global_position.distance_squared_to(b.global_position))
+	for warehouse in warehouses:
+		if warehouse.take_resource(&"food", 1) == 1:
+			return true
+	return false
+
+
+func _die_from_starvation():
+	velocity = Vector2.ZERO
+	if selected:
+		deselect()
+	queue_free()
+
+
+func get_food_status_text() -> String:
+	if missed_meals > 0:
+		return "Голодает: пропущено приёмов пищи — %d" % missed_meals
+	return "Сыт: следующий приём пищи через %d сек." % maxi(ceili(food_timer), 0)
 
 
 func has_lod_focus_in(rect: Rect2) -> bool:
@@ -802,6 +857,22 @@ func command_enter_building(building: Building):
 	task = Task.ENTER_BUILDING
 
 
+func settle_in_residence(residence: Building) -> bool:
+	if not is_instance_valid(residence) or not residence.is_residence() or residence.faction_id != faction_id or not residence.is_completed():
+		return false
+	_cancel_task()
+	if not residence.try_enter(self):
+		return false
+	inside_building = residence
+	target_building = residence
+	global_position = residence.global_position
+	velocity = Vector2.ZERO
+	idle_check_timer = 2.0
+	task = Task.REST
+	_refresh_lod_presentation()
+	return true
+
+
 func _exit_current_building():
 	if not is_instance_valid(inside_building):
 		inside_building = null
@@ -901,17 +972,17 @@ func _find_warehouse_with_resource(resource_type: StringName) -> Building:
 
 
 func _get_collection_target(resource_type: StringName) -> int:
-	var total_remaining := 0
-	if not build_job_kind.is_empty():
-		for building in get_tree().get_nodes_in_group("buildings"):
-			if building is Building and building.faction_id == faction_id and building.under_construction and building.building_kind == build_job_kind:
-				total_remaining += building.get_remaining_resource(resource_type)
-	elif is_instance_valid(target_building):
-		total_remaining = target_building.get_remaining_resource(resource_type)
+	if not is_instance_valid(target_building):
+		return 0
+	var total_remaining := target_building.get_remaining_resource(resource_type)
 
 	var carried_by_others := 0
 	for unit in get_tree().get_nodes_in_group("units"):
-		if unit == self or unit is not Unit or unit.faction_id != faction_id or unit.build_job_kind != build_job_kind:
+		if unit == self or unit is not Unit or unit.faction_id != faction_id:
+			continue
+		# Материалы резервируются только внутри одной стройки. Раньше груз
+		# одного дорожного строителя блокировал всех строителей той же линии.
+		if unit.target_building != target_building:
 			continue
 		carried_by_others += unit.carried_stone if resource_type == &"stone" else unit.carried_wood
 

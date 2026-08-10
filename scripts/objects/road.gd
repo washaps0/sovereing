@@ -2,6 +2,8 @@ class_name RoadSegment
 extends Building
 
 const SEGMENT_LENGTH := 64.0
+const ROAD_WIDTH := 30.0
+const MIN_PARALLEL_SPACING := ROAD_WIDTH * 2.0
 
 var street_name := "Улица"
 var hover_label: Label

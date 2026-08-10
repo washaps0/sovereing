@@ -10,6 +10,8 @@ const UNIT_SCENE := preload("res://scenes/objects/unit.tscn")
 const RESIDENCE_SCENE := preload("res://scenes/objects/buildings/residence.tscn")
 const WAREHOUSE_SCENE := preload("res://scenes/objects/buildings/warehouse.tscn")
 const FACTORY_SCENE := preload("res://scenes/objects/buildings/fabric.tscn")
+const FOOD_FACTORY_SCENE := preload("res://scenes/objects/buildings/food_fabric.tscn")
+const GOVERNMENT_SCENE := preload("res://scenes/objects/buildings/government.tscn")
 const ROAD_SCENE := preload("res://scenes/objects/buildings/road.tscn")
 const SPAWN_MARGIN := 320.0
 const SPAWN_CLEAR_RADIUS := 230.0
@@ -182,6 +184,8 @@ func get_save_data() -> Dictionary:
 			"wood": unit.carried_wood,
 			"stone": unit.carried_stone,
 			"produced_items": unit.produced_items,
+			"food_timer": unit.food_timer,
+			"missed_meals": unit.missed_meals,
 		})
 	var camera := get_node_or_null("Camera2D") as Camera2D
 	if camera != null:
@@ -209,12 +213,16 @@ func _serialize_building(building: Building) -> Dictionary:
 			"stone": building.stored_stone,
 			"planks": building.get_stored_resource(&"planks"),
 			"tools": building.get_stored_resource(&"tools"),
+			"food": building.get_stored_resource(&"food"),
 		},
 		"limits": limits,
 		"recipe": str(building.selected_recipe),
 	}
 	if building is RoadSegment:
 		result["street_name"] = building.street_name
+	elif building is GovernmentBuilding:
+		result["migration_target"] = building.migration_target
+		result["migration_timer"] = building.migration_timer
 	return result
 
 
@@ -279,6 +287,8 @@ func _restore_building(data: Dictionary):
 	match kind:
 		"warehouse": scene = WAREHOUSE_SCENE
 		"factory": scene = FACTORY_SCENE
+		"food_factory": scene = FOOD_FACTORY_SCENE
+		"government": scene = GOVERNMENT_SCENE
 		"road": scene = ROAD_SCENE
 		_: scene = RESIDENCE_SCENE
 	var building := scene.instantiate() as Building
@@ -306,11 +316,13 @@ func _restore_building(data: Dictionary):
 	building.stored_stone = int(stored.get("stone", 0))
 	building.stored_products[&"planks"] = int(stored.get("planks", 0))
 	building.stored_products[&"tools"] = int(stored.get("tools", 0))
+	building.stored_products[&"food"] = int(stored.get("food", 0))
 	var limits: Dictionary = data.get("limits", {})
-	for resource_type in Building.RESOURCE_TYPES:
-		if limits.has(str(resource_type)):
-			building.storage_limits[resource_type] = int(limits[str(resource_type)])
+	_restore_storage_limits(building, limits)
 	building.set_recipe(StringName(data.get("recipe", "planks")))
+	if building is GovernmentBuilding:
+		building.migration_target = int(data.get("migration_target", 0))
+		building.migration_timer = float(data.get("migration_timer", building.migration_interval))
 	if bool(data.get("under_construction", false)):
 		building.under_construction = true
 		building.progress_bar.visible = true
@@ -343,8 +355,30 @@ func _restore_unit(data: Dictionary):
 	unit.carried_wood = int(data.get("wood", 0))
 	unit.carried_stone = int(data.get("stone", 0))
 	unit.produced_items = int(data.get("produced_items", 0))
+	unit.food_timer = float(data.get("food_timer", Unit.FOOD_CONSUMPTION_INTERVAL))
+	unit.missed_meals = int(data.get("missed_meals", 0))
 	unit.position = _data_to_vector(data.get("position", [300, 300]))
 	add_child(unit)
+
+
+func _restore_storage_limits(building: Building, limits: Dictionary):
+	if not building.is_warehouse() or limits.is_empty():
+		return
+	for resource_type in Building.RESOURCE_TYPES:
+		building.storage_limits[resource_type] = int(limits.get(str(resource_type), 0))
+	# В сохранениях до появления еды сумма четырёх квот уже занимала весь склад.
+	# Выделяем еде место за счёт свободной части старых квот, не удаляя ресурсы.
+	if not limits.has("food"):
+		building.storage_limits[&"food"] = 40
+	var overflow := maxi(building.get_total_storage_limits() - building.storage_capacity, 0)
+	for resource_type in [&"stone", &"wood", &"planks", &"tools", &"food"]:
+		if overflow <= 0:
+			break
+		var current_limit := building.get_storage_limit(resource_type)
+		var stored_amount := building.get_stored_resource(resource_type)
+		var reduction := mini(maxi(current_limit - stored_amount, 0), overflow)
+		building.storage_limits[resource_type] = current_limit - reduction
+		overflow -= reduction
 
 
 func spawn_session_units(raw_slots: Array):
@@ -429,6 +463,7 @@ func _ensure_ai_starting_plan(faction_id: int, faction_name: String):
 	_spawn_ai_building(WAREHOUSE_SCENE, base + Vector2(75.0 * inward_x, 125.0 * inward_y), rotation_angle, faction_id, faction_name, faction_id * 1000 + 102, street_name, 1)
 	_spawn_ai_building(RESIDENCE_SCENE, base + Vector2(150.0 * inward_x, 125.0 * inward_y), rotation_angle, faction_id, faction_name, faction_id * 1000 + 103, street_name, 2)
 	_spawn_ai_building(FACTORY_SCENE, base + Vector2(110.0 * inward_x, 185.0 * inward_y), rotation_angle, faction_id, faction_name, faction_id * 1000 + 104, street_name, 3)
+	_spawn_ai_building(FOOD_FACTORY_SCENE, base + Vector2(195.0 * inward_x, 185.0 * inward_y), rotation_angle, faction_id, faction_name, faction_id * 1000 + 105, street_name, 4)
 
 
 func _spawn_ai_building(scene: PackedScene, position: Vector2, rotation_angle: float, faction_id: int, faction_name: String, entity_id: int, street_name: String, house_number: int):

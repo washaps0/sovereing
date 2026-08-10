@@ -1,12 +1,13 @@
 class_name Building
 extends Area2D
 
-const RESOURCE_TYPES: Array[StringName] = [&"wood", &"stone", &"planks", &"tools"]
+const RESOURCE_TYPES: Array[StringName] = [&"wood", &"stone", &"planks", &"tools", &"food"]
 const RESOURCE_NAMES := {
 	&"wood": "Дерево",
 	&"stone": "Камень",
 	&"planks": "Доски",
 	&"tools": "Инструменты",
+	&"food": "Еда",
 }
 const FACTORY_RECIPES := {
 	&"planks": {
@@ -23,7 +24,16 @@ const FACTORY_RECIPES := {
 		"amount": 1,
 		"time": 4.0,
 	},
+	&"food": {
+		"name": "Еда",
+		"inputs": {},
+		"output": &"food",
+		"amount": 1,
+		"time": 4.0,
+	},
 }
+const INDUSTRIAL_RECIPES: Array[StringName] = [&"planks", &"tools"]
+const FOOD_RECIPES: Array[StringName] = [&"food"]
 
 @export var display_name := "Здание"
 @export var building_kind := "residence"
@@ -32,7 +42,7 @@ const FACTORY_RECIPES := {
 @export var build_time := 5.0
 @export var storage_capacity := 0
 @export var max_workers := 0
-@export var max_occupants := 4
+@export var max_occupants := 8
 @export var max_builders := 3
 @export var faction_id := 0
 @export var faction_name := "Игрок"
@@ -45,7 +55,7 @@ var delivered_stone := 0
 var build_progress := 0.0
 var stored_wood := 0
 var stored_stone := 0
-var stored_products := {&"planks": 0, &"tools": 0}
+var stored_products := {&"planks": 0, &"tools": 0, &"food": 0}
 var storage_limits := {}
 var under_construction := false
 var assigned_workers: Array[Unit] = []
@@ -67,7 +77,10 @@ func _ready():
 	add_to_group("buildings")
 	if is_warehouse():
 		storage_capacity = 300
-		storage_limits = {&"wood": 40, &"stone": 200, &"planks": 40, &"tools": 20}
+		storage_limits = {&"wood": 40, &"stone": 160, &"planks": 40, &"tools": 20, &"food": 40}
+	var available_recipes := get_available_recipe_types()
+	if is_factory() and selected_recipe not in available_recipes:
+		selected_recipe = available_recipes[0]
 	_create_progress_bar()
 	_create_address_label()
 	_create_status_label()
@@ -106,7 +119,8 @@ func set_lod_active(active: bool):
 	visible = active
 	input_pickable = active
 	monitoring = active
-	set_process(active)
+	# Правительство продолжает миграционную симуляцию вне экрана.
+	set_process(active or is_government())
 	var collision := get_node_or_null("CollisionShape2D") as CollisionShape2D
 	if collision != null:
 		collision.set_deferred("disabled", not active)
@@ -304,11 +318,19 @@ func is_warehouse() -> bool:
 
 
 func is_factory() -> bool:
-	return building_kind == "factory"
+	return building_kind in ["factory", "food_factory"]
+
+
+func is_food_factory() -> bool:
+	return building_kind == "food_factory"
 
 
 func is_residence() -> bool:
 	return building_kind == "residence"
+
+
+func is_government() -> bool:
+	return building_kind == "government"
 
 
 func get_total_stored() -> int:
@@ -447,7 +469,13 @@ func leave(unit: Unit):
 
 
 func get_recipe() -> Dictionary:
-	return FACTORY_RECIPES.get(selected_recipe, FACTORY_RECIPES[&"planks"])
+	var available_recipes := get_available_recipe_types()
+	var fallback: StringName = available_recipes[0] if not available_recipes.is_empty() else &"planks"
+	return FACTORY_RECIPES.get(selected_recipe, FACTORY_RECIPES[fallback])
+
+
+func get_available_recipe_types() -> Array[StringName]:
+	return FOOD_RECIPES if is_food_factory() else INDUSTRIAL_RECIPES
 
 
 func get_recipe_name(recipe_type: StringName) -> String:
@@ -460,7 +488,7 @@ func get_production_time() -> float:
 
 
 func set_recipe(recipe_type: StringName):
-	if FACTORY_RECIPES.has(recipe_type):
+	if FACTORY_RECIPES.has(recipe_type) and recipe_type in get_available_recipe_types():
 		selected_recipe = recipe_type
 
 

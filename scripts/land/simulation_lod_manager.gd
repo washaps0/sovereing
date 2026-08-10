@@ -3,6 +3,9 @@ extends Node
 
 const RESOURCE_CHUNK_SIZE := 512.0
 const UNIT_CHUNK_SIZE := 64.0
+const ROCK_MIN_SPACING := 32.0
+const ROCK_POSITION_SEARCH_STEP := 8.0
+const ROCK_POSITION_SEARCH_RINGS := 16
 const TREE_SCENE := preload("res://scenes/objects/tree.tscn")
 const ROCK_SCENE := preload("res://scenes/objects/rock.tscn")
 
@@ -179,6 +182,10 @@ func rebuild_spatial_index():
 
 
 func register_resource_data(resource_kind: String, position: Vector2, variant: int, amount: int, existing_node: Node2D = null) -> int:
+	if resource_kind == "rock":
+		position = _find_available_rock_position(position)
+		if is_instance_valid(existing_node):
+			existing_node.global_position = position
 	var record_id := _next_resource_id
 	_next_resource_id += 1
 	var record := {
@@ -198,6 +205,43 @@ func register_resource_data(resource_kind: String, position: Vector2, variant: i
 	if is_instance_valid(existing_node):
 		existing_node.set("lod_record_id", record_id)
 	return record_id
+
+
+func _find_available_rock_position(requested_position: Vector2) -> Vector2:
+	if _is_rock_position_available(requested_position):
+		return requested_position
+	# Поиск детерминированный: одинаковый seed и одинаковое сохранение всегда
+	# дают те же позиции. Кольца позволяют сохранить форму залежи и сдвинуть
+	# только тот камень, который действительно пересекается с соседним.
+	var phase := TAU * float(_next_resource_id % 32) / 32.0
+	for ring_index in range(1, ROCK_POSITION_SEARCH_RINGS + 1):
+		var radius := ROCK_POSITION_SEARCH_STEP * ring_index
+		var sample_count := maxi(8, ceili(TAU * radius / ROCK_POSITION_SEARCH_STEP))
+		for sample_index in range(sample_count):
+			var angle := phase + TAU * float(sample_index) / float(sample_count)
+			var candidate := requested_position + Vector2.from_angle(angle) * radius
+			if _is_rock_position_available(candidate):
+				return candidate
+	# При штатной плотности залежей этот резерв недостижим. Если область всё же
+	# полностью занята, продолжаем поиск дальше, не допуская наложения.
+	var fallback_radius := ROCK_MIN_SPACING
+	for record in _resource_records_by_id.values():
+		if record.get("kind", "") == "rock" and int(record.get("amount", 0)) > 0:
+			fallback_radius = maxf(fallback_radius, requested_position.distance_to(record.get("position", Vector2.ZERO)) + ROCK_MIN_SPACING)
+	return requested_position + Vector2.from_angle(phase) * fallback_radius
+
+
+func _is_rock_position_available(position: Vector2) -> bool:
+	var search_radius := ROCK_MIN_SPACING
+	var search_area := Rect2(position - Vector2.ONE * search_radius, Vector2.ONE * search_radius * 2.0)
+	var minimum_distance_squared := ROCK_MIN_SPACING * ROCK_MIN_SPACING
+	for chunk in _get_chunks_in_rect(search_area, RESOURCE_CHUNK_SIZE):
+		for record in _resource_chunks.get(chunk, []):
+			if record.get("kind", "") != "rock" or int(record.get("amount", 0)) <= 0:
+				continue
+			if position.distance_squared_to(record.get("position", Vector2.ZERO)) < minimum_distance_squared:
+				return false
+	return true
 
 
 func clear_resource_data():

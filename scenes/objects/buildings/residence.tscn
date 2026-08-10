@@ -10,6 +10,7 @@ size = Vector2(65.33334, 31.333332)
 scale = Vector2(1.5, 1.5)
 script = ExtResource("2_building")
 display_name = "Жилой дом"
+max_occupants = 8
 
 [node name="Sprite2D" type="Sprite2D" parent="." unique_id=1570788124]
 scale = Vector2(1.5, 1.5)
