@@ -82,6 +82,7 @@ func _test_streamed_world():
 	assert(ground.get_used_cells().size() == 40000)
 	var saved_resources := lod_manager.get_resource_save_data()
 	assert(saved_resources.size() > 40000)
+	_assert_rocks_do_not_overlap(saved_resources, lod_manager.ROCK_MIN_SPACING)
 	var loaded_resources := 0
 	for resource in get_nodes_in_group("resources"):
 		if world.is_ancestor_of(resource):
@@ -112,3 +113,21 @@ func _test_streamed_world():
 	assert(unit.simulation_lod == Unit.SimulationLOD.FULL)
 	world.queue_free()
 	await process_frame
+
+
+func _assert_rocks_do_not_overlap(resources: Array, minimum_spacing: float):
+	var rock_cells := {}
+	for resource in resources:
+		if str(resource.get("type", "")) != "rock":
+			continue
+		var raw_position: Array = resource.get("position", [])
+		assert(raw_position.size() >= 2)
+		var position := Vector2(float(raw_position[0]), float(raw_position[1]))
+		var cell := Vector2i(floori(position.x / minimum_spacing), floori(position.y / minimum_spacing))
+		for x in range(cell.x - 1, cell.x + 2):
+			for y in range(cell.y - 1, cell.y + 2):
+				for other_position in rock_cells.get(Vector2i(x, y), []):
+					assert(position.distance_to(other_position) >= minimum_spacing - 0.001)
+		if not rock_cells.has(cell):
+			rock_cells[cell] = []
+		rock_cells[cell].append(position)

@@ -3,7 +3,12 @@ extends CanvasLayer
 const RESIDENCE_SCENE := preload("res://scenes/objects/buildings/residence.tscn")
 const WAREHOUSE_SCENE := preload("res://scenes/objects/buildings/warehouse.tscn")
 const FACTORY_SCENE := preload("res://scenes/objects/buildings/fabric.tscn")
+const FOOD_FACTORY_SCENE := preload("res://scenes/objects/buildings/food_fabric.tscn")
+const GOVERNMENT_SCENE := preload("res://scenes/objects/buildings/government.tscn")
 const ROAD_SCENE := preload("res://scenes/objects/buildings/road.tscn")
+const ROAD_PREVIEW_VALID_COLOR := Color(0.95, 0.8, 0.2, 0.8)
+const ROAD_PREVIEW_INVALID_COLOR := Color(1.0, 0.25, 0.25, 0.9)
+const PARALLEL_ROAD_ALIGNMENT := 0.985
 const STREET_NAMES: Array[String] = [
 	"Садовая", "Лесная", "Полевая", "Речная", "Озёрная",
 	"Центральная", "Северная", "Южная", "Восточная", "Западная",
@@ -48,11 +53,16 @@ var building_status: Label
 var warehouse_settings: VBoxContainer
 var factory_settings: VBoxContainer
 var factory_diagnostic: Label
+var recipe_hint: Label
+var government_settings: VBoxContainer
+var government_statistics: Label
+var migration_target_input: SpinBox
 var residents_settings: VBoxContainer
 var residents_list: VBoxContainer
 var quota_sliders := {}
 var quota_value_labels := {}
 var recipe_picker: OptionButton
+var factory_recipe_key := ""
 var release_occupants_button: Button
 var updating_building_controls := false
 var residents_list_key := ""
@@ -129,6 +139,8 @@ func _create_interface():
 	_add_build_button(build_box, "Жилой дом — 10 дерева", RESIDENCE_SCENE)
 	_add_build_button(build_box, "Склад — 15 дерева", WAREHOUSE_SCENE)
 	_add_build_button(build_box, "Завод — 25 дерева, 10 камня", FACTORY_SCENE)
+	_add_build_button(build_box, "Пищевой завод — 20 дерева, 5 камня", FOOD_FACTORY_SCENE)
+	_add_build_button(build_box, "Правительство — 30 дерева, 20 камня", GOVERNMENT_SCENE)
 	street_input = LineEdit.new()
 	street_input.placeholder_text = "Название улицы (пусто = автоматически)"
 	build_box.add_child(street_input)
@@ -207,18 +219,33 @@ func _create_building_panel():
 	recipe_label.text = "Производить:"
 	factory_settings.add_child(recipe_label)
 	recipe_picker = OptionButton.new()
-	for recipe_type in Building.FACTORY_RECIPES:
-		recipe_picker.add_item(Building.FACTORY_RECIPES[recipe_type]["name"])
-		recipe_picker.set_item_metadata(recipe_picker.item_count - 1, recipe_type)
 	recipe_picker.item_selected.connect(_on_recipe_selected)
 	factory_settings.add_child(recipe_picker)
-	var recipes_hint := Label.new()
-	recipes_hint.text = "Доски: 2 дерева\nИнструменты: 1 дерево + 2 камня"
-	factory_settings.add_child(recipes_hint)
+	recipe_hint = Label.new()
+	factory_settings.add_child(recipe_hint)
 	factory_diagnostic = Label.new()
 	factory_diagnostic.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	factory_diagnostic.custom_minimum_size.x = 270
 	factory_settings.add_child(factory_diagnostic)
+	government_settings = VBoxContainer.new()
+	box.add_child(government_settings)
+	var migration_label := Label.new()
+	migration_label.text = "Миграция до населения:"
+	government_settings.add_child(migration_label)
+	migration_target_input = SpinBox.new()
+	migration_target_input.min_value = 0
+	migration_target_input.max_value = 10000
+	migration_target_input.step = 1
+	migration_target_input.update_on_text_changed = true
+	migration_target_input.value_changed.connect(_on_migration_target_changed)
+	government_settings.add_child(migration_target_input)
+	var migration_hint := Label.new()
+	migration_hint.text = "0 — миграция отключена. Новые жители прибывают только при наличии свободного жилья."
+	migration_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	government_settings.add_child(migration_hint)
+	government_statistics = Label.new()
+	government_statistics.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	government_settings.add_child(government_statistics)
 	release_occupants_button = Button.new()
 	release_occupants_button.text = "Выпустить всех юнитов"
 	release_occupants_button.pressed.connect(_release_selected_building_occupants)
@@ -237,7 +264,9 @@ func _process(_delta: float):
 		_snap_building_to_road(world.get_global_mouse_position())
 		_update_placement_validity()
 	if road_mode and road_start != null and is_instance_valid(road_preview):
-		road_preview.points = PackedVector2Array([road_start, _snap_road_axis(road_start, world.get_global_mouse_position())])
+		var road_end := _snap_road_axis(road_start, world.get_global_mouse_position())
+		road_preview.points = PackedVector2Array([road_start, road_end])
+		road_preview.default_color = ROAD_PREVIEW_INVALID_COLOR if _road_line_has_parallel_conflict(road_start, road_end) else ROAD_PREVIEW_VALID_COLOR
 	if selecting:
 		tactical_overlay.show_selection(selection_start, world.get_global_mouse_position())
 	if forming:
@@ -305,30 +334,45 @@ func _update_responsive_layout():
 
 
 func _update_hud():
-	var unit := Unit.get_selected_unit()
-	if is_instance_valid(unit):
-		unit_status.text = "Имя: %s\nФракция: %s\nЗдоровье: %d/%d\nПрофессия: %s\nСейчас: %s\nГруз: дерево %d, камень %d (%d/%d)\nПроизведено предметов: %d" % [unit.unit_name, unit.faction_name, unit.health, unit.max_health, unit.get_profession_text(), unit.get_task_text(), unit.carried_wood, unit.carried_stone, unit.get_carried_total(), unit.carry_capacity, unit.produced_items]
+	var selected_units := Unit.get_selected_units()
+	if selected_units.size() == 1:
+		var unit := selected_units[0]
+		unit_status.text = "Имя: %s\nФракция: %s\nЗдоровье: %d/%d\nПитание: %s\nПрофессия: %s\nСейчас: %s\nГруз: дерево %d, камень %d (%d/%d)\nПроизведено предметов: %d" % [unit.unit_name, unit.faction_name, unit.health, unit.max_health, unit.get_food_status_text(), unit.get_profession_text(), unit.get_task_text(), unit.carried_wood, unit.carried_stone, unit.get_carried_total(), unit.carry_capacity, unit.produced_items]
+	elif selected_units.size() > 1:
+		unit_status.text = "Выбрано юнитов: %d" % selected_units.size()
 	else:
 		unit_status.text = "Юнит не выбран"
 	var wood := 0
 	var stone := 0
 	var planks := 0
 	var tools := 0
+	var food := 0
 	var total_capacity := 0
 	var workers := 0
 	var factory_workers := 0
+	var population := 0
+	var residence_count := 0
+	var housing_capacity := 0
 	var local_faction_id := _get_local_faction_id()
+	for unit in get_tree().get_nodes_in_group("units"):
+		if unit is Unit and unit.faction_id == local_faction_id:
+			population += 1
 	for building in get_tree().get_nodes_in_group("buildings"):
+		if building is Building and building.faction_id == local_faction_id and building.is_residence() and building.is_completed():
+			residence_count += 1
+			housing_capacity += building.max_occupants
 		if building is Building and building.faction_id == local_faction_id and building.is_warehouse() and building.is_completed():
 			wood += building.stored_wood
 			stone += building.stored_stone
 			planks += building.get_stored_resource(&"planks")
 			tools += building.get_stored_resource(&"tools")
+			food += building.get_stored_resource(&"food")
 			total_capacity += building.storage_capacity
 			workers += building.assigned_workers.size()
 		elif building is Building and building.faction_id == local_faction_id and building.is_factory() and building.is_completed():
 			factory_workers += building.occupants.size()
-	resource_status.text = "%s\nРесурсы: %d/%d\nДерево %d | Камень %d\nДоски %d | Инструменты %d\nДобыча %d | Заводы %d" % [_get_local_faction_name(), wood + stone + planks + tools, total_capacity, wood, stone, planks, tools, workers, factory_workers]
+	var food_per_minute := ceili(float(population) * 60.0 / Unit.FOOD_CONSUMPTION_INTERVAL)
+	resource_status.text = "%s\nРесурсы: %d/%d\nДерево %d | Камень %d\nДоски %d | Инструменты %d\nЕда %d | Расход %d/мин\nНаселение %d/%d | Дома %d\nДобыча %d | Заводы %d" % [_get_local_faction_name(), wood + stone + planks + tools + food, total_capacity, wood, stone, planks, tools, food, food_per_minute, population, housing_capacity, residence_count, workers, factory_workers]
 	_update_building_panel()
 
 
@@ -346,6 +390,7 @@ func _update_building_panel():
 		building_status.text = "Готово"
 	warehouse_settings.visible = building.is_warehouse() and building.is_completed()
 	factory_settings.visible = building.is_factory() and building.is_completed()
+	government_settings.visible = building.is_government() and building.is_completed()
 	residents_settings.visible = building.is_residence() and building.is_completed()
 	release_occupants_button.visible = building.is_completed() and (building.is_factory() or building.is_residence())
 	release_occupants_button.disabled = building.occupants.is_empty() or not editable
@@ -367,12 +412,25 @@ func _update_building_panel():
 	elif factory_settings.visible:
 		building_status.text = "Работают %d/%d | рецепт: %s" % [building.occupants.size(), building.max_workers, building.get_recipe_name(building.selected_recipe)]
 		factory_diagnostic.text = building.get_factory_status_text()
+		_sync_factory_recipe_controls(building)
 		updating_building_controls = true
 		recipe_picker.disabled = not editable
 		for index in range(recipe_picker.item_count):
 			if StringName(recipe_picker.get_item_metadata(index)) == building.selected_recipe:
 				recipe_picker.select(index)
 				break
+		updating_building_controls = false
+	elif government_settings.visible:
+		var government := building as GovernmentBuilding
+		var total_houses := government.get_total_residence_count()
+		var completed_houses := government.get_completed_residence_count()
+		var population := government.get_population_count()
+		var capacity := government.get_housing_capacity()
+		building_status.text = "Жители %d/%d | Свободное жильё %d" % [population, capacity, government.get_free_housing()]
+		government_statistics.text = "Дома: %d всего, %d готово\nЖители: %d\n%s" % [total_houses, completed_houses, population, government.get_migration_status_text()]
+		updating_building_controls = true
+		migration_target_input.editable = editable
+		migration_target_input.value = government.migration_target
 		updating_building_controls = false
 	elif building.is_residence() and building.is_completed():
 		building_status.text = "Жильцы %d/%d" % [building.occupants.size(), building.max_occupants]
@@ -406,6 +464,29 @@ func _update_residents_list(building: Building):
 		residents_list.add_child(resident_button)
 
 
+func _sync_factory_recipe_controls(building: Building):
+	var recipe_types := building.get_available_recipe_types()
+	var recipe_key := str(building.building_kind)
+	if factory_recipe_key != recipe_key:
+		factory_recipe_key = recipe_key
+		var was_updating := updating_building_controls
+		updating_building_controls = true
+		recipe_picker.clear()
+		for recipe_type in recipe_types:
+			recipe_picker.add_item(Building.FACTORY_RECIPES[recipe_type]["name"])
+			recipe_picker.set_item_metadata(recipe_picker.item_count - 1, recipe_type)
+		updating_building_controls = was_updating
+	var hint_lines := PackedStringArray()
+	for recipe_type in recipe_types:
+		var recipe: Dictionary = Building.FACTORY_RECIPES[recipe_type]
+		var input_parts := PackedStringArray()
+		for resource_type in recipe["inputs"]:
+			input_parts.append("%d %s" % [int(recipe["inputs"][resource_type]), str(Building.RESOURCE_NAMES[resource_type]).to_lower()])
+		var inputs_text := "без сырья" if input_parts.is_empty() else " + ".join(input_parts)
+		hint_lines.append("%s: %s" % [recipe["name"], inputs_text])
+	recipe_hint.text = "\n".join(hint_lines)
+
+
 func _select_resident(unit: Unit):
 	if not is_instance_valid(unit):
 		return
@@ -421,7 +502,7 @@ func _try_open_building_menu(point: Vector2) -> bool:
 	query.collide_with_bodies = false
 	query.collision_mask = 1
 	for hit in world.get_world_2d().direct_space_state.intersect_point(query, 32):
-		if hit.collider is Building and hit.collider.building_kind in ["warehouse", "residence", "factory"]:
+		if hit.collider is Building and hit.collider.building_kind in ["warehouse", "residence", "factory", "food_factory", "government"]:
 			_open_building_menu(hit.collider)
 			return true
 	return false
@@ -461,6 +542,14 @@ func _on_recipe_selected(index: int):
 	var building := Building.selected_building
 	if is_instance_valid(building) and building.is_factory() and building.can_be_edited_locally():
 		building.set_recipe(StringName(recipe_picker.get_item_metadata(index)))
+
+
+func _on_migration_target_changed(value: float):
+	if updating_building_controls:
+		return
+	var building := Building.selected_building
+	if building is GovernmentBuilding and building.can_be_edited_locally():
+		building.set_migration_target(int(value))
 
 
 func _release_selected_building_occupants():
@@ -738,7 +827,7 @@ func _begin_road_mode():
 	menu.visible = false
 	road_preview = Line2D.new()
 	road_preview.width = 3.0
-	road_preview.default_color = Color(0.95, 0.8, 0.2, 0.8)
+	road_preview.default_color = ROAD_PREVIEW_VALID_COLOR
 	road_preview.z_index = 30
 	roads.add_child(road_preview)
 
@@ -761,10 +850,12 @@ func _handle_road_click():
 
 
 func _create_road_line(start: Vector2, end: Vector2):
-	var street := _road_name_for_start(start)
 	var delta := end - start
 	if delta.length() < 8.0:
 		return
+	if _road_line_has_parallel_conflict(start, end):
+		return
+	var street := _road_name_for_start(start)
 	var direction := delta.normalized()
 	var angle := direction.angle()
 	var count := maxi(1, int(ceil(delta.length() / RoadSegment.SEGMENT_LENGTH)))
@@ -775,13 +866,56 @@ func _create_road_line(start: Vector2, end: Vector2):
 		segment.faction_id = _get_local_faction_id()
 		segment.faction_name = _get_local_faction_name()
 		segment.position = position
+		if _road_segment_overlaps_existing(position, angle):
+			segment.free()
+			continue
 		roads.add_child(segment)
 		segment.setup(street, angle)
 		_clear_resources_for_shape(segment.get_node("CollisionShape2D"))
 		segment.begin_construction()
 		segments.append(segment)
+	if segments.is_empty():
+		return
 	for builder in Unit.get_selected_units():
 		builder.command_build_line(segments)
+
+
+func _road_line_has_parallel_conflict(start: Vector2, end: Vector2) -> bool:
+	var delta := end - start
+	if delta.length() < 8.0:
+		return false
+	var direction := delta.normalized()
+	var angle := direction.angle()
+	var count := maxi(1, int(ceil(delta.length() / RoadSegment.SEGMENT_LENGTH)))
+	for index in range(count):
+		var position := start + direction * (RoadSegment.SEGMENT_LENGTH * (index + 0.5))
+		if _road_segment_overlaps_existing(position, angle):
+			return true
+	return false
+
+
+func _road_segment_overlaps_existing(local_position: Vector2, local_angle: float) -> bool:
+	var candidate_position := roads.to_global(local_position)
+	var candidate_direction := Vector2.RIGHT.rotated(local_angle + roads.global_rotation)
+	for existing in get_tree().get_nodes_in_group("roads"):
+		if existing is not RoadSegment or not is_instance_valid(existing):
+			continue
+		var existing_direction := Vector2.RIGHT.rotated(existing.global_rotation)
+		# Перекрёстки разрешены. Ограничение действует только на параллельные
+		# участки, проекции которых накладываются по длине.
+		if absf(candidate_direction.dot(existing_direction)) < PARALLEL_ROAD_ALIGNMENT:
+			continue
+		var offset: Vector2 = existing.global_position - candidate_position
+		var perpendicular_distance := absf(offset.cross(candidate_direction))
+		if perpendicular_distance >= RoadSegment.MIN_PARALLEL_SPACING:
+			continue
+		var distance_along_road := absf(offset.dot(candidate_direction))
+		# Центры соседних сегментов находятся в 64 px: они лишь соприкасаются
+		# торцами и остаются допустимыми. Параллельные линии должны находиться
+		# друг от друга минимум на расстоянии двух ширин дороги (60 px).
+		if distance_along_road < RoadSegment.SEGMENT_LENGTH - 2.0:
+			return true
+	return false
 
 
 func _road_name_for_start(start: Vector2) -> String:

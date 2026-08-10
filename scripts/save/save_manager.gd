@@ -3,7 +3,7 @@ extends Node
 const SAVE_DIRECTORY := "user://saves"
 const WORLD_SCENE := "res://scenes/world.tscn"
 const MAIN_MENU_SCENE := "res://scenes/main_menu.tscn"
-const SAVE_VERSION := 2
+const SAVE_VERSION := 4
 
 var current_seed := 12345
 var pending_save_data: Dictionary = {}
