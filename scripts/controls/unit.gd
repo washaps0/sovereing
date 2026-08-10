@@ -2,6 +2,7 @@ class_name Unit
 extends CharacterBody2D
 
 enum Task { IDLE, MOVE, HARVEST, BUILD, DELIVER_TO_WAREHOUSE, FETCH_FROM_WAREHOUSE, ENTER_BUILDING, FACTORY_WORK, REST }
+enum SimulationLOD { FULL, REDUCED, STRATEGIC, BACKGROUND }
 
 @export var speed := 100.0
 @export var carry_capacity := 10
@@ -10,6 +11,12 @@ enum Task { IDLE, MOVE, HARVEST, BUILD, DELIVER_TO_WAREHOUSE, FETCH_FROM_WAREHOU
 @export var unit_name := ""
 @export var max_health := 100
 @export var health := 100
+@export var faction_id := 0
+@export var controller_peer_id := 1
+@export var ai_controlled := false
+@export var faction_name := "Игрок"
+@export var network_id := 0
+@export_range(0, 2) var simulation_importance := 0
 
 const UNIT_NAMES: Array[String] = [
 	"Алексей", "Борис", "Виктор", "Григорий", "Даниил", "Егор",
@@ -49,12 +56,26 @@ var production_timer := 0.0
 var produced_items := 0
 var last_motion_position := Vector2.ZERO
 var stuck_timer := 0.0
+var simulation_lod := SimulationLOD.FULL
+var lod_render_enabled := true
+var lod_pending_level := SimulationLOD.FULL
+var lod_pending_time := 0.0
+var lod_last_simulation_time := 0.0
+var lod_manager: Node
 
 const PATH_CELL_SIZE := 32.0
 const PATH_MAP_SIZE := Vector2i(400, 400)
 const BUILDING_AVOIDANCE_WEIGHT := 9.0
+const FACTION_COLORS: Array[Color] = [
+	Color(1.0, 1.0, 1.0),
+	Color(1.0, 0.62, 0.62),
+	Color(0.62, 0.78, 1.0),
+	Color(1.0, 0.86, 0.48),
+]
 
 @onready var selection: Sprite2D = $selection
+@onready var body: Sprite2D = $body
+@onready var collision_shape: CollisionShape2D = $CollisionShape2D
 
 
 func _ready():
@@ -68,6 +89,33 @@ func _ready():
 	target_position = global_position
 	last_motion_position = global_position
 	selection.visible = false
+	lod_manager = get_tree().get_first_node_in_group("simulation_lod_manager")
+	_update_faction_visual()
+
+
+func configure_faction(new_faction_id: int, new_controller_peer_id: int, is_ai: bool, new_faction_name: String):
+	faction_id = clampi(new_faction_id, 0, 3)
+	controller_peer_id = new_controller_peer_id
+	ai_controlled = is_ai
+	faction_name = new_faction_name
+	if is_node_ready():
+		_update_faction_visual()
+		if selected and not can_be_controlled_locally():
+			deselect()
+
+
+func can_be_controlled_locally() -> bool:
+	if ai_controlled:
+		return false
+	var network_manager := get_node_or_null("/root/NetworkManager")
+	if is_instance_valid(network_manager):
+		return network_manager.can_edit_faction(faction_id)
+	return faction_id == 0
+
+
+func _update_faction_visual():
+	if is_instance_valid(body):
+		body.modulate = FACTION_COLORS[faction_id % FACTION_COLORS.size()]
 
 
 func _exit_tree():
@@ -79,6 +127,8 @@ func _exit_tree():
 
 
 func _physics_process(delta: float):
+	if simulation_lod != SimulationLOD.FULL:
+		return
 	match task:
 		Task.MOVE:
 			if _follow_path():
@@ -102,6 +152,71 @@ func _physics_process(delta: float):
 	_update_motion_recovery(delta)
 
 
+func set_simulation_lod(level: int, render_enabled: bool):
+	var previous_lod := simulation_lod
+	simulation_lod = clampi(level, SimulationLOD.FULL, SimulationLOD.BACKGROUND)
+	lod_render_enabled = render_enabled
+	set_physics_process(simulation_lod == SimulationLOD.FULL)
+	if previous_lod != SimulationLOD.FULL and simulation_lod == SimulationLOD.FULL:
+		# После прямолинейного стратегического перемещения подробный маршрут
+		# строится заново от сохранённой позиции, а не от старой точки пути.
+		path_points = PackedVector2Array()
+		path_index = 0
+		path_destination = Vector2(INF, INF)
+	_refresh_lod_presentation()
+
+
+func set_lod_render_enabled(enabled: bool):
+	lod_render_enabled = enabled
+	_refresh_lod_presentation()
+
+
+func _refresh_lod_presentation():
+	visible = lod_render_enabled and not is_instance_valid(inside_building)
+	var collision_enabled := simulation_lod == SimulationLOD.FULL and not is_instance_valid(inside_building)
+	if is_instance_valid(collision_shape):
+		collision_shape.set_deferred("disabled", not collision_enabled)
+
+
+func simulate_lod(delta: float):
+	# Низкие LOD вызываются общим менеджером редко и крупными порциями времени.
+	# Узел юнита не уничтожается: здоровье, груз, приказ и ссылки на цели остаются
+	# теми же, поэтому возврат камеры не пересоздаёт и не разбрасывает людей.
+	if delta <= 0.0 or simulation_lod == SimulationLOD.FULL:
+		return
+	match task:
+		Task.MOVE:
+			_lod_process_move(delta)
+		Task.HARVEST:
+			_lod_process_harvest(delta)
+		Task.BUILD:
+			_lod_process_build(delta)
+		Task.DELIVER_TO_WAREHOUSE:
+			_lod_process_warehouse_delivery(delta)
+		Task.FETCH_FROM_WAREHOUSE:
+			_lod_process_warehouse_fetch(delta)
+		Task.ENTER_BUILDING:
+			_lod_process_enter_building(delta)
+		Task.FACTORY_WORK:
+			_process_factory_work(delta)
+		Task.REST:
+			_process_rest(delta)
+		_:
+			_process_idle(delta)
+	last_motion_position = global_position
+	stuck_timer = 0.0
+
+
+func has_lod_focus_in(rect: Rect2) -> bool:
+	if is_instance_valid(target_tree) and rect.has_point(target_tree.global_position):
+		return true
+	if is_instance_valid(target_building) and rect.has_point(target_building.global_position):
+		return true
+	if is_instance_valid(target_warehouse) and rect.has_point(target_warehouse.global_position):
+		return true
+	return task == Task.MOVE and rect.has_point(target_position)
+
+
 func _move_toward(destination: Vector2, stop_distance := 3.0) -> bool:
 	if global_position.distance_to(destination) <= stop_distance:
 		velocity = Vector2.ZERO
@@ -117,7 +232,8 @@ func _move_toward(destination: Vector2, stop_distance := 3.0) -> bool:
 
 func _get_separation_force(desired_direction: Vector2) -> Vector2:
 	var force := Vector2.ZERO
-	for other in get_tree().get_nodes_in_group("units"):
+	var nearby_units: Array = lod_manager.get_nearby_units(global_position) if is_instance_valid(lod_manager) and lod_manager.has_method("get_nearby_units") else get_tree().get_nodes_in_group("units")
+	for other in nearby_units:
 		if other == self or other is not Unit:
 			continue
 		var distance: float = global_position.distance_to(other.global_position)
@@ -149,6 +265,47 @@ func _navigate_toward(destination: Vector2, stop_distance := 3.0) -> bool:
 			path_index += 1
 		return false
 	return _move_toward(destination, stop_distance)
+
+
+func _lod_process_move(delta: float):
+	_lod_navigate_toward(target_position, delta, 3.0)
+	if global_position.distance_to(target_position) <= 3.0:
+		velocity = Vector2.ZERO
+		task = Task.IDLE
+
+
+func _lod_navigate_toward(destination: Vector2, delta: float, stop_distance := 3.0) -> float:
+	var remaining_time := delta
+	# Уже рассчитанный маршрут сохраняется и проходится по тем же точкам. Для
+	# далёкого приказа новый AStar не строится: стратегический LOD идёт напрямую.
+	var path_matches := path_destination.distance_to(destination) <= 8.0
+	if not path_matches:
+		path_points = PackedVector2Array()
+		path_index = 0
+		path_destination = destination
+	if path_matches and not path_points.is_empty() and path_index < path_points.size():
+		while path_index < path_points.size() and remaining_time > 0.0:
+			remaining_time = _lod_move_direct(path_points[path_index], remaining_time, 5.0)
+			if global_position.distance_to(path_points[path_index]) <= 5.0:
+				path_index += 1
+			else:
+				return 0.0
+	return _lod_move_direct(destination, remaining_time, stop_distance)
+
+
+func _lod_move_direct(destination: Vector2, delta: float, stop_distance: float) -> float:
+	var distance := global_position.distance_to(destination)
+	if distance <= stop_distance:
+		velocity = Vector2.ZERO
+		return delta
+	var direction := global_position.direction_to(destination)
+	var travel_distance := minf(speed * delta, distance - stop_distance)
+	global_position += direction * travel_distance
+	velocity = direction * speed if travel_distance > 0.0 else Vector2.ZERO
+	if travel_distance + stop_distance >= distance - 0.001:
+		velocity = Vector2.ZERO
+		return maxf(delta - travel_distance / maxf(speed, 0.001), 0.0)
+	return 0.0
 
 
 func _update_motion_recovery(delta: float):
@@ -248,6 +405,36 @@ func _process_harvest(delta: float):
 		_finish_harvest()
 
 
+func _lod_process_harvest(delta: float):
+	if not is_instance_valid(target_tree):
+		_finish_harvest()
+		return
+	if is_instance_valid(target_building) and get_carried_resource_amount() >= _get_collection_target(harvest_resource_type):
+		_finish_harvest()
+		return
+	var work_delta := _lod_navigate_toward(target_tree.global_position, delta, interaction_distance)
+	if global_position.distance_to(target_tree.global_position) > interaction_distance + 0.01:
+		target_tree.set_harvest_progress(self, 0.0)
+		return
+	work_timer -= work_delta
+	var event_limit := mini(int(ceil(maxf(work_delta, 0.0) / maxf(harvest_interval, 0.01))) + 1, 64)
+	for event_index in range(event_limit):
+		if work_timer > 0.0 or not is_instance_valid(target_tree):
+			break
+		var harvested: int = target_tree.harvest(1)
+		if harvest_resource_type == &"stone":
+			carried_stone += harvested
+		else:
+			carried_wood += harvested
+		work_timer += maxf(harvest_interval, 0.01)
+		var enough_for_build := is_instance_valid(target_building) and get_carried_resource_amount() >= _get_collection_target(harvest_resource_type)
+		if get_carried_total() >= carry_capacity or enough_for_build or harvested <= 0 or target_tree.is_depleted():
+			_finish_harvest()
+			break
+	if is_instance_valid(target_tree):
+		target_tree.set_harvest_progress(self, 1.0 - clampf(work_timer / maxf(harvest_interval, 0.01), 0.0, 1.0))
+
+
 func _finish_harvest():
 	if is_instance_valid(target_tree):
 		target_tree.stop_harvest(self)
@@ -295,12 +482,63 @@ func _process_build(delta: float):
 		target_building.add_build_progress(delta)
 
 
+func _lod_process_build(delta: float):
+	if not is_instance_valid(target_building) or target_building.is_completed():
+		_advance_build_queue()
+		return
+	if target_building.needs_materials():
+		var needed_type := target_building.get_needed_resource_type()
+		harvest_resource_type = needed_type
+		if get_carried_resource_amount() > 0:
+			_lod_navigate_toward(target_building.get_approach_position(global_position), delta, 6.0)
+			if global_position.distance_to(target_building.get_approach_position(global_position)) <= 6.01:
+				var accepted := target_building.deliver_resource(needed_type, get_carried_resource_amount())
+				_remove_carried_resource(accepted)
+			return
+		if _get_collection_target(needed_type) <= 0:
+			velocity = Vector2.ZERO
+			return
+		var resource_warehouse := _find_warehouse_with_resource(needed_type)
+		if is_instance_valid(resource_warehouse):
+			target_warehouse = resource_warehouse
+			task = Task.FETCH_FROM_WAREHOUSE
+			return
+		var nearest_resource: Node2D = _find_nearest_resource(needed_type)
+		if is_instance_valid(nearest_resource):
+			_start_harvesting(nearest_resource)
+		else:
+			velocity = Vector2.ZERO
+		return
+	var approach := target_building.get_approach_position(global_position)
+	var build_delta := _lod_navigate_toward(approach, delta, 6.0)
+	if global_position.distance_to(approach) <= 6.01:
+		target_building.add_build_progress(build_delta)
+
+
 func _process_warehouse_delivery():
 	if not is_instance_valid(target_warehouse) or not target_warehouse.has_resource_space(harvest_resource_type):
 		_release_warehouse()
 		task = Task.IDLE
 		return
 	if not _navigate_toward(target_warehouse.get_approach_position(global_position), 6.0):
+		return
+	var delivered := target_warehouse.store_resource(harvest_resource_type, get_carried_resource_amount())
+	_remove_carried_resource(delivered)
+	if get_carried_resource_amount() > 0:
+		_release_warehouse()
+		task = Task.IDLE
+	else:
+		_start_next_tree()
+
+
+func _lod_process_warehouse_delivery(delta: float):
+	if not is_instance_valid(target_warehouse) or not target_warehouse.has_resource_space(harvest_resource_type):
+		_release_warehouse()
+		task = Task.IDLE
+		return
+	var approach := target_warehouse.get_approach_position(global_position)
+	_lod_navigate_toward(approach, delta, 6.0)
+	if global_position.distance_to(approach) > 6.01:
 		return
 	var delivered := target_warehouse.store_resource(harvest_resource_type, get_carried_resource_amount())
 	_remove_carried_resource(delivered)
@@ -337,9 +575,36 @@ func _process_warehouse_fetch():
 	task = Task.BUILD
 
 
+func _lod_process_warehouse_fetch(delta: float):
+	if not is_instance_valid(target_building) or target_building.is_completed():
+		target_warehouse = null
+		_advance_build_queue()
+		return
+	if not is_instance_valid(target_warehouse) or not target_warehouse.has_stored_resource(harvest_resource_type):
+		target_warehouse = null
+		task = Task.BUILD
+		return
+	if _get_collection_target(harvest_resource_type) <= get_carried_resource_amount():
+		target_warehouse = null
+		task = Task.BUILD
+		return
+	var approach := target_warehouse.get_approach_position(global_position)
+	_lod_navigate_toward(approach, delta, 6.0)
+	if global_position.distance_to(approach) > 6.01:
+		return
+	var needed := maxi(_get_collection_target(harvest_resource_type) - get_carried_resource_amount(), 0)
+	var taken := target_warehouse.take_resource(harvest_resource_type, needed)
+	if harvest_resource_type == &"stone":
+		carried_stone += taken
+	else:
+		carried_wood += taken
+	target_warehouse = null
+	task = Task.BUILD
+
+
 func _process_idle(delta: float):
 	velocity = Vector2.ZERO
-	if not auto_work_enabled:
+	if not auto_work_enabled and not ai_controlled:
 		return
 	idle_check_timer -= delta
 	if idle_check_timer > 0.0:
@@ -359,6 +624,9 @@ func _assign_automatic_job(allow_residence: bool) -> bool:
 		command_enter_building(factory)
 		return true
 
+	if ai_controlled and _assign_ai_harvest_job():
+		return true
+
 	if allow_residence:
 		var residence := _find_available_residence()
 		if is_instance_valid(residence):
@@ -367,11 +635,30 @@ func _assign_automatic_job(allow_residence: bool) -> bool:
 	return false
 
 
+func _assign_ai_harvest_job() -> bool:
+	var resource_types: Array[StringName] = [&"wood", &"stone"]
+	if network_id % 3 == 0:
+		resource_types.reverse()
+	for resource_type in resource_types:
+		var warehouse := _find_free_warehouse(resource_type)
+		var resource: Node2D = _find_nearest_resource(resource_type)
+		if not is_instance_valid(warehouse) or not is_instance_valid(resource) or not warehouse.assign_worker(self):
+			continue
+		target_warehouse = warehouse
+		continuous_harvest = true
+		harvest_resource_type = resource_type
+		mining_job_resource_type = resource_type
+		profession = "Каменотёс" if resource_type == &"stone" else "Лесоруб"
+		_start_harvesting(resource)
+		return true
+	return false
+
+
 func _find_auto_construction() -> Building:
 	var nearest: Building
 	var nearest_distance := INF
 	for building in get_tree().get_nodes_in_group("buildings"):
-		if building is not Building or not building.under_construction:
+		if building is not Building or building.faction_id != faction_id or not building.under_construction:
 			continue
 		var limit: int = 1 if building.building_kind == "road" else building.max_builders
 		if building.active_builders.size() >= limit:
@@ -387,7 +674,7 @@ func _find_available_factory() -> Building:
 	var nearest: Building
 	var nearest_distance := INF
 	for building in get_tree().get_nodes_in_group("buildings"):
-		if building is not Building or not building.is_factory() or not building.is_completed():
+		if building is not Building or building.faction_id != faction_id or not building.is_factory() or not building.is_completed():
 			continue
 		if building.occupants.size() >= building.max_workers or not building.can_produce_selected_recipe():
 			continue
@@ -402,7 +689,7 @@ func _find_available_residence() -> Building:
 	var nearest: Building
 	var nearest_distance := INF
 	for building in get_tree().get_nodes_in_group("buildings"):
-		if building is not Building or not building.is_residence() or not building.is_completed():
+		if building is not Building or building.faction_id != faction_id or not building.is_residence() or not building.is_completed():
 			continue
 		if building.occupants.size() >= building.max_occupants:
 			continue
@@ -428,8 +715,32 @@ func _process_enter_building():
 	inside_building = target_building
 	global_position = inside_building.global_position
 	velocity = Vector2.ZERO
-	visible = false
-	$CollisionShape2D.set_deferred("disabled", true)
+	_refresh_lod_presentation()
+	if inside_building.is_factory():
+		production_timer = inside_building.get_production_time()
+		task = Task.FACTORY_WORK
+	else:
+		idle_check_timer = 2.0
+		task = Task.REST
+
+
+func _lod_process_enter_building(delta: float):
+	if not is_instance_valid(target_building) or not target_building.is_completed():
+		target_building = null
+		task = Task.IDLE
+		return
+	var entrance := target_building.get_approach_position(global_position)
+	_lod_navigate_toward(entrance, delta, 6.0)
+	if global_position.distance_to(entrance) > 6.01:
+		return
+	if not target_building.try_enter(self):
+		target_building = null
+		task = Task.IDLE
+		return
+	inside_building = target_building
+	global_position = inside_building.global_position
+	velocity = Vector2.ZERO
+	_refresh_lod_presentation()
 	if inside_building.is_factory():
 		production_timer = inside_building.get_production_time()
 		task = Task.FACTORY_WORK
@@ -444,18 +755,18 @@ func _process_factory_work(delta: float):
 		_exit_current_building()
 		task = Task.IDLE
 		return
-	if not inside_building.can_produce_selected_recipe():
-		production_timer -= delta
-		if production_timer <= -2.0:
-			_exit_current_building()
-			task = Task.IDLE
-		return
 	production_timer -= delta
-	if production_timer > 0.0:
-		return
-	if inside_building.produce_selected_recipe():
-		produced_items += 1
-	production_timer = inside_building.get_production_time()
+	var production_events := 0
+	while production_timer <= 0.0 and production_events < 64:
+		if not inside_building.can_produce_selected_recipe():
+			if production_timer <= -2.0:
+				_exit_current_building()
+				task = Task.IDLE
+			return
+		if inside_building.produce_selected_recipe():
+			produced_items += 1
+		production_timer += maxf(inside_building.get_production_time(), 0.01)
+		production_events += 1
 
 
 func _process_rest(delta: float):
@@ -464,7 +775,7 @@ func _process_rest(delta: float):
 		_exit_current_building()
 		task = Task.IDLE
 		return
-	if not auto_work_enabled:
+	if not auto_work_enabled and not ai_controlled:
 		return
 	idle_check_timer -= delta
 	if idle_check_timer > 0.0:
@@ -481,9 +792,9 @@ func _has_automatic_work() -> bool:
 
 
 func command_enter_building(building: Building):
-	_cancel_task()
-	if not is_instance_valid(building) or not building.is_completed():
+	if not is_instance_valid(building) or building.faction_id != faction_id or not building.is_completed():
 		return
+	_cancel_task()
 	if building.is_factory():
 		profession = "Рабочий завода"
 	target_building = building
@@ -494,8 +805,7 @@ func command_enter_building(building: Building):
 func _exit_current_building():
 	if not is_instance_valid(inside_building):
 		inside_building = null
-		visible = true
-		$CollisionShape2D.set_deferred("disabled", false)
+		_refresh_lod_presentation()
 		return
 	var building := inside_building
 	var exit_position := building.get_exit_position(self)
@@ -506,8 +816,7 @@ func _exit_current_building():
 	path_points = PackedVector2Array()
 	path_index = 0
 	path_destination = Vector2(INF, INF)
-	visible = true
-	$CollisionShape2D.set_deferred("disabled", false)
+	_refresh_lod_presentation()
 	last_motion_position = global_position
 
 
@@ -540,7 +849,11 @@ func _find_nearest_tree():
 	return _find_nearest_resource(&"wood")
 
 
-func _find_nearest_resource(resource_type: StringName):
+func _find_nearest_resource(resource_type: StringName) -> Node2D:
+	if is_instance_valid(lod_manager) and lod_manager.has_method("find_nearest_resource"):
+		var indexed_resource = lod_manager.find_nearest_resource(resource_type, global_position)
+		if is_instance_valid(indexed_resource):
+			return indexed_resource
 	var nearest_tree: Node2D
 	var nearest_distance := INF
 	var fewest_workers := 2147483647
@@ -565,7 +878,7 @@ func _find_free_warehouse(resource_type: StringName) -> Building:
 	var nearest: Building
 	var nearest_distance := INF
 	for building in get_tree().get_nodes_in_group("buildings"):
-		if building is not Building or not building.can_accept_worker(resource_type):
+		if building is not Building or building.faction_id != faction_id or not building.can_accept_worker(resource_type):
 			continue
 		var distance := global_position.distance_squared_to(building.global_position)
 		if distance < nearest_distance:
@@ -578,7 +891,7 @@ func _find_warehouse_with_resource(resource_type: StringName) -> Building:
 	var nearest: Building
 	var nearest_distance := INF
 	for building in get_tree().get_nodes_in_group("buildings"):
-		if building is not Building or not building.has_stored_resource(resource_type):
+		if building is not Building or building.faction_id != faction_id or not building.has_stored_resource(resource_type):
 			continue
 		var distance := global_position.distance_squared_to(building.global_position)
 		if distance < nearest_distance:
@@ -591,14 +904,14 @@ func _get_collection_target(resource_type: StringName) -> int:
 	var total_remaining := 0
 	if not build_job_kind.is_empty():
 		for building in get_tree().get_nodes_in_group("buildings"):
-			if building is Building and building.under_construction and building.building_kind == build_job_kind:
+			if building is Building and building.faction_id == faction_id and building.under_construction and building.building_kind == build_job_kind:
 				total_remaining += building.get_remaining_resource(resource_type)
 	elif is_instance_valid(target_building):
 		total_remaining = target_building.get_remaining_resource(resource_type)
 
 	var carried_by_others := 0
 	for unit in get_tree().get_nodes_in_group("units"):
-		if unit == self or unit is not Unit or unit.build_job_kind != build_job_kind:
+		if unit == self or unit is not Unit or unit.faction_id != faction_id or unit.build_job_kind != build_job_kind:
 			continue
 		carried_by_others += unit.carried_stone if resource_type == &"stone" else unit.carried_wood
 
@@ -654,6 +967,8 @@ func command_harvest(tree: Node2D):
 
 
 func command_build(building: Building):
+	if not is_instance_valid(building) or building.faction_id != faction_id:
+		return
 	_cancel_task()
 	profession = "Строитель"
 	build_job_kind = building.building_kind
@@ -666,10 +981,15 @@ func command_build(building: Building):
 
 func command_build_line(segments: Array[Building]):
 	_cancel_task()
-	profession = "Строитель"
-	if not segments.is_empty():
-		build_job_kind = segments[0].building_kind
+	var own_segments: Array[Building] = []
 	for segment in segments:
+		if is_instance_valid(segment) and segment.faction_id == faction_id:
+			own_segments.append(segment)
+	if own_segments.is_empty():
+		return
+	profession = "Строитель"
+	build_job_kind = own_segments[0].building_kind
+	for segment in own_segments:
 		build_queue.append(segment)
 	_advance_build_queue()
 
@@ -688,7 +1008,7 @@ func _advance_build_queue():
 	var nearest_distance := INF
 	if not build_job_kind.is_empty():
 		for building in get_tree().get_nodes_in_group("buildings"):
-			if building is not Building or building.building_kind != build_job_kind or not building.under_construction:
+			if building is not Building or building.faction_id != faction_id or building.building_kind != build_job_kind or not building.under_construction:
 				continue
 			if building.building_kind == "road" and not building.active_builders.is_empty():
 				continue
@@ -751,6 +1071,8 @@ func _issue_context_command(mouse_position: Vector2):
 
 
 func select(additive := false):
+	if not can_be_controlled_locally():
+		return
 	if not additive:
 		clear_selection()
 	Building.selected_building = null
@@ -823,11 +1145,14 @@ static func clear_selection():
 
 static func set_selection(units: Array[Unit]):
 	clear_selection()
-	if not units.is_empty():
-		Building.selected_building = null
+	var controllable_units: Array[Unit] = []
 	for unit in units:
-		if is_instance_valid(unit):
-			unit.selected = true
-			unit.selection.visible = true
-			selected_units.append(unit)
+		if is_instance_valid(unit) and unit.can_be_controlled_locally():
+			controllable_units.append(unit)
+	if not controllable_units.is_empty():
+		Building.selected_building = null
+	for unit in controllable_units:
+		unit.selected = true
+		unit.selection.visible = true
+		selected_units.append(unit)
 	selected_unit = selected_units.back() if not selected_units.is_empty() else null

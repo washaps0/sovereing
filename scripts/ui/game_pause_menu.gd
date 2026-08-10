@@ -7,6 +7,7 @@ var save_name_input: LineEdit
 var saves_list: ItemList
 var message_label: Label
 var saves: Array[Dictionary] = []
+var save_menu_button: Button
 
 
 func _ready():
@@ -49,13 +50,25 @@ func _create_interface():
 	title.add_theme_font_size_override("font_size", 30)
 	title.add_theme_color_override("font_color", SovereignUITheme.ACCENT_BRIGHT)
 	root_box.add_child(title)
+	var network_label := Label.new()
+	network_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	network_label.add_theme_color_override("font_color", SovereignUITheme.MUTED)
+	if NetworkManager.is_lan_session():
+		var slot := NetworkManager.get_faction_slot(NetworkManager.get_local_faction_id())
+		network_label.text = "LAN • %s" % str(slot.get("nickname", NetworkManager.local_nickname))
+	else:
+		network_label.text = "Одиночная игра"
+	root_box.add_child(network_label)
 
 	main_box = VBoxContainer.new()
 	root_box.add_child(main_box)
 	_add_main_button("Продолжить", _toggle_pause)
-	_add_main_button("Сохранить игру", _show_save_page)
+	save_menu_button = _add_main_button("Сохранить игру", _show_save_page)
+	if NetworkManager.is_lan_session() and not NetworkManager.is_host():
+		save_menu_button.text = "Сохранение доступно хосту"
+		save_menu_button.disabled = true
 	_add_main_button("Выйти в главное меню", _return_to_menu)
-	_add_main_button("Выйти из игры", func(): get_tree().quit())
+	_add_main_button("Выйти из игры", _quit_game)
 
 	save_box = VBoxContainer.new()
 	save_box.visible = false
@@ -92,11 +105,12 @@ func _create_interface():
 	root_box.add_child(message_label)
 
 
-func _add_main_button(text: String, callback: Callable):
+func _add_main_button(text: String, callback: Callable) -> Button:
 	var button := Button.new()
 	button.text = text
 	button.pressed.connect(callback)
 	main_box.add_child(button)
+	return button
 
 
 func _toggle_pause():
@@ -106,7 +120,8 @@ func _toggle_pause():
 	else:
 		overlay.visible = true
 		_show_pause_page()
-		get_tree().paused = true
+		# В LAN локальная пауза рассинхронизировала бы клиента с хостом.
+		get_tree().paused = not NetworkManager.is_lan_session()
 
 
 func _show_pause_page():
@@ -149,3 +164,8 @@ func _save_game():
 func _return_to_menu():
 	overlay.visible = false
 	SaveManager.return_to_main_menu()
+
+
+func _quit_game():
+	NetworkManager.shutdown_network()
+	get_tree().quit()

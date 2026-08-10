@@ -10,6 +10,8 @@ const TEXTURES: Array[Texture2D] = [
 var rock_variant := 0
 var harvest_progress := {}
 var progress_bar: WorldProgressBar
+var lod_active := true
+var lod_record_id := 0
 @onready var rock_sprite: Sprite2D = $Sprite2D
 
 
@@ -36,12 +38,32 @@ func _process(_delta: float):
 	progress_bar.value = highest * 100.0
 
 
+func set_lod_active(active: bool):
+	if lod_active == active:
+		return
+	lod_active = active
+	visible = active
+	input_pickable = active
+	monitoring = active
+	set_process(active)
+	$CollisionShape2D.set_deferred("disabled", not active)
+
+
 func harvest(amount: int) -> int:
 	var mined := mini(amount, stone_amount)
 	stone_amount -= mined
+	_sync_lod_amount()
 	if stone_amount <= 0:
 		queue_free()
 	return mined
+
+
+func _sync_lod_amount():
+	if lod_record_id <= 0:
+		return
+	var manager := get_tree().get_first_node_in_group("simulation_lod_manager")
+	if is_instance_valid(manager) and manager.has_method("update_resource_amount"):
+		manager.update_resource_amount(lod_record_id, stone_amount)
 
 
 func is_depleted() -> bool:

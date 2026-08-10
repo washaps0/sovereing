@@ -11,6 +11,8 @@ const RESIDENCE_SCENE := preload("res://scenes/objects/buildings/residence.tscn"
 const WAREHOUSE_SCENE := preload("res://scenes/objects/buildings/warehouse.tscn")
 const FACTORY_SCENE := preload("res://scenes/objects/buildings/fabric.tscn")
 const ROAD_SCENE := preload("res://scenes/objects/buildings/road.tscn")
+const SPAWN_MARGIN := 320.0
+const SPAWN_CLEAR_RADIUS := 230.0
 
 @export var starting_unit_count := 5
 @export var unit_spawn_position := Vector2(300, 300)
@@ -19,10 +21,7 @@ const ROAD_SCENE := preload("res://scenes/objects/buildings/road.tscn")
 
 
 func spawn_starting_units():
-	for i in range(starting_unit_count):
-		var unit = UNIT_SCENE.instantiate()
-		unit.position = unit_spawn_position + Vector2(i * unit_spacing, 0)
-		add_child(unit)
+	spawn_session_units(_get_default_session_slots())
 
 var forest_noise := FastNoiseLite.new()
 
@@ -45,25 +44,50 @@ var rng := RandomNumberGenerator.new()
 var world_seed := 12345
 
 func generate_ground():
+	# Один TileMapLayer хранит и отрисовывает землю чанками. Раньше для карты
+	# создавалось 40 000 отдельных Sprite2D, из-за чего даже невидимая часть
+	# мира оставалась тяжёлой для SceneTree.
+	var ground_layer := TileMapLayer.new()
+	ground_layer.name = "GroundTiles"
+	ground_layer.position = -Vector2.ONE * TILE_SIZE * 0.5
+	ground_layer.rendering_quadrant_size = 16
+	var tile_set := TileSet.new()
+	tile_set.tile_size = Vector2i.ONE * TILE_SIZE
+	var source_ids: Array[int] = []
+	for grass_texture in grass_textures:
+		var source := TileSetAtlasSource.new()
+		source.texture = grass_texture
+		source.texture_region_size = Vector2i.ONE * TILE_SIZE
+		source.create_tile(Vector2i.ZERO)
+		source_ids.append(tile_set.add_source(source))
+	ground_layer.tile_set = tile_set
+	$ground.add_child(ground_layer)
 	for x in range(MAP_WIDTH):
 		for y in range(MAP_HEIGHT):
-			var grass_texture = grass_textures[rng.randi_range(0, grass_textures.size() - 1)]
-			var grass_sprite = Sprite2D.new()
-			grass_sprite.texture = grass_texture
-			grass_sprite.position = Vector2(x * TILE_SIZE, y * TILE_SIZE)
-			$ground.add_child(grass_sprite)
+			var source_id := source_ids[rng.randi_range(0, source_ids.size() - 1)]
+			ground_layer.set_cell(Vector2i(x, y), source_id, Vector2i.ZERO)
 
 
 func spawn_tree(pos: Vector2):
+	var variant := rng.randi_range(0, tree_textures.size() - 1)
+	var lod_manager := get_node_or_null("SimulationLODManager")
+	if is_instance_valid(lod_manager) and lod_manager.has_method("register_resource_data"):
+		lod_manager.register_resource_data("tree", pos, variant, 20)
+		return
 	var tree = TREE_SCENE.instantiate()
-	tree.tree_variant = rng.randi_range(0, tree_textures.size() - 1)
+	tree.tree_variant = variant
 	tree.position = pos
 	$trees.add_child(tree)
 
 
 func spawn_rock(pos: Vector2):
+	var variant := rng.randi_range(0, 2)
+	var lod_manager := get_node_or_null("SimulationLODManager")
+	if is_instance_valid(lod_manager) and lod_manager.has_method("register_resource_data"):
+		lod_manager.register_resource_data("rock", pos, variant, 30)
+		return
 	var rock = ROCK_SCENE.instantiate()
-	rock.rock_variant = rng.randi_range(0, 2)
+	rock.rock_variant = variant
 	rock.position = pos
 	$rocks.add_child(rock)
 
@@ -92,6 +116,7 @@ func generate_forest():
 				
 func _ready():
 	var save_manager := get_node_or_null("/root/SaveManager")
+	var network_manager := get_node_or_null("/root/NetworkManager")
 	world_seed = int(save_manager.current_seed) if is_instance_valid(save_manager) else 12345
 	rng.seed = world_seed
 
@@ -102,10 +127,15 @@ func _ready():
 		generate_ground()
 		generate_forest()
 		generate_rock_deposits()
-		spawn_starting_units()
 	var saved_state: Dictionary = save_manager.consume_pending_save() if is_instance_valid(save_manager) else {}
 	if not saved_state.is_empty():
+		if is_instance_valid(network_manager):
+			network_manager.prepare_loaded_game(saved_state.get("session_slots", []))
 		apply_save_data(saved_state)
+	elif generate_world_on_ready:
+		Unit.next_name_index = 0
+		var slots: Array = network_manager.get_session_slots() if is_instance_valid(network_manager) and network_manager.has_session() else _get_default_session_slots()
+		spawn_session_units(slots)
 
 
 func get_save_data() -> Dictionary:
@@ -113,19 +143,27 @@ func get_save_data() -> Dictionary:
 		"buildings": [],
 		"resources": [],
 		"units": [],
+		"session_slots": [],
 		"auto_work": Unit.auto_work_enabled,
 		"continuous_harvest": Unit.continuous_harvest_mode,
 	}
+	var network_manager := get_node_or_null("/root/NetworkManager")
+	if is_instance_valid(network_manager):
+		data.session_slots = network_manager.get_session_slots()
 	for building in get_tree().get_nodes_in_group("buildings"):
 		if building is Building and is_ancestor_of(building):
 			data.buildings.append(_serialize_building(building))
-	for resource in get_tree().get_nodes_in_group("resources"):
-		if not is_instance_valid(resource) or not is_ancestor_of(resource) or resource.is_depleted():
-			continue
-		if resource.is_in_group("trees"):
-			data.resources.append({"type": "tree", "position": _vector_to_data(resource.position), "variant": resource.tree_variant, "amount": resource.wood_amount})
-		elif resource.is_in_group("rocks"):
-			data.resources.append({"type": "rock", "position": _vector_to_data(resource.position), "variant": resource.rock_variant, "amount": resource.stone_amount})
+	var lod_manager := get_node_or_null("SimulationLODManager")
+	if is_instance_valid(lod_manager) and lod_manager.has_method("get_resource_save_data"):
+		data.resources = lod_manager.get_resource_save_data()
+	else:
+		for resource in get_tree().get_nodes_in_group("resources"):
+			if not is_instance_valid(resource) or not is_ancestor_of(resource) or resource.is_depleted():
+				continue
+			if resource.is_in_group("trees"):
+				data.resources.append({"type": "tree", "position": _vector_to_data(resource.position), "variant": resource.tree_variant, "amount": resource.wood_amount})
+			elif resource.is_in_group("rocks"):
+				data.resources.append({"type": "rock", "position": _vector_to_data(resource.position), "variant": resource.rock_variant, "amount": resource.stone_amount})
 	for unit in get_tree().get_nodes_in_group("units"):
 		if unit is not Unit or not is_ancestor_of(unit):
 			continue
@@ -135,6 +173,9 @@ func get_save_data() -> Dictionary:
 		data.units.append({
 			"position": _vector_to_data(saved_position),
 			"name": unit.unit_name,
+			"faction_id": unit.faction_id,
+			"faction_name": unit.faction_name,
+			"network_id": unit.network_id,
 			"health": unit.health,
 			"max_health": unit.max_health,
 			"profession": unit.profession,
@@ -154,6 +195,8 @@ func _serialize_building(building: Building) -> Dictionary:
 		limits[str(resource_type)] = building.get_storage_limit(resource_type)
 	var result := {
 		"kind": building.building_kind,
+		"faction_id": building.faction_id,
+		"network_id": building.network_id,
 		"position": _vector_to_data(building.position),
 		"rotation": building.rotation,
 		"address": building.address,
@@ -178,6 +221,9 @@ func _serialize_building(building: Building) -> Dictionary:
 func apply_save_data(data: Dictionary):
 	Unit.clear_selection()
 	Building.selected_building = null
+	var lod_manager := get_node_or_null("SimulationLODManager")
+	if is_instance_valid(lod_manager) and lod_manager.has_method("clear_resource_data"):
+		lod_manager.clear_resource_data()
 	for unit in get_tree().get_nodes_in_group("units"):
 		if is_instance_valid(unit) and is_ancestor_of(unit):
 			unit.free()
@@ -199,21 +245,31 @@ func apply_save_data(data: Dictionary):
 	if camera != null and not camera_data.is_empty():
 		camera.position = _data_to_vector(camera_data.get("position", [576, 321]))
 		camera.zoom = _data_to_vector(camera_data.get("zoom", [1, 1]))
+	if is_instance_valid(lod_manager) and lod_manager.has_method("rebuild_spatial_index"):
+		lod_manager.call_deferred("rebuild_spatial_index")
 
 
 func _restore_resource(data: Dictionary):
+	var resource_kind := str(data.get("type", ""))
+	var amount := int(data.get("amount", 20 if resource_kind == "tree" else 30))
+	var position := _data_to_vector(data.get("position", [0, 0]))
+	var variant := int(data.get("variant", 0))
+	var lod_manager := get_node_or_null("SimulationLODManager")
+	if is_instance_valid(lod_manager) and lod_manager.has_method("register_resource_data"):
+		lod_manager.register_resource_data(resource_kind, position, variant, amount)
+		return
 	var resource: Node2D
-	if data.get("type", "") == "tree":
+	if resource_kind == "tree":
 		resource = TREE_SCENE.instantiate()
-		resource.tree_variant = int(data.get("variant", 0))
-		resource.wood_amount = int(data.get("amount", 20))
-		resource.position = _data_to_vector(data.get("position", [0, 0]))
+		resource.tree_variant = variant
+		resource.wood_amount = amount
+		resource.position = position
 		$trees.add_child(resource)
-	elif data.get("type", "") == "rock":
+	elif resource_kind == "rock":
 		resource = ROCK_SCENE.instantiate()
-		resource.rock_variant = int(data.get("variant", 0))
-		resource.stone_amount = int(data.get("amount", 30))
-		resource.position = _data_to_vector(data.get("position", [0, 0]))
+		resource.rock_variant = variant
+		resource.stone_amount = amount
+		resource.position = position
 		$rocks.add_child(resource)
 
 
@@ -226,6 +282,13 @@ func _restore_building(data: Dictionary):
 		"road": scene = ROAD_SCENE
 		_: scene = RESIDENCE_SCENE
 	var building := scene.instantiate() as Building
+	building.faction_id = int(data.get("faction_id", 0))
+	building.network_id = int(data.get("network_id", 0))
+	var network_manager := get_node_or_null("/root/NetworkManager")
+	if is_instance_valid(network_manager):
+		var slot: Dictionary = network_manager.get_faction_slot(building.faction_id)
+		if not slot.is_empty():
+			building.faction_name = str(slot.get("nickname", building.faction_name))
 	building.position = _data_to_vector(data.get("position", [0, 0]))
 	var target_container: Node = $roads if kind == "road" else $buildings
 	target_container.add_child(building)
@@ -260,6 +323,19 @@ func _restore_building(data: Dictionary):
 
 func _restore_unit(data: Dictionary):
 	var unit := UNIT_SCENE.instantiate() as Unit
+	var faction_id := int(data.get("faction_id", 0))
+	var faction_name := str(data.get("faction_name", "Игрок" if faction_id == 0 else "ИИ %d" % faction_id))
+	var controller_peer_id := 1 if faction_id == 0 else 0
+	var ai_controlled := faction_id != 0
+	var network_manager := get_node_or_null("/root/NetworkManager")
+	if is_instance_valid(network_manager):
+		var slot: Dictionary = network_manager.get_faction_slot(faction_id)
+		if not slot.is_empty():
+			controller_peer_id = int(slot.get("controller_peer_id", controller_peer_id))
+			ai_controlled = bool(slot.get("is_ai", ai_controlled))
+			faction_name = str(slot.get("nickname", faction_name))
+	unit.configure_faction(faction_id, controller_peer_id, ai_controlled, faction_name)
+	unit.network_id = int(data.get("network_id", 0))
 	unit.unit_name = str(data.get("name", ""))
 	unit.max_health = int(data.get("max_health", 100))
 	unit.health = int(data.get("health", unit.max_health))
@@ -269,6 +345,133 @@ func _restore_unit(data: Dictionary):
 	unit.produced_items = int(data.get("produced_items", 0))
 	unit.position = _data_to_vector(data.get("position", [300, 300]))
 	add_child(unit)
+
+
+func spawn_session_units(raw_slots: Array):
+	var slot_count := mini(raw_slots.size(), 4)
+	var ai_slots: Array[Dictionary] = []
+	for slot_index in range(slot_count):
+		var raw_slot = raw_slots[slot_index]
+		if raw_slot is not Dictionary:
+			continue
+		var faction_id := clampi(int(raw_slot.get("faction_id", slot_index)), 0, 3)
+		if bool(raw_slot.get("is_ai", true)):
+			ai_slots.append(raw_slot)
+		var spawn_position := get_faction_spawn_position(faction_id)
+		_clear_spawn_area(spawn_position)
+		var inward_x := 1.0 if faction_id in [0, 2] else -1.0
+		var inward_y := 1.0 if faction_id in [0, 1] else -1.0
+		for unit_index in range(starting_unit_count):
+			var unit := UNIT_SCENE.instantiate() as Unit
+			var column := unit_index % 3
+			var row := unit_index / 3
+			unit.position = spawn_position + Vector2(column * unit_spacing * inward_x, row * unit_spacing * inward_y)
+			unit.network_id = faction_id * 1000 + unit_index + 1
+			unit.name = "Unit_%d" % unit.network_id
+			unit.configure_faction(
+				faction_id,
+				int(raw_slot.get("controller_peer_id", 0)),
+				bool(raw_slot.get("is_ai", true)),
+				str(raw_slot.get("nickname", "ИИ %d" % (faction_id + 1)))
+			)
+			add_child(unit)
+	for ai_slot in ai_slots:
+		_ensure_ai_starting_plan(int(ai_slot.get("faction_id", 0)), str(ai_slot.get("nickname", "ИИ")))
+	_position_camera_for_local_faction()
+
+
+func get_faction_spawn_position(faction_id: int) -> Vector2:
+	var maximum := Vector2(MAP_WIDTH * TILE_SIZE, MAP_HEIGHT * TILE_SIZE) - Vector2.ONE * SPAWN_MARGIN
+	match faction_id:
+		1: return Vector2(maximum.x, SPAWN_MARGIN)
+		2: return Vector2(SPAWN_MARGIN, maximum.y)
+		3: return maximum
+		_: return Vector2.ONE * SPAWN_MARGIN
+
+
+func set_faction_controller(faction_id: int, controller_peer_id: int, ai_controlled: bool, faction_name: String):
+	for unit in get_tree().get_nodes_in_group("units"):
+		if unit is Unit and unit.faction_id == faction_id:
+			unit.configure_faction(faction_id, controller_peer_id, ai_controlled, faction_name)
+	for building in get_tree().get_nodes_in_group("buildings"):
+		if building is Building and building.faction_id == faction_id:
+			building.faction_name = faction_name
+	var selected_units := Unit.get_selected_units()
+	for unit in selected_units:
+		if unit.faction_id == faction_id and not unit.can_be_controlled_locally():
+			unit.deselect()
+	if ai_controlled:
+		_ensure_ai_starting_plan(faction_id, faction_name)
+
+
+func _ensure_ai_starting_plan(faction_id: int, faction_name: String):
+	# Если у покинутой фракции уже есть поселение, ИИ продолжит имеющиеся
+	# стройки и производство. Для пустого угла создаётся базовый план развития.
+	for building in get_tree().get_nodes_in_group("buildings"):
+		if building is Building and building.faction_id == faction_id:
+			return
+	var base := get_faction_spawn_position(faction_id)
+	var inward_x := 1.0 if faction_id in [0, 2] else -1.0
+	var inward_y := 1.0 if faction_id in [0, 1] else -1.0
+	var street_name := "Стартовая %d" % (faction_id + 1)
+	var rotation_angle := 0.0 if inward_y > 0.0 else PI
+
+	var road := ROAD_SCENE.instantiate() as RoadSegment
+	road.faction_id = faction_id
+	road.faction_name = faction_name
+	road.network_id = faction_id * 1000 + 101
+	road.name = "Building_%d" % road.network_id
+	road.position = base + Vector2(105.0 * inward_x, 65.0 * inward_y)
+	$roads.add_child(road)
+	road.setup(street_name, 0.0)
+	road.begin_construction()
+
+	_spawn_ai_building(WAREHOUSE_SCENE, base + Vector2(75.0 * inward_x, 125.0 * inward_y), rotation_angle, faction_id, faction_name, faction_id * 1000 + 102, street_name, 1)
+	_spawn_ai_building(RESIDENCE_SCENE, base + Vector2(150.0 * inward_x, 125.0 * inward_y), rotation_angle, faction_id, faction_name, faction_id * 1000 + 103, street_name, 2)
+	_spawn_ai_building(FACTORY_SCENE, base + Vector2(110.0 * inward_x, 185.0 * inward_y), rotation_angle, faction_id, faction_name, faction_id * 1000 + 104, street_name, 3)
+
+
+func _spawn_ai_building(scene: PackedScene, position: Vector2, rotation_angle: float, faction_id: int, faction_name: String, entity_id: int, street_name: String, house_number: int):
+	var building := scene.instantiate() as Building
+	building.faction_id = faction_id
+	building.faction_name = faction_name
+	building.network_id = entity_id
+	building.name = "Building_%d" % entity_id
+	building.position = position
+	building.rotation = rotation_angle
+	$buildings.add_child(building)
+	building.set_address(street_name, house_number)
+	building.begin_construction()
+
+
+func _clear_spawn_area(center: Vector2):
+	var lod_manager := get_node_or_null("SimulationLODManager")
+	if is_instance_valid(lod_manager) and lod_manager.has_method("remove_resources_in_radius"):
+		lod_manager.remove_resources_in_radius(center, SPAWN_CLEAR_RADIUS)
+		return
+	for group_name in ["resources", "trees", "rocks"]:
+		for resource in get_tree().get_nodes_in_group(group_name):
+			if is_instance_valid(resource) and resource.global_position.distance_to(center) <= SPAWN_CLEAR_RADIUS:
+				resource.free()
+
+
+func _position_camera_for_local_faction():
+	var camera := get_node_or_null("Camera2D") as Camera2D
+	if camera == null:
+		return
+	var network_manager := get_node_or_null("/root/NetworkManager")
+	var faction_id: int = int(network_manager.get_local_faction_id()) if is_instance_valid(network_manager) else 0
+	if faction_id >= 0:
+		camera.position = get_faction_spawn_position(faction_id)
+
+
+func _get_default_session_slots() -> Array:
+	return [
+		{"faction_id": 0, "controller_peer_id": 1, "nickname": "Игрок", "is_ai": false},
+		{"faction_id": 1, "controller_peer_id": 0, "nickname": "ИИ 1", "is_ai": true},
+		{"faction_id": 2, "controller_peer_id": 0, "nickname": "ИИ 2", "is_ai": true},
+		{"faction_id": 3, "controller_peer_id": 0, "nickname": "ИИ 3", "is_ai": true},
+	]
 
 
 func _vector_to_data(value: Vector2) -> Array[float]:

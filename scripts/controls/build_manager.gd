@@ -307,7 +307,7 @@ func _update_responsive_layout():
 func _update_hud():
 	var unit := Unit.get_selected_unit()
 	if is_instance_valid(unit):
-		unit_status.text = "Имя: %s\nЗдоровье: %d/%d\nПрофессия: %s\nСейчас: %s\nГруз: дерево %d, камень %d (%d/%d)\nПроизведено предметов: %d" % [unit.unit_name, unit.health, unit.max_health, unit.get_profession_text(), unit.get_task_text(), unit.carried_wood, unit.carried_stone, unit.get_carried_total(), unit.carry_capacity, unit.produced_items]
+		unit_status.text = "Имя: %s\nФракция: %s\nЗдоровье: %d/%d\nПрофессия: %s\nСейчас: %s\nГруз: дерево %d, камень %d (%d/%d)\nПроизведено предметов: %d" % [unit.unit_name, unit.faction_name, unit.health, unit.max_health, unit.get_profession_text(), unit.get_task_text(), unit.carried_wood, unit.carried_stone, unit.get_carried_total(), unit.carry_capacity, unit.produced_items]
 	else:
 		unit_status.text = "Юнит не выбран"
 	var wood := 0
@@ -317,17 +317,18 @@ func _update_hud():
 	var total_capacity := 0
 	var workers := 0
 	var factory_workers := 0
+	var local_faction_id := _get_local_faction_id()
 	for building in get_tree().get_nodes_in_group("buildings"):
-		if building is Building and building.is_warehouse() and building.is_completed():
+		if building is Building and building.faction_id == local_faction_id and building.is_warehouse() and building.is_completed():
 			wood += building.stored_wood
 			stone += building.stored_stone
 			planks += building.get_stored_resource(&"planks")
 			tools += building.get_stored_resource(&"tools")
 			total_capacity += building.storage_capacity
 			workers += building.assigned_workers.size()
-		elif building is Building and building.is_factory() and building.is_completed():
+		elif building is Building and building.faction_id == local_faction_id and building.is_factory() and building.is_completed():
 			factory_workers += building.occupants.size()
-	resource_status.text = "Ресурсы: %d/%d\nДерево %d | Камень %d\nДоски %d | Инструменты %d\nДобыча %d | Заводы %d" % [wood + stone + planks + tools, total_capacity, wood, stone, planks, tools, workers, factory_workers]
+	resource_status.text = "%s\nРесурсы: %d/%d\nДерево %d | Камень %d\nДоски %d | Инструменты %d\nДобыча %d | Заводы %d" % [_get_local_faction_name(), wood + stone + planks + tools, total_capacity, wood, stone, planks, tools, workers, factory_workers]
 	_update_building_panel()
 
 
@@ -337,6 +338,7 @@ func _update_building_panel():
 		building_panel.visible = false
 		return
 	building_panel.visible = true
+	var editable := building.can_be_edited_locally()
 	building_title.text = building.address if not building.address.is_empty() else building.display_name
 	if building.under_construction:
 		building_status.text = "Строится: дерево %d/%d, камень %d/%d" % [building.delivered_wood, building.wood_required, building.delivered_stone, building.stone_required]
@@ -346,7 +348,7 @@ func _update_building_panel():
 	factory_settings.visible = building.is_factory() and building.is_completed()
 	residents_settings.visible = building.is_residence() and building.is_completed()
 	release_occupants_button.visible = building.is_completed() and (building.is_factory() or building.is_residence())
-	release_occupants_button.disabled = building.occupants.is_empty()
+	release_occupants_button.disabled = building.occupants.is_empty() or not editable
 	if warehouse_settings.visible:
 		var allocated := building.get_total_storage_limits()
 		building_status.text = "Занято %d/%d  •  Квоты %d/%d  •  Свободно %d" % [building.get_total_stored(), building.storage_capacity, allocated, building.storage_capacity, maxi(building.storage_capacity - allocated, 0)]
@@ -357,6 +359,7 @@ func _update_building_panel():
 			var stored_amount := building.get_stored_resource(resource_type)
 			slider.min_value = 0
 			slider.max_value = building.storage_capacity
+			slider.editable = editable
 			slider.value = current_limit
 			var value_label: Label = quota_value_labels[resource_type]
 			value_label.text = "квота %d  •  есть %d" % [current_limit, stored_amount]
@@ -365,6 +368,7 @@ func _update_building_panel():
 		building_status.text = "Работают %d/%d | рецепт: %s" % [building.occupants.size(), building.max_workers, building.get_recipe_name(building.selected_recipe)]
 		factory_diagnostic.text = building.get_factory_status_text()
 		updating_building_controls = true
+		recipe_picker.disabled = not editable
 		for index in range(recipe_picker.item_count):
 			if StringName(recipe_picker.get_item_metadata(index)) == building.selected_recipe:
 				recipe_picker.select(index)
@@ -373,6 +377,8 @@ func _update_building_panel():
 	elif building.is_residence() and building.is_completed():
 		building_status.text = "Жильцы %d/%d" % [building.occupants.size(), building.max_occupants]
 		_update_residents_list(building)
+	if not editable:
+		building_status.text += "\nФракция: %s • только просмотр" % building.faction_name
 
 
 func _update_residents_list(building: Building):
@@ -395,6 +401,7 @@ func _update_residents_list(building: Building):
 			continue
 		var resident_button := Button.new()
 		resident_button.text = "%s — %s, здоровье %d/%d" % [unit.unit_name, unit.get_profession_text(), unit.health, unit.max_health]
+		resident_button.disabled = not unit.can_be_controlled_locally()
 		resident_button.pressed.connect(_select_resident.bind(unit))
 		residents_list.add_child(resident_button)
 
@@ -438,7 +445,7 @@ func _on_storage_quota_changed(value: float, resource_type: StringName):
 	if updating_building_controls:
 		return
 	var building := Building.selected_building
-	if is_instance_valid(building) and building.is_warehouse():
+	if is_instance_valid(building) and building.is_warehouse() and building.can_be_edited_locally():
 		building.set_storage_limit(resource_type, int(value))
 		updating_building_controls = true
 		var slider: HSlider = quota_sliders[resource_type]
@@ -452,13 +459,13 @@ func _on_recipe_selected(index: int):
 	if updating_building_controls:
 		return
 	var building := Building.selected_building
-	if is_instance_valid(building) and building.is_factory():
+	if is_instance_valid(building) and building.is_factory() and building.can_be_edited_locally():
 		building.set_recipe(StringName(recipe_picker.get_item_metadata(index)))
 
 
 func _release_selected_building_occupants():
 	var building := Building.selected_building
-	if not is_instance_valid(building):
+	if not is_instance_valid(building) or not building.can_be_edited_locally():
 		return
 	for unit in building.occupants.duplicate():
 		if is_instance_valid(unit):
@@ -558,13 +565,13 @@ func _apply_box_selection(from: Vector2, to: Vector2, additive: bool):
 	var rect := Rect2(from, to - from).abs()
 	if rect.size.length() < 8.0:
 		for unit in get_tree().get_nodes_in_group("units"):
-			if unit.global_position.distance_to(to) <= 16.0:
+			if unit is Unit and unit.can_be_controlled_locally() and unit.global_position.distance_to(to) <= 16.0:
 				if unit not in selected:
 					selected.append(unit)
 				break
 	else:
 		for unit in get_tree().get_nodes_in_group("units"):
-			if rect.has_point(unit.global_position) and unit not in selected:
+			if unit is Unit and unit.can_be_controlled_locally() and rect.has_point(unit.global_position) and unit not in selected:
 				selected.append(unit)
 	Unit.set_selection(selected)
 
@@ -633,7 +640,7 @@ func _toggle_auto_work():
 	Unit.auto_work_enabled = not Unit.auto_work_enabled
 	if not Unit.auto_work_enabled:
 		for building in get_tree().get_nodes_in_group("buildings"):
-			if building is Building and building.is_residence():
+			if building is Building and building.faction_id == _get_local_faction_id() and building.is_residence():
 				for unit in building.occupants.duplicate():
 					if is_instance_valid(unit):
 						unit.force_exit_building(building)
@@ -649,6 +656,8 @@ func _begin_building_placement(scene: PackedScene):
 	building_rotation_offset = 0.0
 	selected_scene = scene
 	ghost = scene.instantiate() as Building
+	ghost.faction_id = _get_local_faction_id()
+	ghost.faction_name = _get_local_faction_name()
 	ghost.placement_preview = true
 	ghost.collision_layer = 0
 	ghost.collision_mask = 0
@@ -763,6 +772,8 @@ func _create_road_line(start: Vector2, end: Vector2):
 	for i in range(count):
 		var position := start + direction * (RoadSegment.SEGMENT_LENGTH * (i + 0.5))
 		var segment := ROAD_SCENE.instantiate() as RoadSegment
+		segment.faction_id = _get_local_faction_id()
+		segment.faction_name = _get_local_faction_name()
 		segment.position = position
 		roads.add_child(segment)
 		segment.setup(street, angle)
@@ -818,7 +829,7 @@ func _nearest_road(point: Vector2, max_distance: float) -> RoadSegment:
 	var nearest: RoadSegment
 	var best := max_distance * max_distance
 	for road in get_tree().get_nodes_in_group("roads"):
-		if road.under_construction:
+		if road.faction_id != _get_local_faction_id() or road.under_construction:
 			continue
 		var direction: Vector2 = Vector2.RIGHT.rotated(road.rotation)
 		var along: float = clampf((point - road.global_position).dot(direction), -RoadSegment.SEGMENT_LENGTH * 0.5, RoadSegment.SEGMENT_LENGTH * 0.5)
@@ -834,7 +845,7 @@ func _nearest_road_endpoint(point: Vector2, max_distance: float) -> Dictionary:
 	var result := {}
 	var best := max_distance * max_distance
 	for road in get_tree().get_nodes_in_group("roads"):
-		if road.under_construction:
+		if road.faction_id != _get_local_faction_id() or road.under_construction:
 			continue
 		var direction: Vector2 = Vector2.RIGHT.rotated(road.rotation)
 		var along: float = clampf((point - road.global_position).dot(direction), -RoadSegment.SEGMENT_LENGTH * 0.5, RoadSegment.SEGMENT_LENGTH * 0.5)
@@ -890,3 +901,17 @@ func _cancel_road_mode():
 func _cancel_all_placement():
 	_cancel_building_placement()
 	_cancel_road_mode()
+
+
+func _get_local_faction_id() -> int:
+	var network_manager := get_node_or_null("/root/NetworkManager")
+	return network_manager.get_local_faction_id() if is_instance_valid(network_manager) else 0
+
+
+func _get_local_faction_name() -> String:
+	var network_manager := get_node_or_null("/root/NetworkManager")
+	if is_instance_valid(network_manager):
+		var slot: Dictionary = network_manager.get_faction_slot(_get_local_faction_id())
+		if not slot.is_empty():
+			return str(slot.get("nickname", "Игрок"))
+	return "Игрок"

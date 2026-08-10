@@ -1,19 +1,49 @@
 extends Control
 
-var new_game_box: VBoxContainer
-var load_box: VBoxContainer
+var panel: PanelContainer
+var page_scroll: ScrollContainer
+var page_stack: VBoxContainer
+var pages: Array[Control] = []
+var main_page: VBoxContainer
+var new_game_page: VBoxContainer
+var load_page: VBoxContainer
+var multiplayer_page: VBoxContainer
+var host_setup_page: VBoxContainer
+var join_setup_page: VBoxContainer
+var lobby_page: VBoxContainer
 var seed_input: LineEdit
 var saves_list: ItemList
 var load_button: Button
 var delete_button: Button
 var message_label: Label
+var nickname_input: LineEdit
+var host_seed_input: LineEdit
+var host_ai_count: SpinBox
+var host_port_input: SpinBox
+var join_address_input: LineEdit
+var join_port_input: SpinBox
+var lobby_settings_label: Label
+var lobby_address_label: Label
+var lobby_players_list: ItemList
+var ready_button: Button
 var saves: Array[Dictionary] = []
 
 
 func _ready():
 	theme = SovereignUITheme.create_theme()
 	_create_interface()
+	NetworkManager.lobby_state_changed.connect(_on_lobby_state_changed)
+	NetworkManager.connection_state_changed.connect(_on_connection_state_changed)
+	NetworkManager.network_error.connect(_on_network_error)
+	get_viewport().size_changed.connect(_update_layout)
+	_update_layout()
 	_refresh_saves()
+	var notice := NetworkManager.consume_menu_notice()
+	if not notice.is_empty():
+		message_label.text = notice
+	if NetworkManager.lobby_active:
+		_show_page(lobby_page, false)
+		_on_lobby_state_changed(NetworkManager.get_lobby_players(), NetworkManager.lobby_settings)
 
 
 func _create_interface():
@@ -22,104 +52,349 @@ func _create_interface():
 	background.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	add_child(background)
 
+	var margin := MarginContainer.new()
+	margin.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	margin.add_theme_constant_override("margin_left", 16)
+	margin.add_theme_constant_override("margin_top", 16)
+	margin.add_theme_constant_override("margin_right", 16)
+	margin.add_theme_constant_override("margin_bottom", 16)
+	add_child(margin)
 	var center := CenterContainer.new()
-	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	add_child(center)
-	var panel := PanelContainer.new()
-	panel.custom_minimum_size = Vector2(460, 0)
+	center.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	center.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	margin.add_child(center)
+	panel = PanelContainer.new()
 	center.add_child(panel)
-	var box := VBoxContainer.new()
-	box.add_theme_constant_override("separation", 10)
-	panel.add_child(box)
+	var root_box := VBoxContainer.new()
+	root_box.add_theme_constant_override("separation", 10)
+	panel.add_child(root_box)
 
 	var title := Label.new()
 	title.text = "SOVEREIGN"
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title.add_theme_font_size_override("font_size", 38)
 	title.add_theme_color_override("font_color", SovereignUITheme.ACCENT_BRIGHT)
-	box.add_child(title)
+	root_box.add_child(title)
 	var subtitle := Label.new()
 	subtitle.text = "Поселение • Государство • Война"
 	subtitle.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	subtitle.add_theme_color_override("font_color", SovereignUITheme.MUTED)
-	box.add_child(subtitle)
+	root_box.add_child(subtitle)
 
-	var new_button := Button.new()
-	new_button.text = "Новая игра"
-	new_button.pressed.connect(_show_new_game)
-	box.add_child(new_button)
-	var show_load_button := Button.new()
-	show_load_button.text = "Загрузить игру"
-	show_load_button.pressed.connect(_show_load_game)
-	box.add_child(show_load_button)
-	var quit_button := Button.new()
-	quit_button.text = "Выйти"
-	quit_button.pressed.connect(func(): get_tree().quit())
-	box.add_child(quit_button)
+	page_scroll = ScrollContainer.new()
+	page_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	page_scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	page_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	root_box.add_child(page_scroll)
+	page_stack = VBoxContainer.new()
+	page_stack.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	page_scroll.add_child(page_stack)
 
-	new_game_box = VBoxContainer.new()
-	new_game_box.visible = false
-	box.add_child(new_game_box)
-	var seed_label := Label.new()
-	seed_label.text = "Сид мира (число или любое слово):"
-	new_game_box.add_child(seed_label)
-	seed_input = LineEdit.new()
-	seed_input.placeholder_text = "Пусто — случайный сид"
-	seed_input.text_submitted.connect(func(_value): _start_new_game())
-	new_game_box.add_child(seed_input)
-	var start_button := Button.new()
-	start_button.text = "Начать новую игру"
-	start_button.pressed.connect(_start_new_game)
-	new_game_box.add_child(start_button)
-
-	load_box = VBoxContainer.new()
-	load_box.visible = false
-	box.add_child(load_box)
-	var saves_title := Label.new()
-	saves_title.text = "Сохранения:"
-	load_box.add_child(saves_title)
-	saves_list = ItemList.new()
-	saves_list.custom_minimum_size = Vector2(420, 190)
-	saves_list.item_selected.connect(_on_save_selected)
-	saves_list.item_activated.connect(func(_index): _load_selected_save())
-	load_box.add_child(saves_list)
-	var save_buttons := HBoxContainer.new()
-	load_box.add_child(save_buttons)
-	load_button = Button.new()
-	load_button.text = "Загрузить"
-	load_button.disabled = true
-	load_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	load_button.pressed.connect(_load_selected_save)
-	save_buttons.add_child(load_button)
-	delete_button = Button.new()
-	delete_button.text = "Удалить"
-	delete_button.disabled = true
-	delete_button.pressed.connect(_delete_selected_save)
-	save_buttons.add_child(delete_button)
+	_create_main_page()
+	_create_new_game_page()
+	_create_load_page()
+	_create_multiplayer_page()
+	_create_host_setup_page()
+	_create_join_setup_page()
+	_create_lobby_page()
 
 	message_label = Label.new()
 	message_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	message_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	box.add_child(message_label)
+	message_label.add_theme_color_override("font_color", SovereignUITheme.MUTED)
+	root_box.add_child(message_label)
+	_show_page(main_page)
 
 
-func _show_new_game():
-	new_game_box.visible = true
-	load_box.visible = false
-	message_label.text = ""
-	seed_input.grab_focus()
+func _create_main_page():
+	main_page = _new_page()
+	_add_button(main_page, "Новая игра", _show_new_game_page)
+	_add_button(main_page, "Загрузить игру", _show_load_game)
+	_add_button(main_page, "Мультиплеер по LAN", _show_multiplayer_page)
+	_add_button(main_page, "Выйти", func(): get_tree().quit())
+
+
+func _create_new_game_page():
+	new_game_page = _new_page()
+	_add_page_title(new_game_page, "Новая игра")
+	var seed_label := Label.new()
+	seed_label.text = "Сид мира (число или любое слово):"
+	new_game_page.add_child(seed_label)
+	seed_input = LineEdit.new()
+	seed_input.placeholder_text = "Пусто — случайный сид"
+	seed_input.text_submitted.connect(func(_value): _start_new_game())
+	new_game_page.add_child(seed_input)
+	_add_button(new_game_page, "Начать новую игру", _start_new_game)
+	_add_button(new_game_page, "Назад", func(): _show_page(main_page))
+
+
+func _create_load_page():
+	load_page = _new_page()
+	_add_page_title(load_page, "Загрузить игру")
+	var saves_title := Label.new()
+	saves_title.text = "Сохранения:"
+	load_page.add_child(saves_title)
+	saves_list = ItemList.new()
+	saves_list.custom_minimum_size = Vector2(0, 180)
+	saves_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	saves_list.item_selected.connect(_on_save_selected)
+	saves_list.item_activated.connect(func(_index): _load_selected_save())
+	load_page.add_child(saves_list)
+	load_button = _add_button(load_page, "Загрузить", _load_selected_save)
+	load_button.disabled = true
+	delete_button = _add_button(load_page, "Удалить", _delete_selected_save)
+	delete_button.disabled = true
+	_add_button(load_page, "Назад", func(): _show_page(main_page))
+
+
+func _create_multiplayer_page():
+	multiplayer_page = _new_page()
+	_add_page_title(multiplayer_page, "Мультиплеер по локальной сети")
+	var nickname_label := Label.new()
+	nickname_label.text = "Ваш никнейм:"
+	multiplayer_page.add_child(nickname_label)
+	nickname_input = LineEdit.new()
+	nickname_input.max_length = 24
+	nickname_input.text = NetworkManager.local_nickname
+	nickname_input.placeholder_text = "Игрок"
+	multiplayer_page.add_child(nickname_input)
+	var hint := Label.new()
+	hint.text = "Хост создаёт лобби, остальные подключаются по его локальному IP-адресу."
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	hint.add_theme_color_override("font_color", SovereignUITheme.MUTED)
+	multiplayer_page.add_child(hint)
+	_add_button(multiplayer_page, "Создать игру", _show_host_setup)
+	_add_button(multiplayer_page, "Присоединиться", _show_join_setup)
+	_add_button(multiplayer_page, "Назад", func(): _show_page(main_page))
+
+
+func _create_host_setup_page():
+	host_setup_page = _new_page()
+	_add_page_title(host_setup_page, "Настройки хоста")
+	var seed_label := Label.new()
+	seed_label.text = "Сид мира:"
+	host_setup_page.add_child(seed_label)
+	host_seed_input = LineEdit.new()
+	host_seed_input.placeholder_text = "Пусто — случайный сид"
+	host_setup_page.add_child(host_seed_input)
+	var ai_label := Label.new()
+	ai_label.text = "Количество ИИ (лишние не займут место игрока):"
+	ai_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	host_setup_page.add_child(ai_label)
+	host_ai_count = SpinBox.new()
+	host_ai_count.min_value = 0
+	host_ai_count.max_value = 4
+	host_ai_count.step = 1
+	host_ai_count.value = 3
+	host_setup_page.add_child(host_ai_count)
+	var port_label := Label.new()
+	port_label.text = "UDP-порт:"
+	host_setup_page.add_child(port_label)
+	host_port_input = _create_port_input()
+	host_setup_page.add_child(host_port_input)
+	_add_button(host_setup_page, "Создать лобби", _create_lobby)
+	_add_button(host_setup_page, "Назад", func(): _show_page(multiplayer_page))
+
+
+func _create_join_setup_page():
+	join_setup_page = _new_page()
+	_add_page_title(join_setup_page, "Подключение к игре")
+	var address_label := Label.new()
+	address_label.text = "IP-адрес или имя компьютера хоста:"
+	join_setup_page.add_child(address_label)
+	join_address_input = LineEdit.new()
+	join_address_input.text = "127.0.0.1"
+	join_address_input.placeholder_text = "Например: 192.168.1.25"
+	join_address_input.text_submitted.connect(func(_value): _join_lobby())
+	join_setup_page.add_child(join_address_input)
+	var port_label := Label.new()
+	port_label.text = "UDP-порт:"
+	join_setup_page.add_child(port_label)
+	join_port_input = _create_port_input()
+	join_setup_page.add_child(join_port_input)
+	_add_button(join_setup_page, "Подключиться", _join_lobby)
+	_add_button(join_setup_page, "Назад", func(): _show_page(multiplayer_page))
+
+
+func _create_lobby_page():
+	lobby_page = _new_page()
+	_add_page_title(lobby_page, "Лобби")
+	lobby_settings_label = Label.new()
+	lobby_settings_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	lobby_page.add_child(lobby_settings_label)
+	lobby_address_label = Label.new()
+	lobby_address_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	lobby_address_label.add_theme_color_override("font_color", SovereignUITheme.MUTED)
+	lobby_page.add_child(lobby_address_label)
+	lobby_players_list = ItemList.new()
+	lobby_players_list.custom_minimum_size = Vector2(0, 170)
+	lobby_players_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	lobby_players_list.select_mode = ItemList.SELECT_SINGLE
+	lobby_page.add_child(lobby_players_list)
+	var ready_hint := Label.new()
+	ready_hint.text = "Игра запустится, когда все подключённые игроки нажмут «Готов». Хосту лучше нажимать последним."
+	ready_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	ready_hint.add_theme_color_override("font_color", SovereignUITheme.MUTED)
+	lobby_page.add_child(ready_hint)
+	ready_button = _add_button(lobby_page, "Готов", _unused_callback)
+	ready_button.toggle_mode = true
+	ready_button.toggled.connect(_on_ready_toggled)
+	_add_button(lobby_page, "Покинуть лобби", _leave_lobby)
+
+
+func _new_page() -> VBoxContainer:
+	var page := VBoxContainer.new()
+	page.visible = false
+	page.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	page.add_theme_constant_override("separation", 8)
+	page_stack.add_child(page)
+	pages.append(page)
+	return page
+
+
+func _add_page_title(page: VBoxContainer, value: String):
+	var label := Label.new()
+	label.text = value
+	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	label.add_theme_font_size_override("font_size", 22)
+	label.add_theme_color_override("font_color", SovereignUITheme.ACCENT_BRIGHT)
+	page.add_child(label)
+
+
+func _add_button(page: VBoxContainer, value: String, callback: Callable) -> Button:
+	var button := Button.new()
+	button.text = value
+	button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	button.pressed.connect(callback)
+	page.add_child(button)
+	return button
+
+
+func _unused_callback():
+	pass
+
+
+func _create_port_input() -> SpinBox:
+	var input := SpinBox.new()
+	input.min_value = 1024
+	input.max_value = 65535
+	input.step = 1
+	input.value = NetworkManager.DEFAULT_PORT
+	input.update_on_text_changed = true
+	return input
+
+
+func _show_page(page: Control, clear_message := true):
+	for item in pages:
+		item.visible = item == page
+	if clear_message:
+		message_label.text = ""
+	page_scroll.scroll_vertical = 0
 
 
 func _show_load_game():
-	new_game_box.visible = false
-	load_box.visible = true
-	message_label.text = ""
+	_show_page(load_page)
 	_refresh_saves()
+
+
+func _show_new_game_page():
+	_show_page(new_game_page)
+	seed_input.grab_focus()
+
+
+func _show_multiplayer_page():
+	_show_page(multiplayer_page)
+	nickname_input.grab_focus()
+
+
+func _show_host_setup():
+	NetworkManager.set_local_nickname(nickname_input.text)
+	nickname_input.text = NetworkManager.local_nickname
+	_show_page(host_setup_page)
+	host_seed_input.grab_focus()
+
+
+func _show_join_setup():
+	NetworkManager.set_local_nickname(nickname_input.text)
+	nickname_input.text = NetworkManager.local_nickname
+	_show_page(join_setup_page)
+	join_address_input.grab_focus()
 
 
 func _start_new_game():
 	var seed_value := SaveManager.seed_from_text(seed_input.text)
 	SaveManager.start_new_game(seed_value)
+
+
+func _create_lobby():
+	var seed_value := SaveManager.seed_from_text(host_seed_input.text)
+	var error := NetworkManager.host_lobby(NetworkManager.local_nickname, seed_value, int(host_ai_count.value), int(host_port_input.value))
+	if not error.is_empty():
+		message_label.text = error
+		return
+	_show_page(lobby_page, false)
+	_refresh_lobby()
+
+
+func _join_lobby():
+	var error := NetworkManager.join_lobby(NetworkManager.local_nickname, join_address_input.text, int(join_port_input.value))
+	if not error.is_empty():
+		message_label.text = error
+		return
+	_show_page(lobby_page, false)
+	ready_button.disabled = true
+	lobby_players_list.clear()
+	lobby_players_list.add_item("Подключение…")
+
+
+func _leave_lobby():
+	NetworkManager.shutdown_network()
+	ready_button.set_pressed_no_signal(false)
+	_show_page(multiplayer_page)
+
+
+func _on_ready_toggled(value: bool):
+	NetworkManager.set_ready(value)
+	ready_button.text = "Готов: ДА" if value else "Готов"
+
+
+func _on_lobby_state_changed(_players: Array, _settings: Dictionary):
+	if not lobby_page.visible:
+		return
+	_refresh_lobby()
+
+
+func _refresh_lobby():
+	lobby_players_list.clear()
+	var players := NetworkManager.get_lobby_players()
+	for player in players:
+		var ready_text := "ГОТОВ" if bool(player.get("ready", false)) else "НЕ ГОТОВ"
+		var host_text := " • ХОСТ" if int(player.get("peer_id", 0)) == 1 else ""
+		lobby_players_list.add_item("%s  [%s]%s" % [player.get("nickname", "Игрок"), ready_text, host_text])
+	var requested_ai := int(NetworkManager.lobby_settings.get("requested_ai_count", 0))
+	var actual_ai := mini(requested_ai, maxi(NetworkManager.MAX_FACTIONS - players.size(), 0))
+	lobby_settings_label.text = "Сид: %d  •  Игроки: %d/%d  •  ИИ: %d из %d" % [int(NetworkManager.lobby_settings.get("seed", 0)), players.size(), NetworkManager.MAX_FACTIONS, actual_ai, requested_ai]
+	if NetworkManager.is_host():
+		var addresses := NetworkManager.get_local_addresses()
+		lobby_address_label.text = "Адрес для подключения: %s  •  порт %d" % [", ".join(addresses) if not addresses.is_empty() else "локальный IP не найден", int(NetworkManager.lobby_settings.get("port", NetworkManager.DEFAULT_PORT))]
+	else:
+		lobby_address_label.text = "Подключено к LAN-лобби хоста."
+	var local_ready := NetworkManager.is_local_ready()
+	ready_button.set_pressed_no_signal(local_ready)
+	ready_button.text = "Готов: ДА" if local_ready else "Готов"
+	ready_button.disabled = NetworkManager.connection_pending or players.is_empty() or NetworkManager.match_starting
+
+
+func _on_connection_state_changed(value: String):
+	message_label.text = value
+	if lobby_page.visible:
+		_refresh_lobby()
+
+
+func _on_network_error(value: String):
+	message_label.text = value
+	if lobby_page.visible:
+		_show_page(join_setup_page, false)
 
 
 func _refresh_saves():
@@ -132,7 +407,7 @@ func _refresh_saves():
 		saves_list.add_item(label)
 	load_button.disabled = true
 	delete_button.disabled = true
-	if saves.is_empty() and load_box.visible:
+	if saves.is_empty() and load_page.visible:
 		message_label.text = "Сохранений пока нет."
 
 
@@ -161,3 +436,13 @@ func _delete_selected_save():
 	else:
 		message_label.text = "Не удалось удалить сохранение."
 	_refresh_saves()
+
+
+func _update_layout():
+	if panel == null:
+		return
+	var viewport_size := get_viewport().get_visible_rect().size
+	var width := minf(540.0, maxf(viewport_size.x - 32.0, 280.0))
+	panel.custom_minimum_size.x = width
+	page_stack.custom_minimum_size.x = maxf(width - 32.0, 248.0)
+	page_scroll.custom_minimum_size.y = clampf(viewport_size.y - 190.0, 180.0, 430.0)

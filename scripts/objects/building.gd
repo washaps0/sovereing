@@ -34,6 +34,9 @@ const FACTORY_RECIPES := {
 @export var max_workers := 0
 @export var max_occupants := 4
 @export var max_builders := 3
+@export var faction_id := 0
+@export var faction_name := "Игрок"
+@export var network_id := 0
 
 static var selected_building: Building
 
@@ -55,6 +58,7 @@ var active_builders: Array[Unit] = []
 var selected_recipe: StringName = &"planks"
 var mouse_is_over := false
 var placement_preview := false
+var lod_active := true
 
 @onready var building_sprite: Sprite2D = $Sprite2D
 
@@ -93,6 +97,19 @@ func _process(_delta: float):
 		status_label.visible = mouse_is_over
 	else:
 		status_label.visible = false
+
+
+func set_lod_active(active: bool):
+	if lod_active == active:
+		return
+	lod_active = active
+	visible = active
+	input_pickable = active
+	monitoring = active
+	set_process(active)
+	var collision := get_node_or_null("CollisionShape2D") as CollisionShape2D
+	if collision != null:
+		collision.set_deferred("disabled", not active)
 
 
 func _update_overlay_orientation():
@@ -260,6 +277,8 @@ func contains_world_point(point: Vector2, margin := 0.0) -> bool:
 
 
 func try_assign_builder(unit: Unit) -> bool:
+	if not is_instance_valid(unit) or unit.faction_id != faction_id:
+		return false
 	_cleanup_builders()
 	if unit in active_builders:
 		return true
@@ -357,6 +376,8 @@ func can_accept_worker(resource_type: StringName = &"wood") -> bool:
 
 
 func assign_worker(unit: Unit) -> bool:
+	if not is_instance_valid(unit) or unit.faction_id != faction_id:
+		return false
 	_cleanup_workers()
 	if unit in assigned_workers:
 		return true
@@ -410,7 +431,7 @@ func take_resource(resource_type: StringName, amount: int) -> int:
 
 func try_enter(unit: Unit) -> bool:
 	_cleanup_occupants()
-	if placement_preview or not is_completed() or (not is_factory() and not is_residence()):
+	if not is_instance_valid(unit) or unit.faction_id != faction_id or placement_preview or not is_completed() or (not is_factory() and not is_residence()):
 		return false
 	if unit in occupants:
 		return true
@@ -441,6 +462,13 @@ func get_production_time() -> float:
 func set_recipe(recipe_type: StringName):
 	if FACTORY_RECIPES.has(recipe_type):
 		selected_recipe = recipe_type
+
+
+func can_be_edited_locally() -> bool:
+	var network_manager := get_node_or_null("/root/NetworkManager")
+	if is_instance_valid(network_manager):
+		return network_manager.can_edit_faction(faction_id)
+	return faction_id == 0
 
 
 func can_produce_selected_recipe() -> bool:
@@ -498,7 +526,7 @@ func produce_selected_recipe() -> bool:
 func _get_warehouses() -> Array[Building]:
 	var warehouses: Array[Building] = []
 	for building in get_tree().get_nodes_in_group("buildings"):
-		if building is Building and building.is_warehouse() and building.is_completed():
+		if building is Building and building.faction_id == faction_id and building.is_warehouse() and building.is_completed():
 			warehouses.append(building)
 	warehouses.sort_custom(func(a: Building, b: Building): return global_position.distance_squared_to(a.global_position) < global_position.distance_squared_to(b.global_position))
 	return warehouses

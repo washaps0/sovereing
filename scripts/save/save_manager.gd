@@ -3,7 +3,7 @@ extends Node
 const SAVE_DIRECTORY := "user://saves"
 const WORLD_SCENE := "res://scenes/world.tscn"
 const MAIN_MENU_SCENE := "res://scenes/main_menu.tscn"
-const SAVE_VERSION := 1
+const SAVE_VERSION := 2
 
 var current_seed := 12345
 var pending_save_data: Dictionary = {}
@@ -23,6 +23,9 @@ func seed_from_text(value: String) -> int:
 
 
 func start_new_game(seed_value: int):
+	var network_manager := get_node_or_null("/root/NetworkManager")
+	if is_instance_valid(network_manager):
+		network_manager.prepare_singleplayer(seed_value, 3)
 	current_seed = seed_value
 	pending_save_data.clear()
 	get_tree().paused = false
@@ -35,6 +38,9 @@ func request_load(save_path: String) -> String:
 		return "Не удалось прочитать сохранение."
 	if not data.has("world") or not data.has("meta"):
 		return "Файл сохранения повреждён."
+	var network_manager := get_node_or_null("/root/NetworkManager")
+	if is_instance_valid(network_manager):
+		network_manager.shutdown_network()
 	current_seed = int(data.meta.get("seed", 12345))
 	pending_save_data = data.world
 	get_tree().paused = false
@@ -49,6 +55,9 @@ func consume_pending_save() -> Dictionary:
 
 
 func save_game(save_name: String, world: Node) -> String:
+	var network_manager := get_node_or_null("/root/NetworkManager")
+	if is_instance_valid(network_manager) and network_manager.is_lan_session() and not network_manager.is_host():
+		return "В LAN-сессии сохранение доступно только хосту."
 	var cleaned_name := save_name.strip_edges()
 	if cleaned_name.is_empty():
 		return "Введите название сохранения."
@@ -101,6 +110,9 @@ func delete_save(save_path: String) -> bool:
 
 
 func return_to_main_menu():
+	var network_manager := get_node_or_null("/root/NetworkManager")
+	if is_instance_valid(network_manager):
+		network_manager.shutdown_network()
 	pending_save_data.clear()
 	get_tree().paused = false
 	get_tree().change_scene_to_file(MAIN_MENU_SCENE)
