@@ -21,6 +21,7 @@ var world_index: Node
 @onready var platoon_details: Label = $Panel/Scroll/Content/PlatoonDetails
 @onready var front_line_button: Button = $Panel/Scroll/Content/PlatoonPlans/FrontLine
 @onready var offensive_line_button: Button = $Panel/Scroll/Content/PlatoonPlans/OffensiveLine
+@onready var start_offensive_button: Button = $Panel/Scroll/Content/PlatoonPlans/StartOffensive
 @onready var front_line_list: ItemList = $Panel/Scroll/Content/FrontLineList
 @onready var attach_front_button: Button = $Panel/Scroll/Content/FrontAssignments/Attach
 @onready var detach_front_button: Button = $Panel/Scroll/Content/FrontAssignments/Detach
@@ -58,10 +59,11 @@ func _ready():
 	return_button.pressed.connect(_issue_order.bind(&"return_to_base"))
 	front_line_button.pressed.connect(_begin_platoon_line.bind(&"front_line"))
 	offensive_line_button.pressed.connect(_begin_platoon_line.bind(&"offensive_line"))
+	start_offensive_button.pressed.connect(_start_selected_offensive)
 	attach_front_button.pressed.connect(_change_front_assignment.bind(&"attach"))
 	detach_front_button.pressed.connect(_change_front_assignment.bind(&"detach"))
 	delete_front_button.pressed.connect(_delete_selected_front)
-	for button in [close_button, organize_button, front_line_button, offensive_line_button, attach_front_button, detach_front_button, delete_front_button, hold_button, spread_button, watch_button, regroup_button, return_button]:
+	for button in [close_button, organize_button, front_line_button, offensive_line_button, start_offensive_button, attach_front_button, detach_front_button, delete_front_button, hold_button, spread_button, watch_button, regroup_button, return_button]:
 		button.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	_update_layout()
 
@@ -208,7 +210,7 @@ func _rebuild_front_line_list(front_lines: Array[Dictionary]):
 		var line_id := str(plan.get("line_id", ""))
 		var attached_squads: Array = plan.get("squad_ids", [])
 		var attached_count := attached_squads.size()
-		var offensive_marker := " • наступление" if bool(plan.get("has_offensive", false)) else ""
+		var offensive_marker := " • наступает" if bool(plan.get("offensive_active", false)) else (" • наступление готово" if bool(plan.get("has_offensive", false)) else "")
 		var index := front_line_list.add_item("%s • %d отр.%s" % [str(plan.get("name", "Линия фронта")), attached_count, offensive_marker])
 		front_line_list.set_item_metadata(index, line_id)
 		if line_id == selected_front_line_id:
@@ -247,8 +249,11 @@ func _refresh_selected_platoon(platoons: Dictionary):
 	var commanders := _find_platoon_commanders(members)
 	var has_platoon := not commanders.is_empty()
 	front_line_button.disabled = not has_platoon
-	offensive_line_button.disabled = selected_front_line_id.is_empty()
-	attach_front_button.disabled = selected_front_line_id.is_empty() or _get_selected_squad_commanders().is_empty()
+	var selected_plan := _find_front_plan(selected_front_line_id)
+	var offensive_active := bool(selected_plan.get("offensive_active", false))
+	offensive_line_button.disabled = selected_front_line_id.is_empty() or offensive_active
+	start_offensive_button.disabled = selected_plan.is_empty() or not bool(selected_plan.get("has_offensive", false)) or offensive_active
+	attach_front_button.disabled = selected_front_line_id.is_empty() or _get_selected_squad_commanders().is_empty() or offensive_active
 	detach_front_button.disabled = attach_front_button.disabled
 	delete_front_button.disabled = selected_front_line_id.is_empty()
 	if not has_platoon:
@@ -362,6 +367,31 @@ func _change_front_assignment(action: StringName):
 		})
 		front_line_list_key = ""
 		_refresh_army()
+
+
+func _start_selected_offensive():
+	if selected_front_line_id.is_empty():
+		return
+	var network_manager := get_node_or_null("/root/NetworkManager")
+	if is_instance_valid(network_manager):
+		network_manager.request_unit_command([], &"military_plan", {
+			"plan_action": &"start_offensive",
+			"line_id": selected_front_line_id,
+		})
+		front_line_list_key = ""
+		_refresh_army()
+
+
+func _find_front_plan(line_id: String) -> Dictionary:
+	if line_id.is_empty():
+		return {}
+	var current_world := get_tree().current_scene
+	if not is_instance_valid(current_world) or not current_world.has_method("get_military_front_lines"):
+		return {}
+	for plan in current_world.get_military_front_lines(_get_local_faction_id()):
+		if str(plan.get("line_id", "")) == line_id:
+			return plan
+	return {}
 
 
 func _delete_selected_front():
@@ -504,10 +534,12 @@ func _make_squad_list_key(soldiers: Array[Unit]) -> String:
 func _make_front_line_list_key(front_lines: Array[Dictionary]) -> String:
 	var parts := PackedStringArray()
 	for plan in front_lines:
-		parts.append("%s:%d:%d:%d" % [
+		parts.append("%s:%d:%d:%d:%d:%d" % [
 			str(plan.get("line_id", "")),
 			plan.get("front_points", []).size(),
 			plan.get("squad_ids", []).size(),
 			int(bool(plan.get("has_offensive", false))),
+			int(bool(plan.get("offensive_active", false))),
+			plan.get("attacking_squad_ids", []).size(),
 		])
 	return "|".join(parts)

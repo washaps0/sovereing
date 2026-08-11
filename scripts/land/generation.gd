@@ -26,13 +26,16 @@ const AI_ATTACK_MIN_SOLDIERS := 8
 const AI_STARTING_WOOD := 55
 const AI_STARTING_STONE := 30
 const AI_STARTING_COAL := 12
-const AI_STARTING_FOOD := 45
+const AI_STARTING_FOOD := 90
 const AI_DISTRICT_COLUMNS := 3
 const AI_DISTRICT_COLUMN_STEP := 448.0
 const AI_DISTRICT_ROW_STEP := 256.0
 const AI_DISTRICT_BUILDING_ROW_OFFSET := 62.0
 const AI_DISTRICT_BUILDING_X_SLOTS: Array[float] = [-176.0, -80.0, 80.0, 176.0]
 const AI_DISTRICT_SEARCH_ATTEMPTS := 12
+const OFFENSIVE_UPDATE_INTERVAL := 0.25
+const OFFENSIVE_COMMANDER_ARRIVAL_DISTANCE := 28.0
+const OFFENSIVE_SQUAD_COHESION_DISTANCE := 140.0
 
 @export var starting_unit_count := 5
 @export var unit_spawn_position := Vector2(300, 300)
@@ -66,6 +69,7 @@ var ai_strategy_timer := 2.0
 var ai_strategy_cycle := 0
 var ai_emergency_food_given := {}
 var military_front_lines := {}
+var military_offensive_timer := 0.0
 
 func generate_ground():
 	# Один TileMapLayer хранит и отрисовывает землю чанками. Раньше для карты
@@ -190,6 +194,10 @@ func _get_indexed_buildings(building_kind := "", faction_id := -1) -> Array:
 
 
 func _process(delta: float):
+	military_offensive_timer -= delta
+	if military_offensive_timer <= 0.0:
+		military_offensive_timer = OFFENSIVE_UPDATE_INTERVAL
+		_update_active_military_offensives()
 	ai_strategy_timer -= delta
 	if ai_strategy_timer > 0.0:
 		return
@@ -236,6 +244,8 @@ func apply_military_plan_command(faction_id: int, commanders: Array[Unit], actio
 				"front_points": front_points,
 				"offensive_points": [],
 				"has_offensive": false,
+				"offensive_active": false,
+				"attacking_squad_ids": [],
 				"squad_ids": squad_ids,
 				"attach_all": _squad_ids_cover_whole_army(faction_id, squad_ids),
 			}
@@ -250,10 +260,31 @@ func apply_military_plan_command(faction_id: int, commanders: Array[Unit], actio
 			var offensive_plan: Dictionary = military_front_lines[line_id]
 			offensive_plan["offensive_points"] = offensive_points
 			offensive_plan["has_offensive"] = true
-			_redistribute_military_front(line_id, true)
+			offensive_plan["offensive_active"] = false
+			offensive_plan["attacking_squad_ids"] = []
+			# Drawing is planning only. It must not reissue orders even to the troops
+			# already holding the front; movement starts after an explicit command.
+			return true
+		&"start_offensive":
+			if not has_military_front_line(faction_id, line_id):
+				return false
+			var start_plan: Dictionary = military_front_lines[line_id]
+			if not bool(start_plan.get("has_offensive", false)) or bool(start_plan.get("offensive_active", false)):
+				return false
+			var attackers := _select_local_offensive_commanders(start_plan)
+			if attackers.is_empty():
+				return false
+			var attacking_ids: Array[int] = []
+			for commander in attackers:
+				attacking_ids.append(commander.squad_id)
+			start_plan["attacking_squad_ids"] = attacking_ids
+			start_plan["offensive_active"] = true
+			_send_commanders_to_military_line(attackers, _coerce_military_line_points(start_plan.get("offensive_points", [])), &"offensive_line")
 			return true
 		&"attach":
 			if not has_military_front_line(faction_id, line_id) or squad_ids.is_empty():
+				return false
+			if bool(military_front_lines[line_id].get("offensive_active", false)):
 				return false
 			_detach_squads_from_other_fronts(faction_id, squad_ids, line_id)
 			var attach_plan: Dictionary = military_front_lines[line_id]
@@ -263,10 +294,12 @@ func apply_military_plan_command(faction_id: int, commanders: Array[Unit], actio
 					attached.append(squad_id)
 			attach_plan["squad_ids"] = attached
 			attach_plan["attach_all"] = _squad_ids_cover_whole_army(faction_id, attached)
-			_redistribute_military_front(line_id, bool(attach_plan.get("has_offensive", false)))
+			_redistribute_military_front(line_id, false)
 			return true
 		&"detach":
 			if not has_military_front_line(faction_id, line_id) or squad_ids.is_empty():
+				return false
+			if bool(military_front_lines[line_id].get("offensive_active", false)):
 				return false
 			var detach_plan: Dictionary = military_front_lines[line_id]
 			var remaining: Array = detach_plan.get("squad_ids", []).duplicate()
@@ -278,7 +311,7 @@ func apply_military_plan_command(faction_id: int, commanders: Array[Unit], actio
 			for commander in commanders:
 				if is_instance_valid(commander) and commander.is_squad_commander() and commander.squad_id in previously_attached:
 					commander.issue_squad_order(&"hold")
-			_redistribute_military_front(line_id, bool(detach_plan.get("has_offensive", false)))
+			_redistribute_military_front(line_id, false)
 			return true
 		&"delete":
 			if not has_military_front_line(faction_id, line_id):
@@ -332,7 +365,8 @@ func refresh_military_front_assignments(faction_id: int):
 				if squad_id not in attached:
 					attached.append(squad_id)
 		plan["squad_ids"] = attached
-		_redistribute_military_front(str(line_id), bool(plan.get("has_offensive", false)))
+		if not bool(plan.get("offensive_active", false)):
+			_redistribute_military_front(str(line_id), false)
 
 
 func _detach_squads_from_other_fronts(faction_id: int, squad_ids: Array[int], except_line_id: String):
@@ -356,7 +390,7 @@ func _detach_squads_from_other_fronts(faction_id: int, squad_ids: Array[int], ex
 			changed_lines.append(other_line_id)
 	for changed_line_id in changed_lines:
 		var changed_plan: Dictionary = military_front_lines[changed_line_id]
-		_redistribute_military_front(changed_line_id, bool(changed_plan.get("has_offensive", false)))
+		_redistribute_military_front(changed_line_id, false)
 
 
 func _redistribute_military_front(line_id: String, use_offensive: bool):
@@ -367,6 +401,12 @@ func _redistribute_military_front(line_id: String, use_offensive: bool):
 	if points.size() < 2:
 		return
 	var commanders := _get_front_squad_commanders(int(plan.get("faction_id", -1)), plan.get("squad_ids", []))
+	_send_commanders_to_military_line(commanders, points, &"offensive_line" if use_offensive else &"front_line")
+
+
+func _send_commanders_to_military_line(commanders: Array[Unit], points: Array[Vector2], order: StringName):
+	if commanders.is_empty() or points.size() < 2:
+		return
 	for index in range(commanders.size()):
 		var ratio := 0.5 if commanders.size() == 1 else float(index) / float(commanders.size() - 1)
 		var sample := _sample_military_polyline(points, ratio)
@@ -374,9 +414,95 @@ func _redistribute_military_front(line_id: String, use_offensive: bool):
 		var formation_direction: Vector2 = sample.get("direction", Vector2.RIGHT)
 		commanders[index]._command_military_move(
 			destination,
-			&"offensive_line" if use_offensive else &"front_line",
+			order,
 			formation_direction
 		)
+
+
+func _select_local_offensive_commanders(plan: Dictionary) -> Array[Unit]:
+	var offensive_points := _coerce_military_line_points(plan.get("offensive_points", []))
+	var commanders := _get_front_squad_commanders(int(plan.get("faction_id", -1)), plan.get("squad_ids", []))
+	if commanders.is_empty() or offensive_points.size() < 2:
+		var empty_result: Array[Unit] = []
+		return empty_result
+	var ranked: Array[Dictionary] = []
+	for commander in commanders:
+		var sector_position: Vector2 = commander.target_position if commander.military_order == &"front_line" else commander.global_position
+		ranked.append({"commander": commander, "distance": _distance_to_military_polyline(sector_position, offensive_points)})
+	ranked.sort_custom(func(a: Dictionary, b: Dictionary): return float(a.distance) < float(b.distance))
+	var offensive_length := _get_military_polyline_length(offensive_points)
+	var desired_count := clampi(ceili(offensive_length / 220.0), 1, commanders.size())
+	var local_radius := float(ranked[0].distance) + maxf(160.0, offensive_length * 0.35)
+	var result: Array[Unit] = []
+	for entry in ranked:
+		if result.size() >= desired_count:
+			break
+		if result.is_empty() or float(entry.distance) <= local_radius:
+			result.append(entry.commander)
+	return result
+
+
+func _update_active_military_offensives():
+	var network_manager := get_node_or_null("/root/NetworkManager")
+	if is_instance_valid(network_manager) and network_manager.has_method("is_remote_client") and network_manager.is_remote_client():
+		return
+	for raw_line_id in military_front_lines.keys():
+		var plan: Dictionary = military_front_lines[raw_line_id]
+		if not bool(plan.get("offensive_active", false)):
+			continue
+		var attackers := _get_front_squad_commanders(int(plan.get("faction_id", -1)), plan.get("attacking_squad_ids", []))
+		if attackers.is_empty():
+			_cancel_military_offensive(str(raw_line_id))
+			continue
+		var all_arrived := true
+		for commander in attackers:
+			if not _has_offensive_squad_arrived(commander):
+				all_arrived = false
+				break
+		if all_arrived:
+			_complete_military_offensive(str(raw_line_id))
+
+
+func _has_offensive_squad_arrived(commander: Unit) -> bool:
+	if not is_instance_valid(commander) or commander.global_position.distance_to(commander.target_position) > OFFENSIVE_COMMANDER_ARRIVAL_DISTANCE:
+		return false
+	for unit in _get_indexed_units(commander.faction_id):
+		if unit is Unit and unit.is_mobilized and unit.squad_id == commander.squad_id and unit.global_position.distance_to(commander.global_position) > OFFENSIVE_SQUAD_COHESION_DISTANCE:
+			return false
+	return true
+
+
+func _cancel_military_offensive(line_id: String):
+	if not military_front_lines.has(line_id):
+		return
+	var plan: Dictionary = military_front_lines[line_id]
+	plan["offensive_active"] = false
+	plan["attacking_squad_ids"] = []
+	plan["has_offensive"] = false
+	plan["offensive_points"] = []
+	_redistribute_military_front(line_id, false)
+
+
+func _complete_military_offensive(line_id: String):
+	if not military_front_lines.has(line_id):
+		return
+	var plan: Dictionary = military_front_lines[line_id]
+	var attacking_ids: Array = plan.get("attacking_squad_ids", []).duplicate()
+	plan["front_points"] = _merge_offensive_into_front(
+		_coerce_military_line_points(plan.get("front_points", [])),
+		_coerce_military_line_points(plan.get("offensive_points", []))
+	)
+	plan["offensive_active"] = false
+	plan["attacking_squad_ids"] = []
+	plan["has_offensive"] = false
+	plan["offensive_points"] = []
+	# Troops outside the attacked sector keep their exact positions. Only the
+	# squads that reached the objective switch from attack back to holding the
+	# newly advanced local front.
+	for commander in _get_front_squad_commanders(int(plan.get("faction_id", -1)), attacking_ids):
+		commander.military_order = &"front_line"
+		commander.squad_command_timer = 0.0
+		commander._broadcast_squad_follow_targets()
 
 
 func _get_front_squad_commanders(faction_id: int, raw_squad_ids) -> Array[Unit]:
@@ -419,6 +545,82 @@ func _sample_military_polyline(points: Array[Vector2], ratio: float) -> Dictiona
 	return {"position": points.back(), "direction": Vector2.RIGHT}
 
 
+func _get_military_polyline_length(points: Array[Vector2]) -> float:
+	var result := 0.0
+	for index in range(points.size() - 1):
+		result += points[index].distance_to(points[index + 1])
+	return result
+
+
+func _distance_to_military_polyline(point: Vector2, points: Array[Vector2]) -> float:
+	var projection := _project_onto_military_polyline(point, points)
+	return point.distance_to(projection.get("position", point))
+
+
+func _project_onto_military_polyline(point: Vector2, points: Array[Vector2]) -> Dictionary:
+	if points.is_empty():
+		return {"position": point, "ratio": 0.0}
+	var total_length := _get_military_polyline_length(points)
+	if total_length <= 0.001:
+		return {"position": points[0], "ratio": 0.0}
+	var nearest_position := points[0]
+	var nearest_distance := INF
+	var nearest_walked := 0.0
+	var walked := 0.0
+	for index in range(points.size() - 1):
+		var start := points[index]
+		var finish := points[index + 1]
+		var segment := finish - start
+		var segment_length := segment.length()
+		if segment_length <= 0.001:
+			continue
+		var local_ratio := clampf((point - start).dot(segment) / segment.length_squared(), 0.0, 1.0)
+		var candidate := start + segment * local_ratio
+		var distance := point.distance_squared_to(candidate)
+		if distance < nearest_distance:
+			nearest_distance = distance
+			nearest_position = candidate
+			nearest_walked = walked + segment_length * local_ratio
+		walked += segment_length
+	return {"position": nearest_position, "ratio": nearest_walked / total_length}
+
+
+func _merge_offensive_into_front(front_points: Array[Vector2], offensive_points: Array[Vector2]) -> Array[Vector2]:
+	if front_points.size() < 2 or offensive_points.size() < 2:
+		return front_points
+	var first_projection := _project_onto_military_polyline(offensive_points[0], front_points)
+	var last_projection := _project_onto_military_polyline(offensive_points.back(), front_points)
+	var start_ratio := float(first_projection.get("ratio", 0.0))
+	var end_ratio := float(last_projection.get("ratio", 1.0))
+	var oriented_offensive: Array[Vector2] = offensive_points.duplicate()
+	if start_ratio > end_ratio:
+		var swap := start_ratio
+		start_ratio = end_ratio
+		end_ratio = swap
+		oriented_offensive.reverse()
+	# If both ends project onto nearly the same point, use the offensive width
+	# to define a local sector around that point instead of replacing the whole
+	# front or producing a zero-width advance.
+	if end_ratio - start_ratio < 0.02:
+		var center := (start_ratio + end_ratio) * 0.5
+		var half_span := clampf(_get_military_polyline_length(oriented_offensive) / maxf(_get_military_polyline_length(front_points), 1.0) * 0.5, 0.03, 0.25)
+		start_ratio = maxf(center - half_span, 0.0)
+		end_ratio = minf(center + half_span, 1.0)
+	var sample_count := clampi(ceili(_get_military_polyline_length(front_points) / 96.0), 12, 96)
+	var merged: Array[Vector2] = []
+	for index in range(sample_count + 1):
+		var ratio := float(index) / float(sample_count)
+		var position: Vector2
+		if ratio >= start_ratio and ratio <= end_ratio:
+			var local_ratio := (ratio - start_ratio) / maxf(end_ratio - start_ratio, 0.001)
+			position = _sample_military_polyline(oriented_offensive, local_ratio).get("position", Vector2.ZERO)
+		else:
+			position = _sample_military_polyline(front_points, ratio).get("position", Vector2.ZERO)
+		if merged.is_empty() or merged.back().distance_to(position) >= 1.0:
+			merged.append(position)
+	return merged
+
+
 func _coerce_military_line_points(raw_points) -> Array[Vector2]:
 	var points: Array[Vector2] = []
 	if raw_points is not Array:
@@ -454,6 +656,8 @@ func _serialize_military_front_lines() -> Array:
 			"front_points": front_data,
 			"offensive_points": offensive_data,
 			"has_offensive": bool(plan.get("has_offensive", false)),
+			"offensive_active": bool(plan.get("offensive_active", false)),
+			"attacking_squad_ids": plan.get("attacking_squad_ids", []).duplicate(),
 			"squad_ids": plan.get("squad_ids", []).duplicate(),
 			"attach_all": bool(plan.get("attach_all", false)),
 		})
@@ -476,6 +680,8 @@ func _restore_military_front_lines(raw_plans: Array):
 			"front_points": front_points,
 			"offensive_points": _coerce_military_line_points(raw_plan.get("offensive_points", [])),
 			"has_offensive": bool(raw_plan.get("has_offensive", false)),
+			"offensive_active": bool(raw_plan.get("offensive_active", false)),
+			"attacking_squad_ids": raw_plan.get("attacking_squad_ids", []).duplicate(),
 			"squad_ids": raw_plan.get("squad_ids", []).duplicate(),
 			"attach_all": bool(raw_plan.get("attach_all", false)),
 		}
@@ -1454,7 +1660,7 @@ func _run_ai_strategy():
 		_configure_ai_economy(faction_id)
 		_provide_ai_emergency_food_if_needed(faction_id)
 		_configure_ai_population_and_army(faction_id)
-		if _get_ai_construction_count(faction_id) <= AI_MAX_CONSTRUCTION_BACKLOG:
+		if _ai_can_expand(faction_id):
 			_plan_ai_expansion(faction_id, faction_name)
 		_issue_ai_attack_orders(faction_id)
 
@@ -1495,6 +1701,27 @@ func _get_ai_stored_resource(faction_id: int, resource_type: StringName) -> int:
 		if candidate is Building and is_ancestor_of(candidate) and candidate.is_completed():
 			total += candidate.get_stored_resource(resource_type)
 	return total
+
+
+func _ai_can_expand(faction_id: int) -> bool:
+	if _get_ai_construction_count(faction_id) > AI_MAX_CONSTRUCTION_BACKLOG:
+		return false
+	var units := _get_indexed_units(faction_id)
+	var population := units.size()
+	if population <= 0 or _get_ai_stored_resource(faction_id, &"food") < population * 3:
+		return false
+	for unit in units:
+		if unit is Unit and unit.missed_meals > 0:
+			return false
+	for essential_kind in ["power_plant", "food_factory", "mine"]:
+		var essential_ready := false
+		for building in _get_indexed_buildings(essential_kind, faction_id):
+			if building is Building and building.is_completed():
+				essential_ready = true
+				break
+		if not essential_ready:
+			return false
+	return true
 
 
 func _provide_ai_emergency_food_if_needed(faction_id: int):
@@ -1541,10 +1768,12 @@ func _configure_ai_population_and_army(faction_id: int):
 	var housing_capacity := government.get_housing_capacity()
 	# ИИ постоянно заполняет всё построенное жильё. Новый район создаётся
 	# планировщиком, когда текущие стройки закончены.
-	government.set_migration_target(maxi(housing_capacity, population))
+	var food_reserve := _get_ai_stored_resource(faction_id, &"food")
+	var economy_is_safe := food_reserve >= maxi(population * 3, 12)
+	government.set_migration_target(maxi(housing_capacity, population) if economy_is_safe else population)
 	var army_capacity := government.get_army_capacity()
 	var desired_army := mini(int(round(population * 0.55)), maxi(population - AI_MIN_CIVILIAN_WORKERS, 0))
-	government.set_mobilization_target(mini(desired_army, army_capacity))
+	government.set_mobilization_target(mini(desired_army, army_capacity) if economy_is_safe else 0)
 
 
 func _find_ai_government(faction_id: int) -> GovernmentBuilding:

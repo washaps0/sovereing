@@ -7,8 +7,12 @@ func _init():
 
 func _run():
 	await _test_coarse_unit_movement()
+	await _test_coarse_route_movement()
 	await _test_coarse_harvest()
+	await _test_lod_catch_up_stays_sliced()
+	await _test_local_front_advance()
 	await _test_harvester_returns_while_offscreen()
+	await _test_offscreen_construction_uses_full_simulation()
 	await _test_streamed_world()
 	print("LOD_TEST_OK")
 	quit()
@@ -33,6 +37,88 @@ func _test_coarse_unit_movement():
 	unit.set_simulation_lod(Unit.SimulationLOD.FULL, true)
 	assert(unit.global_position == stable_position)
 	holder.queue_free()
+	await process_frame
+
+
+func _test_lod_catch_up_stays_sliced():
+	var holder := Node2D.new()
+	root.add_child(holder)
+	var manager := SimulationLODManager.new()
+	holder.add_child(manager)
+	var unit := preload("res://scenes/objects/unit.tscn").instantiate() as Unit
+	holder.add_child(unit)
+	unit.ai_controlled = true
+	unit.set_simulation_lod(Unit.SimulationLOD.BACKGROUND, false)
+	unit.food_timer = 1.0
+	manager._clock = 120.0
+	unit.lod_last_simulation_time = 0.0
+	manager._simulate_pending_time(unit)
+	assert(is_equal_approx(unit.lod_last_simulation_time, manager.LOD_CATCH_UP_SLICE * manager.MAX_LOD_CATCH_UP_STEPS))
+	assert(unit.missed_meals == 1)
+	assert(unit.health == unit.max_health)
+	holder.queue_free()
+	await process_frame
+
+
+func _test_coarse_route_movement():
+	var holder := Node2D.new()
+	root.add_child(holder)
+	var unit := preload("res://scenes/objects/unit.tscn").instantiate() as Unit
+	holder.add_child(unit)
+	unit.speed = 100.0
+	unit.target_position = Vector2(100, 0)
+	unit.path_destination = unit.target_position
+	unit.path_points = PackedVector2Array([Vector2.ZERO, Vector2(50, 50), unit.target_position])
+	unit.path_index = 1
+	unit.task = Unit.Task.MOVE
+	unit.set_simulation_lod(Unit.SimulationLOD.STRATEGIC, false)
+	unit.simulate_lod(2.0)
+	assert(unit.global_position.distance_to(unit.target_position) <= 3.01)
+	assert(unit.task == Unit.Task.IDLE)
+	holder.queue_free()
+	await process_frame
+
+
+func _test_local_front_advance():
+	var world = preload("res://scripts/land/generation.gd").new()
+	world.generate_world_on_ready = false
+	root.add_child(world)
+	var front: Array[Vector2] = [Vector2(0, 0), Vector2(0, 1000)]
+	var offensive: Array[Vector2] = [Vector2(220, 700), Vector2(220, 900)]
+	var restored_points := world._coerce_military_line_points([[0.0, 0.0], [0.0, 1000.0]])
+	assert(restored_points == front)
+	var advanced := world._merge_offensive_into_front(front, offensive)
+	assert(advanced.size() >= 12)
+	assert(advanced[0].distance_to(front[0]) < 1.0)
+	assert(advanced.back().distance_to(front.back()) < 1.0)
+	var northern_x := 0.0
+	var southern_x := 0.0
+	for point in advanced:
+		if point.y < 400.0:
+			northern_x = maxf(northern_x, point.x)
+		if point.y > 700.0 and point.y < 900.0:
+			southern_x = maxf(southern_x, point.x)
+	assert(northern_x < 1.0)
+	assert(southern_x > 180.0)
+	for index in range(3):
+		var commander := preload("res://scenes/objects/unit.tscn").instantiate() as Unit
+		world.add_child(commander)
+		commander.faction_id = 0
+		commander.is_mobilized = true
+		commander.squad_id = index + 1
+		commander.platoon_id = 1
+		commander.network_id = 100 + index
+		commander.squad_commander_network_id = commander.network_id
+		commander.military_order = &"front_line"
+		commander.target_position = Vector2(0, index * 500.0)
+	var local_attackers := world._select_local_offensive_commanders({
+		"faction_id": 0,
+		"squad_ids": [1, 2, 3],
+		"offensive_points": offensive,
+	})
+	assert(local_attackers.size() == 1)
+	assert(local_attackers[0].squad_id == 3)
+	world.queue_free()
 	await process_frame
 
 
@@ -99,6 +185,45 @@ func _test_harvester_returns_while_offscreen():
 	await process_frame
 
 
+func _test_offscreen_construction_uses_full_simulation():
+	var world := Node2D.new()
+	for node_name in ["trees", "rocks", "roads", "buildings"]:
+		var container := Node2D.new()
+		container.name = node_name
+		world.add_child(container)
+	var camera := Camera2D.new()
+	camera.name = "Camera2D"
+	camera.zoom = Vector2.ONE * 4.0
+	world.add_child(camera)
+	var manager := SimulationLODManager.new()
+	manager.name = "SimulationLODManager"
+	world.add_child(manager)
+	var construction := preload("res://scenes/objects/buildings/residence.tscn").instantiate() as Building
+	construction.position = Vector2(1200, 1200)
+	construction.build_time = 0.2
+	world.get_node("buildings").add_child(construction)
+	construction.begin_construction()
+	construction.delivered_wood = construction.wood_required
+	construction.delivered_stone = construction.stone_required
+	var builder := preload("res://scenes/objects/unit.tscn").instantiate() as Unit
+	builder.position = construction.get_approach_position(Vector2(1100, 1200))
+	builder.food_timer = 10000.0
+	world.add_child(builder)
+	root.add_child(world)
+	await process_frame
+	await process_frame
+	builder.command_build(construction)
+	for frame_index in range(30):
+		await physics_frame
+		if construction.is_completed():
+			break
+	assert(builder.simulation_lod == Unit.SimulationLOD.FULL)
+	assert(not builder.visible)
+	assert(construction.is_completed())
+	world.queue_free()
+	await process_frame
+
+
 func _test_streamed_world():
 	var started := Time.get_ticks_msec()
 	var world = preload("res://scripts/land/generation.gd").new()
@@ -154,7 +279,8 @@ func _test_streamed_world():
 	lod_manager._refresh_lods(false, 1.1)
 	assert(unit.simulation_lod == Unit.SimulationLOD.FULL)
 	lod_manager._refresh_lods(false, 1.0)
-	assert(unit.simulation_lod == Unit.SimulationLOD.STRATEGIC)
+	assert(unit.simulation_lod == Unit.SimulationLOD.FULL)
+	assert(not unit.visible)
 	camera.position = Vector2.ZERO
 	lod_manager._refresh_lods(false, 0.2)
 	assert(unit.simulation_lod == Unit.SimulationLOD.FULL)

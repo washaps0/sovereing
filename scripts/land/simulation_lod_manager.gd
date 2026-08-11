@@ -100,6 +100,7 @@ func _tick_lod_bucket(level: int, interval: float, delta: float):
 func _simulate_pending_time(unit: Unit):
 	var elapsed := maxf(_clock - unit.lod_last_simulation_time, 0.0)
 	var remaining := elapsed
+	var simulated := 0.0
 	var catch_up_steps := 0
 	# Один большой вызов обрабатывает только текущее состояние юнита. Дробные
 	# шаги позволяют за один редкий фоновый тик последовательно завершить путь,
@@ -108,11 +109,14 @@ func _simulate_pending_time(unit: Unit):
 		var step := minf(remaining, LOD_CATCH_UP_SLICE)
 		unit.simulate_lod(step)
 		remaining -= step
+		simulated += step
 		catch_up_steps += 1
-	if remaining > 0.0 and is_instance_valid(unit):
-		unit.simulate_lod(remaining)
 	if is_instance_valid(unit):
-		unit.lod_last_simulation_time = _clock
+		# Never collapse a long backlog into one giant state update. Doing so lets
+		# hunger consume many meals before work, construction and production can
+		# advance through their intermediate states. Keep the unsimulated time as
+		# debt; subsequent LOD ticks will catch it up in the same small slices.
+		unit.lod_last_simulation_time = minf(unit.lod_last_simulation_time + simulated, _clock)
 
 
 func _refresh_lods(initial: bool, elapsed: float):
@@ -211,37 +215,11 @@ func _process_pending_object_loads():
 		_pending_object_load_index = 0
 
 
-func _get_desired_lod(unit: Unit, render_rect: Rect2, reduced_rect: Rect2, strategic_rect: Rect2, local_faction_id: int) -> int:
-	# Скрытым жильцам и рабочим внутри здания физика CharacterBody2D не нужна.
-	# Их таймеры производства и отдыха корректно проигрываются крупным delta.
-	if is_instance_valid(unit.inside_building):
-		return Unit.SimulationLOD.STRATEGIC
-	if render_rect.has_point(unit.global_position):
-		return Unit.SimulationLOD.FULL
-	var desired_lod := Unit.SimulationLOD.BACKGROUND
-	if reduced_rect.has_point(unit.global_position):
-		desired_lod = Unit.SimulationLOD.REDUCED
-	elif strategic_rect.has_point(unit.global_position):
-		desired_lod = Unit.SimulationLOD.STRATEGIC
-
-	# Приказ, цель которого находится в кадре, важнее текущей позиции юнита.
-	if unit.has_lod_focus_in(render_rect):
-		desired_lod = mini(desired_lod, Unit.SimulationLOD.REDUCED)
-	# Выбор юнита не должен удерживать подробную физику, когда он уже ушёл за
-	# пределы отрисовки. Добытчики всегда получают частый дальний тик, включая
-	# обратный путь к складу и ожидание свободного места.
-	if unit.selected or unit.needs_frequent_offscreen_simulation():
-		desired_lod = mini(desired_lod, Unit.SimulationLOD.REDUCED)
-	elif unit.ai_controlled:
-		desired_lod = mini(desired_lod, Unit.SimulationLOD.STRATEGIC)
-	# Свои жители и явно помеченные командиры/ключевые юниты получают более
-	# частую симуляцию. Неизвестные далёкие фракции остаются в фоне.
-	var importance := unit.simulation_importance
-	if unit.faction_id == local_faction_id:
-		importance += 1
-	if importance > 0:
-		desired_lod = maxi(desired_lod - importance, Unit.SimulationLOD.REDUCED)
-	return desired_lod
+func _get_desired_lod(_unit: Unit, _render_rect: Rect2, _reduced_rect: Rect2, _strategic_rect: Rect2, _local_faction_id: int) -> int:
+	# LOD is visual-only. Every unit keeps the regular physics/task pipeline so
+	# construction, hauling, factory work, formations and movement behave exactly
+	# the same with or without the camera. The manager only changes visibility.
+	return Unit.SimulationLOD.FULL
 
 
 func _update_unit_lod(unit: Unit, desired_lod: int, render_enabled: bool, initial: bool, elapsed: float):
