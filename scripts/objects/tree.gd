@@ -85,21 +85,21 @@ func get_harvester_count() -> int:
 	return harvest_progress.size()
 
 
-func harvest(amount: int) -> int:
+func harvest(amount: int, source_faction_id := -1) -> int:
 	var harvested := mini(amount, wood_amount)
 	wood_amount -= harvested
-	_sync_lod_amount()
+	_sync_lod_amount(source_faction_id)
 	if wood_amount <= 0:
 		queue_free()
 	return harvested
 
 
-func _sync_lod_amount():
+func _sync_lod_amount(source_faction_id := -1):
 	if lod_record_id <= 0:
 		return
 	var manager := get_tree().get_first_node_in_group("simulation_lod_manager")
 	if is_instance_valid(manager) and manager.has_method("update_resource_amount"):
-		manager.update_resource_amount(lod_record_id, wood_amount)
+		manager.update_resource_amount(lod_record_id, wood_amount, source_faction_id)
 
 
 func is_depleted() -> bool:

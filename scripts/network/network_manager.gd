@@ -20,6 +20,9 @@ const UNIT_STATE_SYNC_INTERVAL := 2.0
 const BUILDING_STATE_SYNC_INTERVAL := 5.0
 const MAX_UNITS_PER_COMMAND := 128
 const MAX_BUILDINGS_PER_COMMAND := 256
+const MAX_UNIT_STATES_PER_SYNC := 10000
+const MAX_BUILDING_STATES_PER_SYNC := 5000
+const MAX_RESOURCE_STATES_PER_SYNC := 20000
 const SERVER_ENTITY_ID_START := 1000000
 const CLIENT_ENTITY_ID_BASE := 10000000000
 const CLIENT_ENTITY_ID_STRIDE := 1000000
@@ -54,7 +57,8 @@ var _unit_state_sync_accumulator := 0.0
 var _building_state_sync_accumulator := 0.0
 var _next_server_entity_id := SERVER_ENTITY_ID_START
 var _next_local_entity_sequence := 1
-var _authoritative_resource_amounts := {}
+var _pending_resource_amounts := {}
+var _applying_resource_sync := false
 var _world_ready_peers := {}
 var _lan_discovery_peer: PacketPeerUDP
 var _lan_discovery_mode: StringName = &"off"
@@ -74,28 +78,39 @@ func _ready():
 
 func _process(delta: float):
 	_process_lan_discovery(delta)
-	if not is_lan_session() or not multiplayer.is_server():
+	if not is_lan_session():
 		_unit_state_sync_accumulator = 0.0
 		_building_state_sync_accumulator = 0.0
 		return
 	var world := _get_world()
 	if not is_instance_valid(world):
 		return
+	var local_peer_id := multiplayer.get_unique_id()
+	var authoritative_faction_ids := _get_factions_authoritative_for_peer(local_peer_id)
+	if authoritative_faction_ids.is_empty():
+		return
 	_unit_state_sync_accumulator += delta
 	_building_state_sync_accumulator += delta
 	if _unit_state_sync_accumulator >= UNIT_STATE_SYNC_INTERVAL and world.has_method("get_network_unit_states"):
 		_unit_state_sync_accumulator = fmod(_unit_state_sync_accumulator, UNIT_STATE_SYNC_INTERVAL)
-		_receive_unit_states.rpc(world.get_network_unit_states())
+		var unit_states: Array = world.get_network_unit_states(authoritative_faction_ids)
+		if multiplayer.is_server():
+			_relay_unit_states(1, authoritative_faction_ids, unit_states)
+		else:
+			_server_receive_unit_states.rpc_id(1, unit_states)
 	if _building_state_sync_accumulator >= BUILDING_STATE_SYNC_INTERVAL and world.has_method("get_network_building_states"):
 		_building_state_sync_accumulator = fmod(_building_state_sync_accumulator, BUILDING_STATE_SYNC_INTERVAL)
-		_receive_building_states.rpc(world.get_network_building_states())
-		if not _authoritative_resource_amounts.is_empty():
-			var resource_states: Array = []
-			for record_id in _authoritative_resource_amounts:
-				resource_states.append({"record_id": int(record_id), "amount": int(_authoritative_resource_amounts[record_id])})
-			_receive_resource_states.rpc(resource_states)
-			if _all_remote_worlds_ready():
-				_authoritative_resource_amounts.clear()
+		var building_states: Array = world.get_network_building_states(authoritative_faction_ids)
+		if multiplayer.is_server():
+			_relay_building_states(1, authoritative_faction_ids, building_states)
+		else:
+			_server_receive_building_states.rpc_id(1, building_states)
+		var resource_states := _take_pending_resource_states()
+		if not resource_states.is_empty():
+			if multiplayer.is_server():
+				_relay_resource_states(resource_states)
+			else:
+				_server_receive_resource_states.rpc_id(1, resource_states)
 
 
 func set_local_nickname(value: String):
@@ -446,10 +461,15 @@ func _prepare_client_spawn_specifications(raw_specifications: Array, faction_id:
 	return specifications
 
 
-func replicate_resource_amount(record_id: int, amount: int):
-	if is_lan_session() and multiplayer.is_server() and record_id > 0:
-		var safe_amount := maxi(amount, 0)
-		_authoritative_resource_amounts[record_id] = safe_amount
+func replicate_resource_amount(record_id: int, amount: int, source_faction_id := -1):
+	if not is_lan_session() or record_id <= 0 or _applying_resource_sync:
+		return
+	if source_faction_id >= 0:
+		if not _is_faction_authoritative_for_peer(source_faction_id, multiplayer.get_unique_id()):
+			return
+	elif not multiplayer.is_server():
+		return
+	_pending_resource_amounts[record_id] = maxi(amount, 0)
 
 
 func get_local_addresses() -> Array[String]:
@@ -745,37 +765,64 @@ func _receive_spawn_buildings(specifications: Array, builder_ids: Array):
 		world.spawn_network_buildings(specifications, builder_ids)
 
 
+@rpc("any_peer", "call_remote", "unreliable_ordered")
+func _server_receive_unit_states(states: Array):
+	if not multiplayer.is_server() or not is_lan_session():
+		return
+	var sender_peer_id := multiplayer.get_remote_sender_id()
+	var authoritative_faction_ids := _get_factions_authoritative_for_peer(sender_peer_id)
+	var accepted_states := _sanitize_unit_states(states, authoritative_faction_ids)
+	if authoritative_faction_ids.is_empty() or (accepted_states.is_empty() and not states.is_empty()):
+		return
+	_apply_unit_states(authoritative_faction_ids, accepted_states)
+	_relay_unit_states(sender_peer_id, authoritative_faction_ids, accepted_states)
+
+
+@rpc("any_peer", "call_remote", "reliable")
+func _server_receive_building_states(states: Array):
+	if not multiplayer.is_server() or not is_lan_session():
+		return
+	var sender_peer_id := multiplayer.get_remote_sender_id()
+	var authoritative_faction_ids := _get_factions_authoritative_for_peer(sender_peer_id)
+	var accepted_states := _sanitize_building_states(states, authoritative_faction_ids)
+	if authoritative_faction_ids.is_empty() or (accepted_states.is_empty() and not states.is_empty()):
+		return
+	_apply_building_states(authoritative_faction_ids, accepted_states)
+	_relay_building_states(sender_peer_id, authoritative_faction_ids, accepted_states)
+
+
+@rpc("any_peer", "call_remote", "reliable")
+func _server_receive_resource_states(states: Array):
+	if not multiplayer.is_server() or not is_lan_session():
+		return
+	if _get_factions_authoritative_for_peer(multiplayer.get_remote_sender_id()).is_empty():
+		return
+	var merged_states := _merge_resource_states(states)
+	if merged_states.is_empty():
+		return
+	_apply_resource_states(merged_states)
+	_relay_resource_states(merged_states)
+
+
 @rpc("authority", "call_remote", "unreliable_ordered")
-func _receive_unit_states(states: Array):
+func _receive_unit_states(authoritative_faction_ids: Array, states: Array):
 	if multiplayer.is_server():
 		return
-	var world := _get_world()
-	if is_instance_valid(world) and world.has_method("apply_network_unit_states"):
-		world.apply_network_unit_states(states)
+	_apply_unit_states(authoritative_faction_ids, states)
 
 
 @rpc("authority", "call_remote", "reliable")
-func _receive_building_states(states: Array):
+func _receive_building_states(authoritative_faction_ids: Array, states: Array):
 	if multiplayer.is_server():
 		return
-	var world := _get_world()
-	if is_instance_valid(world) and world.has_method("apply_network_building_states"):
-		world.apply_network_building_states(states)
+	_apply_building_states(authoritative_faction_ids, states)
 
 
 @rpc("authority", "call_remote", "reliable")
 func _receive_resource_states(states: Array):
 	if multiplayer.is_server():
 		return
-	var world := _get_world()
-	if not is_instance_valid(world):
-		return
-	var lod_manager := world.get_node_or_null("SimulationLODManager")
-	if not is_instance_valid(lod_manager) or not lod_manager.has_method("update_resource_amount"):
-		return
-	for state in states:
-		if state is Dictionary:
-			lod_manager.update_resource_amount(int(state.get("record_id", 0)), int(state.get("amount", 0)))
+	_apply_resource_states(states)
 
 
 func _relay_unit_command(excluded_peer_id: int, faction_id: int, action: StringName, unit_ids: Array, payload: Dictionary):
@@ -797,6 +844,138 @@ func _relay_spawn_buildings(excluded_peer_id: int, specifications: Array, builde
 		var peer_id := int(raw_peer_id)
 		if peer_id != excluded_peer_id:
 			_receive_spawn_buildings.rpc_id(peer_id, specifications, builder_ids)
+
+
+func _relay_unit_states(excluded_peer_id: int, authoritative_faction_ids: Array, states: Array):
+	for raw_peer_id in multiplayer.get_peers():
+		var peer_id := int(raw_peer_id)
+		if peer_id != excluded_peer_id:
+			_receive_unit_states.rpc_id(peer_id, authoritative_faction_ids, states)
+
+
+func _relay_building_states(excluded_peer_id: int, authoritative_faction_ids: Array, states: Array):
+	for raw_peer_id in multiplayer.get_peers():
+		var peer_id := int(raw_peer_id)
+		if peer_id != excluded_peer_id:
+			_receive_building_states.rpc_id(peer_id, authoritative_faction_ids, states)
+
+
+func _relay_resource_states(states: Array):
+	for raw_peer_id in multiplayer.get_peers():
+		_receive_resource_states.rpc_id(int(raw_peer_id), states)
+
+
+func _apply_unit_states(authoritative_faction_ids: Array, states: Array):
+	var applicable_faction_ids := _get_locally_applicable_remote_factions(authoritative_faction_ids)
+	if applicable_faction_ids.is_empty():
+		return
+	var world := _get_world()
+	if is_instance_valid(world) and world.has_method("apply_network_unit_states"):
+		world.apply_network_unit_states(states, applicable_faction_ids)
+
+
+func _apply_building_states(authoritative_faction_ids: Array, states: Array):
+	var applicable_faction_ids := _get_locally_applicable_remote_factions(authoritative_faction_ids)
+	if applicable_faction_ids.is_empty():
+		return
+	var world := _get_world()
+	if is_instance_valid(world) and world.has_method("apply_network_building_states"):
+		world.apply_network_building_states(states, applicable_faction_ids)
+
+
+func _apply_resource_states(states: Array):
+	var world := _get_world()
+	if not is_instance_valid(world):
+		return
+	var lod_manager := world.get_node_or_null("SimulationLODManager")
+	if not is_instance_valid(lod_manager) or not lod_manager.has_method("update_resource_amount"):
+		return
+	_applying_resource_sync = true
+	for state in states.slice(0, MAX_RESOURCE_STATES_PER_SYNC):
+		if state is Dictionary:
+			var record_id := int(state.get("record_id", 0))
+			if record_id > 0:
+				var record: Dictionary = lod_manager._resource_records_by_id.get(record_id, {})
+				if record.is_empty():
+					continue
+				var safe_amount := mini(int(record.get("amount", 0)), maxi(int(state.get("amount", 0)), 0))
+				lod_manager.update_resource_amount(record_id, safe_amount)
+				if _pending_resource_amounts.has(record_id):
+					_pending_resource_amounts[record_id] = mini(int(_pending_resource_amounts[record_id]), safe_amount)
+	_applying_resource_sync = false
+
+
+func _sanitize_unit_states(states: Array, authoritative_faction_ids: Array) -> Array:
+	var result: Array = []
+	if states.size() > MAX_UNIT_STATES_PER_SYNC:
+		return result
+	var allowed_factions := _make_faction_set(authoritative_faction_ids)
+	for raw_state in states:
+		if raw_state is not Dictionary:
+			continue
+		var faction_id := int(raw_state.get("faction_id", -1))
+		var network_id := int(raw_state.get("network_id", 0))
+		if network_id <= 0 or not allowed_factions.has(faction_id):
+			continue
+		var slot := get_faction_slot(faction_id)
+		var state: Dictionary = raw_state.duplicate(true)
+		state["faction_id"] = faction_id
+		state["faction_name"] = str(slot.get("nickname", "Игрок"))
+		state["controller_peer_id"] = int(slot.get("controller_peer_id", 0))
+		state["ai_controlled"] = bool(slot.get("is_ai", false))
+		result.append(state)
+	return result
+
+
+func _sanitize_building_states(states: Array, authoritative_faction_ids: Array) -> Array:
+	var result: Array = []
+	if states.size() > MAX_BUILDING_STATES_PER_SYNC:
+		return result
+	var allowed_factions := _make_faction_set(authoritative_faction_ids)
+	for raw_state in states:
+		if raw_state is not Dictionary:
+			continue
+		var faction_id := int(raw_state.get("faction_id", -1))
+		var network_id := int(raw_state.get("network_id", 0))
+		if network_id <= 0 or not allowed_factions.has(faction_id) or str(raw_state.get("kind", "")) not in NETWORK_BUILDING_KINDS:
+			continue
+		var state: Dictionary = raw_state.duplicate(true)
+		state["faction_id"] = faction_id
+		state["faction_name"] = str(get_faction_slot(faction_id).get("nickname", "Игрок"))
+		result.append(state)
+	return result
+
+
+func _merge_resource_states(states: Array) -> Array:
+	var result_by_id := {}
+	if states.size() > MAX_RESOURCE_STATES_PER_SYNC:
+		return []
+	var world := _get_world()
+	var lod_manager := world.get_node_or_null("SimulationLODManager") if is_instance_valid(world) else null
+	if not is_instance_valid(lod_manager):
+		return []
+	for raw_state in states:
+		if raw_state is not Dictionary:
+			continue
+		var record_id := int(raw_state.get("record_id", 0))
+		var record: Dictionary = lod_manager._resource_records_by_id.get(record_id, {})
+		if record_id <= 0 or record.is_empty():
+			continue
+		var merged_amount := mini(int(record.get("amount", 0)), maxi(int(raw_state.get("amount", 0)), 0))
+		if result_by_id.has(record_id):
+			merged_amount = mini(merged_amount, int(result_by_id[record_id].get("amount", merged_amount)))
+		result_by_id[record_id] = {"record_id": record_id, "amount": merged_amount}
+	return result_by_id.values()
+
+
+func _take_pending_resource_states() -> Array:
+	var result: Array = []
+	for record_id in _pending_resource_amounts.keys():
+		result.append({"record_id": int(record_id), "amount": int(_pending_resource_amounts[record_id])})
+		_pending_resource_amounts.erase(record_id)
+		if result.size() >= MAX_RESOURCE_STATES_PER_SYNC:
+			break
+	return result
 
 
 func _handle_server_unit_command(sender_peer_id: int, action: StringName, raw_unit_ids: Array, payload: Dictionary):
@@ -1011,15 +1190,18 @@ func _send_full_world_state(peer_id: int):
 	var world := _get_world()
 	if not is_instance_valid(world):
 		return
+	var owned_factions := _make_faction_set(_get_factions_authoritative_for_peer(peer_id))
+	var faction_ids: Array = []
+	for faction_id in _get_all_faction_ids():
+		if not owned_factions.has(faction_id):
+			faction_ids.append(faction_id)
 	if world.has_method("get_network_unit_states"):
-		_receive_unit_states.rpc_id(peer_id, world.get_network_unit_states())
+		_receive_unit_states.rpc_id(peer_id, faction_ids, world.get_network_unit_states(faction_ids))
 	if world.has_method("get_network_building_states"):
-		_receive_building_states.rpc_id(peer_id, world.get_network_building_states())
-	if not _authoritative_resource_amounts.is_empty():
-		var resource_states: Array = []
-		for record_id in _authoritative_resource_amounts:
-			resource_states.append({"record_id": int(record_id), "amount": int(_authoritative_resource_amounts[record_id])})
-		_receive_resource_states.rpc_id(peer_id, resource_states)
+		_receive_building_states.rpc_id(peer_id, faction_ids, world.get_network_building_states(faction_ids))
+	var lod_manager := world.get_node_or_null("SimulationLODManager")
+	if is_instance_valid(lod_manager) and lod_manager.has_method("get_network_resource_states"):
+		_receive_resource_states.rpc_id(peer_id, lod_manager.get_network_resource_states())
 
 
 func _all_remote_worlds_ready() -> bool:
@@ -1032,6 +1214,55 @@ func _all_remote_worlds_ready() -> bool:
 		if not _world_ready_peers.has(peer_id):
 			return false
 	return true
+
+
+func _get_factions_authoritative_for_peer(peer_id: int) -> Array:
+	var result: Array = []
+	for slot in session_slots:
+		var faction_id := int(slot.get("faction_id", -1))
+		if faction_id < 0:
+			continue
+		if bool(slot.get("is_ai", true)):
+			if peer_id == 1:
+				result.append(faction_id)
+		elif int(slot.get("controller_peer_id", 0)) == peer_id:
+			result.append(faction_id)
+	return result
+
+
+func _get_all_faction_ids() -> Array:
+	var result: Array = []
+	for slot in session_slots:
+		var faction_id := int(slot.get("faction_id", -1))
+		if faction_id >= 0 and faction_id not in result:
+			result.append(faction_id)
+	return result
+
+
+func _is_faction_authoritative_for_peer(faction_id: int, peer_id: int) -> bool:
+	return faction_id in _get_factions_authoritative_for_peer(peer_id)
+
+
+func _get_locally_applicable_remote_factions(authoritative_faction_ids: Array) -> Array:
+	var result: Array = []
+	var local_peer_id := multiplayer.get_unique_id()
+	for raw_faction_id in authoritative_faction_ids:
+		var faction_id := int(raw_faction_id)
+		if faction_id < 0 or faction_id in result:
+			continue
+		if not multiplayer.is_server() and _is_faction_authoritative_for_peer(faction_id, local_peer_id):
+			continue
+		result.append(faction_id)
+	return result
+
+
+func _make_faction_set(faction_ids: Array) -> Dictionary:
+	var result := {}
+	for raw_faction_id in faction_ids:
+		var faction_id := int(raw_faction_id)
+		if faction_id >= 0:
+			result[faction_id] = true
+	return result
 
 
 func _get_faction_controlled_by_peer(peer_id: int) -> int:
@@ -1497,7 +1728,8 @@ func _reset_runtime_state():
 	_building_state_sync_accumulator = 0.0
 	_next_server_entity_id = SERVER_ENTITY_ID_START
 	_next_local_entity_sequence = 1
-	_authoritative_resource_amounts.clear()
+	_pending_resource_amounts.clear()
+	_applying_resource_sync = false
 	_world_ready_peers.clear()
 
 
