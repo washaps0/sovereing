@@ -18,11 +18,13 @@ const ROCK_SCENE := preload("res://scenes/objects/rock.tscn")
 @export var strategic_tick_interval := 0.75
 @export var background_tick_interval := 4.0
 @export_range(1, 64, 1) var object_load_budget_per_frame := 24
+@export_range(8, 512, 8) var lod_unit_budget_per_level_per_frame := 128
 
 var camera: Camera2D
 var _clock := 0.0
 var _refresh_accumulator := 0.0
-var _lod_tick_accumulators: Array[float] = [0.0, 0.0, 0.0, 0.0]
+var _lod_tick_credits: Array[float] = [0.0, 0.0, 0.0, 0.0]
+var _lod_tick_cursors: Array[int] = [0, 0, 0, 0]
 var _lod_buckets: Array = [[], [], [], []]
 var _resource_chunks := {}
 var _resource_records_by_id := {}
@@ -34,6 +36,7 @@ var _pending_object_loads: Array[Dictionary] = []
 var _pending_object_load_index := 0
 var _progressively_visible_units := {}
 var _progressively_active_buildings := {}
+var _world_index: Node
 
 
 func _ready():
@@ -44,6 +47,7 @@ func _ready():
 
 func _initialize():
 	camera = get_node_or_null("../Camera2D") as Camera2D
+	_world_index = get_node_or_null("../WorldIndex")
 	if camera == null:
 		return
 	rebuild_spatial_index()
@@ -68,14 +72,27 @@ func _physics_process(delta: float):
 
 
 func _tick_lod_bucket(level: int, interval: float, delta: float):
-	_lod_tick_accumulators[level] += delta
-	if _lod_tick_accumulators[level] < interval:
+	var bucket: Array = _lod_buckets[level]
+	if bucket.is_empty():
+		_lod_tick_credits[level] = 0.0
+		_lod_tick_cursors[level] = 0
 		return
-	_lod_tick_accumulators[level] = fmod(_lod_tick_accumulators[level], interval)
-	for unit in _lod_buckets[level]:
+	# Кредитная схема сохраняет среднюю частоту каждого LOD, но не обновляет
+	# весь бакет одним тяжёлым кадром.
+	_lod_tick_credits[level] = minf(
+		_lod_tick_credits[level] + float(bucket.size()) * delta / maxf(interval, 0.001),
+		float(bucket.size())
+	)
+	var requested := int(floor(_lod_tick_credits[level]))
+	var update_count := mini(requested, mini(lod_unit_budget_per_level_per_frame, bucket.size()))
+	for _update_index in range(update_count):
+		var cursor := _lod_tick_cursors[level] % bucket.size()
+		_lod_tick_cursors[level] = (cursor + 1) % bucket.size()
+		var unit = bucket[cursor]
 		if not is_instance_valid(unit) or unit.simulation_lod != level:
 			continue
 		_simulate_pending_time(unit)
+	_lod_tick_credits[level] = maxf(_lod_tick_credits[level] - update_count, 0.0)
 
 
 func _simulate_pending_time(unit: Unit):
@@ -96,12 +113,13 @@ func _refresh_lods(initial: bool, elapsed: float):
 	_current_render_rect = render_rect
 	_unit_chunks.clear()
 
-	for candidate in get_tree().get_nodes_in_group("units"):
+	var units: Array = _world_index.get_units() if is_instance_valid(_world_index) else get_tree().get_nodes_in_group("units")
+	for candidate in units:
 		if candidate is not Unit or not get_parent().is_ancestor_of(candidate):
 			continue
 		var unit := candidate as Unit
 		var unit_id := unit.get_instance_id()
-		var wants_render := render_rect.has_point(unit.global_position)
+		var wants_render := not is_instance_valid(unit.inside_building) and render_rect.has_point(unit.global_position)
 		if not wants_render:
 			_progressively_visible_units.erase(unit_id)
 		elif not _progressively_visible_units.has(unit_id):
@@ -110,14 +128,6 @@ func _refresh_lods(initial: bool, elapsed: float):
 		var desired_lod := _get_desired_lod(unit, render_rect, reduced_rect, strategic_rect, local_faction_id)
 		_update_unit_lod(unit, desired_lod, render_enabled, initial, elapsed)
 		new_buckets[unit.simulation_lod].append(unit)
-		# Добыча и принятие решений ИИ не должны зависеть только от очереди
-		# LOD-бакета. Если тик был пропущен при смене уровня или перестроении
-		# бакетов, здесь проигрывается накопленное время.
-		if unit.simulation_lod != Unit.SimulationLOD.FULL and unit.needs_reliable_offscreen_simulation():
-			var pending_time: float = _clock - unit.lod_last_simulation_time
-			var maximum_gap: float = reduced_tick_interval if unit.needs_frequent_offscreen_simulation() else strategic_tick_interval
-			if pending_time >= maximum_gap:
-				_simulate_pending_time(unit)
 		var unit_chunk := _point_to_chunk(unit.global_position, UNIT_CHUNK_SIZE)
 		if not _unit_chunks.has(unit_chunk):
 			_unit_chunks[unit_chunk] = []
@@ -189,10 +199,10 @@ func _process_pending_object_loads():
 
 
 func _get_desired_lod(unit: Unit, render_rect: Rect2, reduced_rect: Rect2, strategic_rect: Rect2, local_faction_id: int) -> int:
-	# Рабочие циклы добычи и строительства намеренно исключены из LOD.
-	# Отрисовка за камерой всё равно отключается отдельно через render_enabled.
-	if unit.is_lod_exempt_worker():
-		return Unit.SimulationLOD.FULL
+	# Скрытым жильцам и рабочим внутри здания физика CharacterBody2D не нужна.
+	# Их таймеры производства и отдыха корректно проигрываются крупным delta.
+	if is_instance_valid(unit.inside_building):
+		return Unit.SimulationLOD.STRATEGIC
 	if render_rect.has_point(unit.global_position):
 		return Unit.SimulationLOD.FULL
 	var desired_lod := Unit.SimulationLOD.BACKGROUND
@@ -468,7 +478,8 @@ func _sync_resource_record(record: Dictionary):
 
 
 func _update_buildings(active_rect: Rect2, load_candidates: Array[Dictionary]):
-	for candidate in get_tree().get_nodes_in_group("buildings"):
+	var buildings: Array = _world_index.get_buildings() if is_instance_valid(_world_index) else get_tree().get_nodes_in_group("buildings")
+	for candidate in buildings:
 		if candidate is not Building or not get_parent().is_ancestor_of(candidate):
 			continue
 		var building := candidate as Building

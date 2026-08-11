@@ -26,7 +26,7 @@ var lod_record_id := 0
 func _ready():
 	add_to_group("trees")
 	add_to_group("resources")
-	_create_progress_bar()
+	set_process(false)
 	tree_variant = clampi(tree_variant, 0, NORMAL_TEXTURES.size() - 1)
 	tree_sprite.texture = NORMAL_TEXTURES[tree_variant]
 	body_entered.connect(_on_body_entered)
@@ -42,8 +42,12 @@ func _input_event(_viewport: Node, event: InputEvent, _shape_idx: int):
 
 
 func _process(_delta: float):
+	if not is_instance_valid(progress_bar):
+		set_process(false)
+		return
 	if harvest_progress.is_empty():
 		progress_bar.visible = false
+		set_process(false)
 		return
 	progress_bar.visible = true
 	var highest_progress := 0.0
@@ -59,11 +63,13 @@ func set_lod_active(active: bool):
 	visible = active
 	input_pickable = active
 	monitoring = active
-	set_process(active)
+	set_process(active and not harvest_progress.is_empty())
 	$CollisionShape2D.set_deferred("disabled", not active)
 
 
 func _create_progress_bar():
+	if is_instance_valid(progress_bar):
+		return
 	progress_bar = WorldProgressBar.new()
 	progress_bar.position = Vector2(0, -22)
 	progress_bar.bar_width = 24.0
@@ -74,11 +80,17 @@ func _create_progress_bar():
 
 
 func set_harvest_progress(unit: Unit, progress: float):
+	_create_progress_bar()
 	harvest_progress[unit.get_instance_id()] = progress
+	set_process(lod_active)
 
 
 func stop_harvest(unit: Unit):
 	harvest_progress.erase(unit.get_instance_id())
+	if harvest_progress.is_empty():
+		if is_instance_valid(progress_bar):
+			progress_bar.visible = false
+		set_process(false)
 
 
 func get_harvester_count() -> int:

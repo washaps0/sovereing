@@ -130,15 +130,25 @@ var selected_recipe: StringName = &"planks"
 var mouse_is_over := false
 var placement_preview := false
 var lod_active := true
-var construction_sound_players: Array[AudioStreamPlayer2D] = []
-var next_construction_sound_player := 0
 var next_construction_sound_time_msec := 0
+var world_index: Node
+var world_navigation: Node
+var world_audio_pool: Node
+var housekeeping_timer := 0.0
+var last_overlay_rotation := INF
 
 @onready var building_sprite: Sprite2D = $Sprite2D
 
 
 func _ready():
 	add_to_group("buildings")
+	world_index = get_tree().get_first_node_in_group("world_index")
+	world_navigation = get_tree().get_first_node_in_group("world_navigation")
+	world_audio_pool = get_tree().get_first_node_in_group("world_audio_pool")
+	if is_instance_valid(world_index):
+		world_index.register_building(self)
+	if is_instance_valid(world_navigation):
+		world_navigation.invalidate()
 	if is_warehouse():
 		storage_capacity = 300
 		storage_limits = {&"wood": 40, &"stone": 40, &"iron": 40, &"coal": 40, &"planks": 40, &"tools": 20, &"food": 40, &"armor": 20, &"rifles": 20}
@@ -153,6 +163,10 @@ func _ready():
 
 
 func _exit_tree():
+	if is_instance_valid(world_index):
+		world_index.unregister_building(self)
+	if is_instance_valid(world_navigation):
+		world_navigation.invalidate()
 	if selected_building == self:
 		selected_building = null
 	for unit in occupants.duplicate():
@@ -164,21 +178,23 @@ func _exit_tree():
 func dismantle():
 	if placement_preview or is_queued_for_deletion():
 		return
-	for unit in get_tree().get_nodes_in_group("units"):
+	var units: Array = world_index.get_units() if is_instance_valid(world_index) else get_tree().get_nodes_in_group("units")
+	for unit in units:
 		if unit is Unit:
 			unit.on_building_dismantled(self)
 	queue_free()
 
 
-func _process(_delta: float):
-	# На сетевом клиенте завершение может прийти прямым обновлением состояния,
-	# минуя add_build_progress(). В этом случае звук тоже нужно освободить.
-	if not under_construction and not construction_sound_players.is_empty():
-		_release_construction_sound_players()
-	_cleanup_workers()
-	_cleanup_builders()
-	_cleanup_occupants()
-	_update_overlay_orientation()
+func _process(delta: float):
+	housekeeping_timer -= delta
+	if housekeeping_timer <= 0.0:
+		housekeeping_timer = 0.5
+		_cleanup_workers()
+		_cleanup_builders()
+		_cleanup_occupants()
+	if not is_equal_approx(last_overlay_rotation, rotation):
+		last_overlay_rotation = rotation
+		_update_overlay_orientation()
 	if status_label == null:
 		return
 	if is_factory():
@@ -196,7 +212,7 @@ func set_lod_active(active: bool):
 		return
 	lod_active = active
 	if not active:
-		_release_construction_sound_players()
+		next_construction_sound_time_msec = 0
 	visible = active
 	input_pickable = active
 	monitoring = active
@@ -285,6 +301,7 @@ func begin_construction():
 	next_construction_sound_time_msec = 0
 	progress_bar.visible = true
 	_update_visuals()
+	notify_navigation_changed()
 
 
 func _input_event(_viewport: Node, event: InputEvent, _shape_idx: int):
@@ -347,7 +364,7 @@ func add_build_progress(delta: float):
 		under_construction = false
 		building_sprite.modulate.a = 1.0
 		progress_bar.visible = false
-		_release_construction_sound_players()
+		notify_navigation_changed()
 
 
 func _try_play_construction_sound():
@@ -356,41 +373,29 @@ func _try_play_construction_sound():
 	var now_msec := Time.get_ticks_msec()
 	if now_msec < next_construction_sound_time_msec:
 		return
-	_ensure_construction_sound_players()
-	if construction_sound_players.is_empty():
+	if not is_instance_valid(world_audio_pool):
+		world_audio_pool = get_tree().get_first_node_in_group("world_audio_pool")
+	if not is_instance_valid(world_audio_pool):
 		return
-	var player := construction_sound_players[next_construction_sound_player]
-	next_construction_sound_player = (next_construction_sound_player + 1) % construction_sound_players.size()
 	var minimum_pitch := minf(construction_pitch_min, construction_pitch_max)
 	var maximum_pitch := maxf(construction_pitch_min, construction_pitch_max)
-	player.pitch_scale = randf_range(minimum_pitch, maximum_pitch)
-	player.volume_db = construction_sound_volume_db + randf_range(-1.5, 1.0)
-	player.play()
+	world_audio_pool.play_spatial(
+		CONSTRUCTION_SOUND,
+		global_position,
+		construction_sound_max_distance,
+		construction_sound_volume_db + randf_range(-1.5, 1.0),
+		randf_range(minimum_pitch, maximum_pitch)
+	)
 	var minimum_interval := minf(construction_sound_interval_min, construction_sound_interval_max)
 	var maximum_interval := maxf(construction_sound_interval_min, construction_sound_interval_max)
 	next_construction_sound_time_msec = now_msec + int(randf_range(minimum_interval, maximum_interval) * 1000.0)
 
 
-func _ensure_construction_sound_players():
-	if not construction_sound_players.is_empty():
-		return
-	for player_index in range(2):
-		var player := AudioStreamPlayer2D.new()
-		player.name = "ConstructionSound%d" % (player_index + 1)
-		player.stream = CONSTRUCTION_SOUND
-		player.max_distance = construction_sound_max_distance
-		player.attenuation = 2.0
-		add_child(player)
-		construction_sound_players.append(player)
-
-
-func _release_construction_sound_players():
-	for player in construction_sound_players:
-		if is_instance_valid(player):
-			player.stop()
-			player.queue_free()
-	construction_sound_players.clear()
-	next_construction_sound_player = 0
+func notify_navigation_changed():
+	if not is_instance_valid(world_navigation):
+		world_navigation = get_tree().get_first_node_in_group("world_navigation")
+	if is_instance_valid(world_navigation):
+		world_navigation.invalidate()
 
 
 func is_completed() -> bool:
@@ -800,7 +805,7 @@ func requires_electricity() -> bool:
 
 func get_network_electricity_amount() -> int:
 	var total := 0
-	for building in get_tree().get_nodes_in_group("buildings"):
+	for building in _get_indexed_buildings("power_plant"):
 		if building is Building and building.faction_id == faction_id and building.is_power_plant() and building.is_completed():
 			total += building.stored_electricity
 	return total
@@ -831,7 +836,7 @@ func get_factory_issues() -> Array[Dictionary]:
 
 func _take_electricity_from_network(amount: int) -> int:
 	var remaining := maxi(amount, 0)
-	for building in get_tree().get_nodes_in_group("buildings"):
+	for building in _get_indexed_buildings("power_plant"):
 		if building is not Building or building.faction_id != faction_id or not building.is_power_plant() or not building.is_completed():
 			continue
 		remaining -= building.take_electricity(remaining)
@@ -842,11 +847,23 @@ func _take_electricity_from_network(amount: int) -> int:
 
 func _get_warehouses() -> Array[Building]:
 	var warehouses: Array[Building] = []
-	for building in get_tree().get_nodes_in_group("buildings"):
+	for building in _get_indexed_buildings("warehouse"):
 		if building is Building and building.faction_id == faction_id and building.is_warehouse() and building.is_completed():
 			warehouses.append(building)
 	warehouses.sort_custom(func(a: Building, b: Building): return global_position.distance_squared_to(a.global_position) < global_position.distance_squared_to(b.global_position))
 	return warehouses
+
+
+func _get_indexed_buildings(kind := "") -> Array:
+	if not is_instance_valid(world_index):
+		world_index = get_tree().get_first_node_in_group("world_index")
+	if is_instance_valid(world_index):
+		return world_index.get_buildings(faction_id, kind)
+	var result: Array[Building] = []
+	for candidate in get_tree().get_nodes_in_group("buildings"):
+		if candidate is Building and candidate.faction_id == faction_id and (kind.is_empty() or candidate.building_kind == kind):
+			result.append(candidate)
+	return result
 
 
 func _get_network_amount(resource_type: StringName) -> int:

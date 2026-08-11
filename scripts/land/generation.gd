@@ -161,6 +161,28 @@ func _ready():
 		network_manager.notify_world_ready()
 
 
+func _get_indexed_units(faction_id := -1) -> Array:
+	var index := get_node_or_null("WorldIndex")
+	if is_instance_valid(index):
+		return index.get_units(faction_id)
+	var result: Array[Unit] = []
+	for candidate in get_tree().get_nodes_in_group("units"):
+		if candidate is Unit and is_ancestor_of(candidate) and (faction_id < 0 or candidate.faction_id == faction_id):
+			result.append(candidate)
+	return result
+
+
+func _get_indexed_buildings(building_kind := "", faction_id := -1) -> Array:
+	var index := get_node_or_null("WorldIndex")
+	if is_instance_valid(index):
+		return index.get_buildings(faction_id, building_kind)
+	var result: Array[Building] = []
+	for candidate in get_tree().get_nodes_in_group("buildings"):
+		if candidate is Building and is_ancestor_of(candidate) and (faction_id < 0 or candidate.faction_id == faction_id) and (building_kind.is_empty() or candidate.building_kind == building_kind):
+			result.append(candidate)
+	return result
+
+
 func _process(delta: float):
 	ai_strategy_timer -= delta
 	if ai_strategy_timer > 0.0:
@@ -182,7 +204,7 @@ func get_save_data() -> Dictionary:
 	var network_manager := get_node_or_null("/root/NetworkManager")
 	if is_instance_valid(network_manager):
 		data.session_slots = network_manager.get_session_slots()
-	for building in get_tree().get_nodes_in_group("buildings"):
+	for building in _get_indexed_buildings():
 		if building is Building and is_ancestor_of(building):
 			data.buildings.append(_serialize_building(building))
 	var lod_manager := get_node_or_null("SimulationLODManager")
@@ -196,7 +218,7 @@ func get_save_data() -> Dictionary:
 				data.resources.append({"type": "tree", "position": _vector_to_data(resource.position), "variant": resource.tree_variant, "amount": resource.wood_amount})
 			elif resource.is_in_group("rocks"):
 				data.resources.append({"type": "rock", "position": _vector_to_data(resource.position), "variant": resource.rock_variant, "amount": resource.stone_amount})
-	for unit in get_tree().get_nodes_in_group("units"):
+	for unit in _get_indexed_units():
 		if unit is not Unit or not is_ancestor_of(unit):
 			continue
 		var target_resource_position: Vector2 = unit.global_position
@@ -251,7 +273,7 @@ func get_save_data() -> Dictionary:
 func _ensure_persistent_building_ids():
 	var used_ids := {}
 	var buildings_to_assign: Array[Building] = []
-	for candidate in get_tree().get_nodes_in_group("buildings"):
+	for candidate in _get_indexed_buildings():
 		if candidate is not Building or not is_ancestor_of(candidate):
 			continue
 		var building := candidate as Building
@@ -271,7 +293,7 @@ func _ensure_persistent_building_ids():
 func _ensure_persistent_entity_ids():
 	_ensure_persistent_building_ids()
 	var used_unit_ids := {}
-	for candidate in get_tree().get_nodes_in_group("units"):
+	for candidate in _get_indexed_units():
 		if candidate is not Unit or not is_ancestor_of(candidate):
 			continue
 		var unit := candidate as Unit
@@ -331,7 +353,7 @@ func _serialize_building(building: Building) -> Dictionary:
 func get_network_unit_states(faction_ids: Array = []) -> Array:
 	var result: Array = []
 	var faction_filter := _make_network_faction_filter(faction_ids)
-	for candidate in get_tree().get_nodes_in_group("units"):
+	for candidate in _get_indexed_units():
 		if candidate is not Unit or not is_ancestor_of(candidate):
 			continue
 		var unit := candidate as Unit
@@ -392,7 +414,7 @@ func get_network_unit_states(faction_ids: Array = []) -> Array:
 func get_network_building_states(faction_ids: Array = []) -> Array:
 	var result: Array = []
 	var faction_filter := _make_network_faction_filter(faction_ids)
-	for candidate in get_tree().get_nodes_in_group("buildings"):
+	for candidate in _get_indexed_buildings():
 		if candidate is Building and is_ancestor_of(candidate) and not candidate.placement_preview and (faction_filter.is_empty() or faction_filter.has(candidate.faction_id)):
 			result.append(_serialize_building(candidate))
 	return result
@@ -420,7 +442,7 @@ func apply_network_unit_states(states: Array, authoritative_faction_ids: Array =
 	if authoritative_factions.is_empty():
 		return
 	var authoritative_keys := {}
-	for building in get_tree().get_nodes_in_group("buildings"):
+	for building in _get_indexed_buildings():
 		if building is Building and is_ancestor_of(building):
 			for occupant in building.occupants.duplicate():
 				if not is_instance_valid(occupant) or authoritative_factions.has(occupant.faction_id):
@@ -441,12 +463,33 @@ func apply_network_unit_states(states: Array, authoritative_faction_ids: Array =
 		if not is_instance_valid(unit):
 			continue
 		_apply_network_unit_state(unit, state)
-	for candidate in get_tree().get_nodes_in_group("units"):
+	for candidate in _get_indexed_units():
 		if candidate is not Unit or not is_ancestor_of(candidate) or not authoritative_factions.has(candidate.faction_id):
 			continue
 		var key := "%d:%d" % [candidate.faction_id, candidate.network_id]
 		if not authoritative_keys.has(key):
 			candidate.queue_free()
+
+
+func apply_network_unit_state_deltas(states: Array, authoritative_faction_ids: Array = []):
+	var authoritative_factions := _make_network_faction_filter(authoritative_faction_ids)
+	for raw_state in states:
+		if raw_state is not Dictionary:
+			continue
+		var state: Dictionary = raw_state
+		var network_id := int(state.get("network_id", 0))
+		var faction_id := int(state.get("faction_id", -1))
+		if network_id <= 0 or not authoritative_factions.has(faction_id):
+			continue
+		var unit := _find_unit_by_network_id(network_id, faction_id)
+		if bool(state.get("_deleted", false)):
+			if is_instance_valid(unit):
+				unit.queue_free()
+			continue
+		if not is_instance_valid(unit):
+			unit = _restore_unit(state)
+		if is_instance_valid(unit):
+			_apply_network_unit_state(unit, state)
 
 
 func _apply_network_unit_state(unit: Unit, state: Dictionary):
@@ -502,7 +545,10 @@ func _apply_network_unit_state(unit: Unit, state: Dictionary):
 		if is_instance_valid(unit.target_tree):
 			unit.target_tree.stop_harvest(unit)
 		unit.target_tree = null
+	var previous_inside_building := unit.inside_building
 	unit.inside_building = _find_building_by_network_id(int(state.get("inside_building_network_id", 0)), unit.faction_id)
+	if is_instance_valid(previous_inside_building) and previous_inside_building != unit.inside_building:
+		previous_inside_building.leave(unit)
 	if is_instance_valid(unit.inside_building) and unit not in unit.inside_building.occupants:
 		unit.inside_building.occupants.append(unit)
 	unit.apply_network_motion(
@@ -550,7 +596,7 @@ func apply_network_building_states(states: Array, authoritative_faction_ids: Arr
 			building = _restore_building(state)
 		if is_instance_valid(building):
 			_apply_network_building_state(building, state)
-	for candidate in get_tree().get_nodes_in_group("buildings"):
+	for candidate in _get_indexed_buildings():
 		if candidate is not Building or not is_ancestor_of(candidate) or candidate.placement_preview or not authoritative_factions.has(candidate.faction_id):
 			continue
 		var key := "%d:%d" % [candidate.faction_id, candidate.network_id]
@@ -558,9 +604,34 @@ func apply_network_building_states(states: Array, authoritative_faction_ids: Arr
 			candidate.queue_free()
 
 
+func apply_network_building_state_deltas(states: Array, authoritative_faction_ids: Array = []):
+	var authoritative_factions := _make_network_faction_filter(authoritative_faction_ids)
+	for raw_state in states:
+		if raw_state is not Dictionary:
+			continue
+		var state: Dictionary = raw_state
+		var network_id := int(state.get("network_id", 0))
+		var faction_id := int(state.get("faction_id", -1))
+		if network_id <= 0 or not authoritative_factions.has(faction_id):
+			continue
+		var building := _find_building_by_network_id(network_id, faction_id)
+		if bool(state.get("_deleted", false)):
+			if is_instance_valid(building):
+				building.queue_free()
+			continue
+		if not is_instance_valid(building):
+			building = _restore_building(state)
+		if is_instance_valid(building):
+			_apply_network_building_state(building, state)
+
+
 func _apply_network_building_state(building: Building, state: Dictionary):
-	building.global_position = _data_to_vector(state.get("position", [building.global_position.x, building.global_position.y]))
-	building.rotation = float(state.get("rotation", building.rotation))
+	var new_position := _data_to_vector(state.get("position", [building.global_position.x, building.global_position.y]))
+	var new_rotation := float(state.get("rotation", building.rotation))
+	var new_under_construction := bool(state.get("under_construction", building.under_construction))
+	var navigation_changed := building.global_position != new_position or not is_equal_approx(building.rotation, new_rotation) or building.under_construction != new_under_construction
+	building.global_position = new_position
+	building.rotation = new_rotation
 	building.faction_name = str(state.get("faction_name", building.faction_name))
 	building.address = str(state.get("address", building.address))
 	if is_instance_valid(building.address_label):
@@ -588,13 +659,18 @@ func _apply_network_building_state(building: Building, state: Dictionary):
 		building.migration_timer = float(state.get("migration_timer", building.migration_timer))
 		building.mobilization_target = int(state.get("mobilization_target", building.mobilization_target))
 		building.mobilization_timer = float(state.get("mobilization_timer", building.mobilization_timer))
-	building.under_construction = bool(state.get("under_construction", building.under_construction))
+	building.under_construction = new_under_construction
 	building.progress_bar.visible = building.under_construction
 	building._update_visuals()
+	if navigation_changed:
+		building.notify_navigation_changed()
 
 
 func _find_unit_by_network_id(network_id: int, faction_id: int) -> Unit:
-	for candidate in get_tree().get_nodes_in_group("units"):
+	var index := get_node_or_null("WorldIndex")
+	if is_instance_valid(index):
+		return index.find_unit(network_id, faction_id) as Unit
+	for candidate in _get_indexed_units(faction_id):
 		if candidate is Unit and is_ancestor_of(candidate) and candidate.network_id == network_id and candidate.faction_id == faction_id:
 			return candidate
 	return null
@@ -606,11 +682,13 @@ func can_spawn_network_building(specification: Dictionary) -> bool:
 	var faction_id := int(specification.get("faction_id", -1))
 	if position is not Vector2 or faction_id < 0:
 		return false
+	if kind == "government" and _faction_has_government(faction_id):
+		return false
 	var build_manager := get_node_or_null("BuildManager")
 	if kind == "road":
 		return is_instance_valid(build_manager) and not build_manager._road_segment_overlaps_existing(position, float(specification.get("rotation", 0.0)))
 	var attached_to_road := false
-	for candidate in get_tree().get_nodes_in_group("roads"):
+	for candidate in _get_indexed_buildings("road", faction_id):
 		if candidate is not RoadSegment or candidate.faction_id != faction_id or candidate.under_construction:
 			continue
 		var direction := Vector2.RIGHT.rotated(candidate.global_rotation)
@@ -653,6 +731,8 @@ func spawn_network_buildings(specifications: Array, builder_ids: Array):
 		var network_id := int(spec.get("network_id", 0))
 		faction_id = int(spec.get("faction_id", faction_id))
 		if network_id <= 0 or is_instance_valid(_find_building_by_network_id(network_id, faction_id)):
+			continue
+		if str(spec.get("kind", "")) == "government" and _faction_has_government(faction_id):
 			continue
 		var data := spec.duplicate(true)
 		var position: Vector2 = spec.get("position", Vector2.ZERO)
@@ -703,7 +783,7 @@ func apply_save_data(data: Dictionary):
 	var lod_manager := get_node_or_null("SimulationLODManager")
 	if is_instance_valid(lod_manager) and lod_manager.has_method("clear_resource_data"):
 		lod_manager.clear_resource_data()
-	for unit in get_tree().get_nodes_in_group("units"):
+	for unit in _get_indexed_units():
 		if is_instance_valid(unit) and is_ancestor_of(unit):
 			unit.free()
 	for container_name in ["trees", "rocks", "roads", "buildings"]:
@@ -891,7 +971,10 @@ func _restore_unit(data: Dictionary) -> Unit:
 func _find_building_by_network_id(network_id: int, faction_id: int) -> Building:
 	if network_id <= 0:
 		return null
-	for building in get_tree().get_nodes_in_group("buildings"):
+	var index := get_node_or_null("WorldIndex")
+	if is_instance_valid(index):
+		return index.find_building(network_id, faction_id) as Building
+	for building in _get_indexed_buildings("", faction_id):
 		if building is Building and is_ancestor_of(building) and building.network_id == network_id and building.faction_id == faction_id:
 			return building
 	return null
@@ -965,12 +1048,12 @@ func _spawn_missing_loaded_factions(raw_slots: Array):
 			continue
 		var faction_id := int(raw_slot.get("faction_id", -1))
 		var has_state := false
-		for unit in get_tree().get_nodes_in_group("units"):
+		for unit in _get_indexed_units(faction_id):
 			if unit is Unit and is_ancestor_of(unit) and unit.faction_id == faction_id:
 				has_state = true
 				break
 		if not has_state:
-			for building in get_tree().get_nodes_in_group("buildings"):
+			for building in _get_indexed_buildings("", faction_id):
 				if building is Building and is_ancestor_of(building) and building.faction_id == faction_id:
 					has_state = true
 					break
@@ -992,10 +1075,10 @@ func get_faction_spawn_position(faction_id: int) -> Vector2:
 
 
 func set_faction_controller(faction_id: int, controller_peer_id: int, ai_controlled: bool, faction_name: String):
-	for unit in get_tree().get_nodes_in_group("units"):
+	for unit in _get_indexed_units(faction_id):
 		if unit is Unit and unit.faction_id == faction_id:
 			unit.configure_faction(faction_id, controller_peer_id, ai_controlled, faction_name)
-	for building in get_tree().get_nodes_in_group("buildings"):
+	for building in _get_indexed_buildings("", faction_id):
 		if building is Building and building.faction_id == faction_id:
 			building.faction_name = faction_name
 	var selected_units := Unit.get_selected_units()
@@ -1008,7 +1091,7 @@ func set_faction_controller(faction_id: int, controller_peer_id: int, ai_control
 
 func _run_ai_strategy():
 	var ai_factions := {}
-	for candidate in get_tree().get_nodes_in_group("units"):
+	for candidate in _get_indexed_units():
 		if candidate is Unit and is_ancestor_of(candidate) and candidate.ai_controlled:
 			ai_factions[candidate.faction_id] = candidate.faction_name
 	for raw_faction_id in ai_factions:
@@ -1025,7 +1108,7 @@ func _run_ai_strategy():
 func _configure_ai_economy(faction_id: int):
 	var mine_index := 0
 	var factory_index := 0
-	for candidate in get_tree().get_nodes_in_group("buildings"):
+	for candidate in _get_indexed_buildings("", faction_id):
 		if candidate is not Building or not is_ancestor_of(candidate) or candidate.faction_id != faction_id or not candidate.is_factory():
 			continue
 		var building := candidate as Building
@@ -1048,11 +1131,11 @@ func _configure_ai_economy(faction_id: int):
 func _get_ai_needed_equipment_recipe(faction_id: int) -> StringName:
 	var armor := 0
 	var rifles := 0
-	for candidate in get_tree().get_nodes_in_group("buildings"):
+	for candidate in _get_indexed_buildings("warehouse", faction_id):
 		if candidate is Building and is_ancestor_of(candidate) and candidate.faction_id == faction_id and candidate.is_warehouse() and candidate.is_completed():
 			armor += candidate.get_stored_resource(&"armor")
 			rifles += candidate.get_stored_resource(&"rifles")
-	for candidate in get_tree().get_nodes_in_group("units"):
+	for candidate in _get_indexed_units(faction_id):
 		if candidate is Unit and is_ancestor_of(candidate) and candidate.faction_id == faction_id:
 			armor += 1 if candidate.has_armor else 0
 			rifles += 1 if candidate.has_rifle else 0
@@ -1074,15 +1157,22 @@ func _configure_ai_population_and_army(faction_id: int):
 
 
 func _find_ai_government(faction_id: int) -> GovernmentBuilding:
-	for candidate in get_tree().get_nodes_in_group("buildings"):
+	for candidate in _get_indexed_buildings("government", faction_id):
 		if candidate is GovernmentBuilding and is_ancestor_of(candidate) and candidate.faction_id == faction_id:
 			return candidate
 	return null
 
 
+func _faction_has_government(faction_id: int) -> bool:
+	for candidate in _get_indexed_buildings("government", faction_id):
+		if candidate is Building and is_instance_valid(candidate) and is_ancestor_of(candidate) and candidate.faction_id == faction_id and not candidate.placement_preview:
+			return true
+	return false
+
+
 func _get_ai_construction_count(faction_id: int) -> int:
 	var result := 0
-	for candidate in get_tree().get_nodes_in_group("buildings"):
+	for candidate in _get_indexed_buildings("", faction_id):
 		if candidate is Building and is_ancestor_of(candidate) and candidate.faction_id == faction_id and candidate.under_construction:
 			result += 1
 	return result
@@ -1090,7 +1180,7 @@ func _get_ai_construction_count(faction_id: int) -> int:
 
 func _get_ai_building_count(faction_id: int, building_kind: String) -> int:
 	var result := 0
-	for candidate in get_tree().get_nodes_in_group("buildings"):
+	for candidate in _get_indexed_buildings(building_kind, faction_id):
 		if candidate is Building and is_ancestor_of(candidate) and candidate.faction_id == faction_id and candidate.building_kind == building_kind:
 			result += 1
 	return result
@@ -1100,7 +1190,7 @@ func _issue_ai_attack_orders(faction_id: int):
 	var soldiers: Array[Unit] = []
 	var commanders: Array[Unit] = []
 	var riflemen := 0
-	for candidate in get_tree().get_nodes_in_group("units"):
+	for candidate in _get_indexed_units(faction_id):
 		if candidate is not Unit or not is_ancestor_of(candidate) or candidate.faction_id != faction_id or not candidate.is_mobilized:
 			continue
 		soldiers.append(candidate)
@@ -1125,7 +1215,7 @@ func _find_nearest_enemy_target(faction_id: int, from_position: Vector2) -> Node
 	var nearest: Node2D
 	var nearest_priority := 100
 	var nearest_distance := INF
-	for candidate in get_tree().get_nodes_in_group("buildings"):
+	for candidate in _get_indexed_buildings():
 		if candidate is not Building or not is_ancestor_of(candidate) or candidate.faction_id == faction_id or not candidate.is_completed():
 			continue
 		var priority := 0 if candidate.is_government() else (1 if candidate.is_barracks() else 2)
@@ -1136,7 +1226,7 @@ func _find_nearest_enemy_target(faction_id: int, from_position: Vector2) -> Node
 			nearest_distance = distance
 	if is_instance_valid(nearest):
 		return nearest
-	for candidate in get_tree().get_nodes_in_group("units"):
+	for candidate in _get_indexed_units():
 		if candidate is Unit and is_ancestor_of(candidate) and candidate.faction_id != faction_id and candidate.health > 0:
 			var distance := from_position.distance_squared_to(candidate.global_position)
 			if distance < nearest_distance:
@@ -1148,7 +1238,7 @@ func _find_nearest_enemy_target(faction_id: int, from_position: Vector2) -> Node
 func _ensure_ai_starting_plan(faction_id: int, faction_name: String):
 	# Если у покинутой фракции уже есть поселение, ИИ продолжит имеющиеся
 	# стройки и производство. Для пустого угла создаётся базовый план развития.
-	for building in get_tree().get_nodes_in_group("buildings"):
+	for building in _get_indexed_buildings("", faction_id):
 		if building is Building and building.faction_id == faction_id:
 			return
 	var base := get_faction_spawn_position(faction_id)
@@ -1299,7 +1389,7 @@ func _get_ai_district_center(stage: int, starting_center: Vector2, inward_x: flo
 func _find_ai_road_connection_position(faction_id: int, target_position: Vector2, grid_origin: Vector2) -> Vector2:
 	var nearest_position: Vector2 = grid_origin
 	var nearest_distance: float = INF
-	for candidate in get_tree().get_nodes_in_group("roads"):
+	for candidate in _get_indexed_buildings("road", faction_id):
 		if not is_instance_valid(candidate) or candidate is not RoadSegment or candidate.faction_id != faction_id:
 			continue
 		var road := candidate as RoadSegment
@@ -1316,7 +1406,7 @@ func _find_ai_road_connection_position(faction_id: int, target_position: Vector2
 func _find_nearest_ai_road(faction_id: int, target_position: Vector2) -> RoadSegment:
 	var nearest: RoadSegment
 	var nearest_distance: float = INF
-	for candidate in get_tree().get_nodes_in_group("roads"):
+	for candidate in _get_indexed_buildings("road", faction_id):
 		if not is_instance_valid(candidate) or candidate is not RoadSegment or candidate.faction_id != faction_id:
 			continue
 		var road := candidate as RoadSegment
@@ -1365,7 +1455,7 @@ func _is_ai_district_plan_free(road_specs: Array[Dictionary], building_specs: Ar
 
 func _has_compatible_ai_road(position: Vector2, rotation_angle: float, faction_id: int) -> bool:
 	var direction := Vector2.RIGHT.rotated(rotation_angle)
-	for candidate in get_tree().get_nodes_in_group("roads"):
+	for candidate in _get_indexed_buildings("road", faction_id):
 		if candidate is not RoadSegment or not is_instance_valid(candidate) or candidate.faction_id != faction_id:
 			continue
 		var road := candidate as RoadSegment
@@ -1377,7 +1467,7 @@ func _has_compatible_ai_road(position: Vector2, rotation_angle: float, faction_i
 
 func _next_ai_entity_id() -> int:
 	var result := 1
-	for candidate in get_tree().get_nodes_in_group("buildings"):
+	for candidate in _get_indexed_buildings():
 		if candidate is Building and is_ancestor_of(candidate):
 			result = maxi(result, candidate.network_id + 1)
 	return result
@@ -1426,7 +1516,7 @@ func _spawn_ai_building(scene: PackedScene, position: Vector2, rotation_angle: f
 func _is_ai_road_position_free(candidate: RoadSegment) -> bool:
 	var candidate_direction := Vector2.RIGHT.rotated(candidate.rotation)
 	var candidate_footprint := _get_building_footprint(candidate).grow(3.0)
-	for existing in get_tree().get_nodes_in_group("buildings"):
+	for existing in _get_indexed_buildings():
 		if existing is not Building or not is_instance_valid(existing):
 			continue
 		if existing is RoadSegment:
@@ -1445,7 +1535,7 @@ func _is_ai_road_position_free(candidate: RoadSegment) -> bool:
 
 func _is_ai_building_position_free(candidate: Building) -> bool:
 	var candidate_footprint := _get_building_footprint(candidate).grow(6.0)
-	for existing in get_tree().get_nodes_in_group("buildings"):
+	for existing in _get_indexed_buildings():
 		if existing is Building and is_instance_valid(existing) and candidate_footprint.intersects(_get_building_footprint(existing)):
 			return false
 	return true

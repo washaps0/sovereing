@@ -47,7 +47,7 @@ func set_mobilization_target(value: int):
 
 func get_completed_barracks_count() -> int:
 	var total := 0
-	for building in get_tree().get_nodes_in_group("buildings"):
+	for building in _get_indexed_buildings("barracks"):
 		if _is_in_same_world(building) and building is Building and building.faction_id == faction_id and building.is_barracks() and building.is_completed():
 			total += 1
 	return total
@@ -55,7 +55,7 @@ func get_completed_barracks_count() -> int:
 
 func get_army_capacity() -> int:
 	var total := 0
-	for building in get_tree().get_nodes_in_group("buildings"):
+	for building in _get_indexed_buildings("barracks"):
 		if _is_in_same_world(building) and building is Building and building.faction_id == faction_id and building.is_barracks() and building.is_completed():
 			total += building.max_occupants
 	return total
@@ -112,7 +112,7 @@ func get_army_hierarchy_text() -> String:
 
 func get_equipment_amount(resource_type: StringName) -> int:
 	var total := 0
-	for building in get_tree().get_nodes_in_group("buildings"):
+	for building in _get_indexed_buildings("warehouse"):
 		if _is_in_same_world(building) and building is Building and building.faction_id == faction_id and building.is_warehouse() and building.is_completed():
 			total += building.get_stored_resource(resource_type)
 	return total
@@ -227,7 +227,7 @@ func _store_equipment(resource_type: StringName) -> bool:
 
 func _get_equipment_warehouses() -> Array[Building]:
 	var warehouses: Array[Building] = []
-	for building in get_tree().get_nodes_in_group("buildings"):
+	for building in _get_indexed_buildings("warehouse"):
 		if _is_in_same_world(building) and building is Building and building.faction_id == faction_id and building.is_warehouse() and building.is_completed():
 			warehouses.append(building)
 	warehouses.sort_custom(func(a: Building, b: Building): return global_position.distance_squared_to(a.global_position) < global_position.distance_squared_to(b.global_position))
@@ -244,7 +244,7 @@ func _get_issued_equipment_count(resource_type: StringName) -> int:
 
 func _get_mobilized_units() -> Array[Unit]:
 	var result: Array[Unit] = []
-	for unit in get_tree().get_nodes_in_group("units"):
+	for unit in _get_faction_units():
 		if _is_in_same_world(unit) and unit is Unit and unit.faction_id == faction_id and unit.is_mobilized:
 			result.append(unit)
 	return result
@@ -252,7 +252,7 @@ func _get_mobilized_units() -> Array[Unit]:
 
 func _find_civilian_for_mobilization() -> Unit:
 	var fallback: Unit
-	for unit in get_tree().get_nodes_in_group("units"):
+	for unit in _get_faction_units():
 		if not _is_in_same_world(unit) or unit is not Unit or unit.faction_id != faction_id or unit.is_mobilized or unit.health <= 0:
 			continue
 		if unit.task in [Unit.Task.IDLE, Unit.Task.REST]:
@@ -265,7 +265,7 @@ func _find_civilian_for_mobilization() -> Unit:
 func _find_barracks_for_soldier() -> Building:
 	var nearest: Building
 	var nearest_distance := INF
-	for building in get_tree().get_nodes_in_group("buildings"):
+	for building in _get_indexed_buildings("barracks"):
 		if not _is_in_same_world(building) or building is not Building or building.faction_id != faction_id or not building.is_barracks() or not building.is_completed():
 			continue
 		if building.occupants.size() >= building.max_occupants:
@@ -279,7 +279,7 @@ func _find_barracks_for_soldier() -> Building:
 
 func get_total_residence_count() -> int:
 	var total := 0
-	for building in get_tree().get_nodes_in_group("buildings"):
+	for building in _get_indexed_buildings("residence"):
 		if _is_in_same_world(building) and building is Building and building.faction_id == faction_id and building.is_residence():
 			total += 1
 	return total
@@ -287,7 +287,7 @@ func get_total_residence_count() -> int:
 
 func get_completed_residence_count() -> int:
 	var total := 0
-	for building in get_tree().get_nodes_in_group("buildings"):
+	for building in _get_indexed_buildings("residence"):
 		if _is_in_same_world(building) and building is Building and building.faction_id == faction_id and building.is_residence() and building.is_completed():
 			total += 1
 	return total
@@ -295,7 +295,7 @@ func get_completed_residence_count() -> int:
 
 func get_housing_capacity() -> int:
 	var total := 0
-	for building in get_tree().get_nodes_in_group("buildings"):
+	for building in _get_indexed_buildings("residence"):
 		if _is_in_same_world(building) and building is Building and building.faction_id == faction_id and building.is_residence() and building.is_completed():
 			total += building.max_occupants
 	return total
@@ -303,7 +303,7 @@ func get_housing_capacity() -> int:
 
 func get_population_count() -> int:
 	var total := 0
-	for unit in get_tree().get_nodes_in_group("units"):
+	for unit in _get_faction_units():
 		if _is_in_same_world(unit) and unit is Unit and unit.faction_id == faction_id:
 			total += 1
 	return total
@@ -348,7 +348,7 @@ func _attempt_migration() -> bool:
 func _find_residence_for_migrant() -> Building:
 	var nearest: Building
 	var nearest_distance := INF
-	for building in get_tree().get_nodes_in_group("buildings"):
+	for building in _get_indexed_buildings("residence"):
 		if not _is_in_same_world(building) or building is not Building or building.faction_id != faction_id or not building.is_residence() or not building.is_completed():
 			continue
 		if building.occupants.size() >= building.max_occupants:
@@ -390,7 +390,15 @@ func _configure_migrant(unit: Unit):
 
 func _next_unit_network_id() -> int:
 	var result := faction_id * 100000 + 10000
-	for unit in get_tree().get_nodes_in_group("units"):
+	for unit in _get_faction_units():
 		if _is_in_same_world(unit) and unit is Unit and unit.faction_id == faction_id:
 			result = maxi(result, unit.network_id + 1)
 	return result
+
+
+func _get_faction_units() -> Array:
+	if not is_instance_valid(world_index):
+		world_index = get_tree().get_first_node_in_group("world_index")
+	if is_instance_valid(world_index):
+		return world_index.get_units(faction_id)
+	return get_tree().get_nodes_in_group("units")

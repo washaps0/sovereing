@@ -20,6 +20,12 @@ func _ready():
 	add_to_group("rocks")
 	rock_variant = clampi(rock_variant, 0, TEXTURES.size() - 1)
 	rock_sprite.texture = TEXTURES[rock_variant]
+	set_process(false)
+
+
+func _create_progress_bar():
+	if is_instance_valid(progress_bar):
+		return
 	progress_bar = WorldProgressBar.new()
 	progress_bar.position = Vector2(0, -18)
 	progress_bar.bar_width = 24.0
@@ -31,7 +37,13 @@ func _ready():
 
 
 func _process(_delta: float):
+	if not is_instance_valid(progress_bar):
+		set_process(false)
+		return
 	progress_bar.visible = not harvest_progress.is_empty()
+	if harvest_progress.is_empty():
+		set_process(false)
+		return
 	var highest := 0.0
 	for value in harvest_progress.values():
 		highest = maxf(highest, value)
@@ -45,7 +57,7 @@ func set_lod_active(active: bool):
 	visible = active
 	input_pickable = active
 	monitoring = active
-	set_process(active)
+	set_process(active and not harvest_progress.is_empty())
 	$CollisionShape2D.set_deferred("disabled", not active)
 
 
@@ -75,11 +87,17 @@ func get_resource_type() -> StringName:
 
 
 func set_harvest_progress(unit: Unit, progress: float):
+	_create_progress_bar()
 	harvest_progress[unit.get_instance_id()] = progress
+	set_process(lod_active)
 
 
 func stop_harvest(unit: Unit):
 	harvest_progress.erase(unit.get_instance_id())
+	if harvest_progress.is_empty():
+		if is_instance_valid(progress_bar):
+			progress_bar.visible = false
+		set_process(false)
 
 
 func get_harvester_count() -> int:

@@ -16,6 +16,12 @@ func _unhandled_input(event):
 			zoom_direction = -1.0
 
 		if zoom_direction != 0.0:
+			# ScrollContainer снова передаёт колёсико в _unhandled_input, когда
+			# достигает края списка. Пока курсор находится над интерфейсом,
+			# колёсико должно принадлежать только интерфейсу, а не камере.
+			if get_viewport().gui_get_hovered_control() != null:
+				get_viewport().set_input_as_handled()
+				return
 			var mouse_position := get_global_mouse_position()
 			var new_zoom: float = clamp(zoom.x + zoom_step * zoom_direction, min_zoom, max_zoom)
 			zoom = Vector2.ONE * new_zoom

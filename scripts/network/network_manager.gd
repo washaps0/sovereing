@@ -23,6 +23,8 @@ const MAX_BUILDINGS_PER_COMMAND := 256
 const MAX_UNIT_STATES_PER_SYNC := 10000
 const MAX_BUILDING_STATES_PER_SYNC := 5000
 const MAX_RESOURCE_STATES_PER_SYNC := 20000
+const NETWORK_STATE_BATCH_SIZE := 64
+const NETWORK_BATCH_BUDGET_PER_FRAME := 8
 const SERVER_ENTITY_ID_START := 1000000
 const CLIENT_ENTITY_ID_BASE := 10000000000
 const CLIENT_ENTITY_ID_STRIDE := 1000000
@@ -64,6 +66,12 @@ var _lan_discovery_peer: PacketPeerUDP
 var _lan_discovery_mode: StringName = &"off"
 var _lan_discovery_timer := 0.0
 var _discovered_lobbies := {}
+var _sent_unit_state_signatures := {}
+var _sent_building_state_signatures := {}
+var _next_full_snapshot_id := 1
+var _incoming_unit_snapshots := {}
+var _incoming_building_snapshots := {}
+var _outgoing_state_batches: Array[Dictionary] = []
 
 
 func _ready():
@@ -82,6 +90,7 @@ func _process(delta: float):
 		_unit_state_sync_accumulator = 0.0
 		_building_state_sync_accumulator = 0.0
 		return
+	_flush_outgoing_state_batches()
 	var world := _get_world()
 	if not is_instance_valid(world):
 		return
@@ -94,23 +103,122 @@ func _process(delta: float):
 	if _unit_state_sync_accumulator >= UNIT_STATE_SYNC_INTERVAL and world.has_method("get_network_unit_states"):
 		_unit_state_sync_accumulator = fmod(_unit_state_sync_accumulator, UNIT_STATE_SYNC_INTERVAL)
 		var unit_states: Array = world.get_network_unit_states(authoritative_faction_ids)
-		if multiplayer.is_server():
-			_relay_unit_states(1, authoritative_faction_ids, unit_states)
-		else:
-			_server_receive_unit_states.rpc_id(1, unit_states)
+		var unit_deltas := _build_state_delta(unit_states, authoritative_faction_ids, _sent_unit_state_signatures, true)
+		_send_unit_state_deltas(authoritative_faction_ids, unit_deltas)
 	if _building_state_sync_accumulator >= BUILDING_STATE_SYNC_INTERVAL and world.has_method("get_network_building_states"):
 		_building_state_sync_accumulator = fmod(_building_state_sync_accumulator, BUILDING_STATE_SYNC_INTERVAL)
 		var building_states: Array = world.get_network_building_states(authoritative_faction_ids)
-		if multiplayer.is_server():
-			_relay_building_states(1, authoritative_faction_ids, building_states)
-		else:
-			_server_receive_building_states.rpc_id(1, building_states)
+		var building_deltas := _build_state_delta(building_states, authoritative_faction_ids, _sent_building_state_signatures, false)
+		_send_building_state_deltas(authoritative_faction_ids, building_deltas)
 		var resource_states := _take_pending_resource_states()
-		if not resource_states.is_empty():
-			if multiplayer.is_server():
-				_relay_resource_states(resource_states)
-			else:
-				_server_receive_resource_states.rpc_id(1, resource_states)
+		for offset in range(0, resource_states.size(), NETWORK_STATE_BATCH_SIZE):
+			_outgoing_state_batches.append({"kind": &"resource_delta", "states": resource_states.slice(offset, mini(offset + NETWORK_STATE_BATCH_SIZE, resource_states.size()))})
+
+
+func _build_state_delta(states: Array, authoritative_faction_ids: Array, cache: Dictionary, unit_state: bool) -> Array:
+	var result: Array = []
+	var current_keys := {}
+	var authoritative_factions := _make_faction_set(authoritative_faction_ids)
+	for raw_state in states:
+		if raw_state is not Dictionary:
+			continue
+		var state: Dictionary = raw_state
+		var faction_id := int(state.get("faction_id", -1))
+		var network_id := int(state.get("network_id", 0))
+		if faction_id < 0 or network_id <= 0:
+			continue
+		var key := "%d:%d" % [faction_id, network_id]
+		current_keys[key] = true
+		var signature := _get_state_signature(state, unit_state)
+		var previous: Dictionary = cache.get(key, {})
+		if previous.is_empty() or int(previous.get("signature", -1)) != signature or int(previous.get("missing_cycles", 0)) > 0:
+			result.append(state)
+		cache[key] = {
+			"signature": signature,
+			"faction_id": faction_id,
+			"network_id": network_id,
+			"kind": str(state.get("kind", "")),
+			"missing_cycles": 0,
+		}
+	for key in cache.keys():
+		var previous: Dictionary = cache[key]
+		if not authoritative_factions.has(int(previous.get("faction_id", -1))):
+			cache.erase(key)
+			continue
+		if current_keys.has(key):
+			continue
+		var missing_cycles := int(previous.get("missing_cycles", 0))
+		if missing_cycles < 3:
+			var tombstone := {
+				"network_id": int(previous.get("network_id", 0)),
+				"faction_id": int(previous.get("faction_id", -1)),
+				"_deleted": true,
+			}
+			if not unit_state:
+				tombstone["kind"] = str(previous.get("kind", ""))
+			result.append(tombstone)
+			previous["missing_cycles"] = missing_cycles + 1
+			cache[key] = previous
+		else:
+			cache.erase(key)
+	return result
+
+
+func _get_state_signature(state: Dictionary, unit_state: bool) -> int:
+	var signature_state := state.duplicate(false)
+	if unit_state:
+		# Локальные таймеры идут на каждой машине самостоятельно. Они не должны
+		# заставлять неподвижного жителя отправлять полный словарь каждые 2 сек.
+		for timer_key in ["food_timer", "idle_check_timer", "work_timer", "production_timer"]:
+			signature_state.erase(timer_key)
+		var position: Array = signature_state.get("position", [])
+		if position.size() >= 2:
+			signature_state["position"] = [roundf(float(position[0]) * 0.5) * 2.0, roundf(float(position[1]) * 0.5) * 2.0]
+	return hash(signature_state)
+
+
+func _send_unit_state_deltas(authoritative_faction_ids: Array, states: Array):
+	for offset in range(0, states.size(), NETWORK_STATE_BATCH_SIZE):
+		var batch := states.slice(offset, mini(offset + NETWORK_STATE_BATCH_SIZE, states.size()))
+		_outgoing_state_batches.append({"kind": &"unit_delta", "factions": authoritative_faction_ids, "states": batch})
+
+
+func _send_building_state_deltas(authoritative_faction_ids: Array, states: Array):
+	for offset in range(0, states.size(), NETWORK_STATE_BATCH_SIZE):
+		var batch := states.slice(offset, mini(offset + NETWORK_STATE_BATCH_SIZE, states.size()))
+		_outgoing_state_batches.append({"kind": &"building_delta", "factions": authoritative_faction_ids, "states": batch})
+
+
+func _flush_outgoing_state_batches():
+	var sent := 0
+	while not _outgoing_state_batches.is_empty() and sent < NETWORK_BATCH_BUDGET_PER_FRAME:
+		var item: Dictionary = _outgoing_state_batches.pop_front()
+		var kind := StringName(item.get("kind", &""))
+		var states: Array = item.get("states", [])
+		var factions: Array = item.get("factions", [])
+		match kind:
+			&"unit_delta":
+				if multiplayer.is_server():
+					_relay_unit_state_deltas(1, factions, states)
+				else:
+					_server_receive_unit_state_deltas.rpc_id(1, states)
+			&"building_delta":
+				if multiplayer.is_server():
+					_relay_building_state_deltas(1, factions, states)
+				else:
+					_server_receive_building_state_deltas.rpc_id(1, states)
+			&"resource_delta":
+				if multiplayer.is_server():
+					_relay_resource_states(states)
+				else:
+					_server_receive_resource_states.rpc_id(1, states)
+			&"full_unit":
+				_receive_full_unit_state_batch.rpc_id(int(item.get("peer_id", 0)), int(item.get("snapshot_id", 0)), factions, int(item.get("batch_index", 0)), int(item.get("batch_count", 1)), states)
+			&"full_building":
+				_receive_full_building_state_batch.rpc_id(int(item.get("peer_id", 0)), int(item.get("snapshot_id", 0)), factions, int(item.get("batch_index", 0)), int(item.get("batch_count", 1)), states)
+			&"full_resource":
+				_receive_resource_states.rpc_id(int(item.get("peer_id", 0)), states)
+		sent += 1
 
 
 func set_local_nickname(value: String):
@@ -778,6 +886,19 @@ func _server_receive_unit_states(states: Array):
 	_relay_unit_states(sender_peer_id, authoritative_faction_ids, accepted_states)
 
 
+@rpc("any_peer", "call_remote", "unreliable_ordered")
+func _server_receive_unit_state_deltas(states: Array):
+	if not multiplayer.is_server() or not is_lan_session():
+		return
+	var sender_peer_id := multiplayer.get_remote_sender_id()
+	var authoritative_faction_ids := _get_factions_authoritative_for_peer(sender_peer_id)
+	var accepted_states := _sanitize_unit_states(states, authoritative_faction_ids)
+	if authoritative_faction_ids.is_empty() or (accepted_states.is_empty() and not states.is_empty()):
+		return
+	_apply_unit_state_deltas(authoritative_faction_ids, accepted_states)
+	_relay_unit_state_deltas(sender_peer_id, authoritative_faction_ids, accepted_states)
+
+
 @rpc("any_peer", "call_remote", "reliable")
 func _server_receive_building_states(states: Array):
 	if not multiplayer.is_server() or not is_lan_session():
@@ -789,6 +910,19 @@ func _server_receive_building_states(states: Array):
 		return
 	_apply_building_states(authoritative_faction_ids, accepted_states)
 	_relay_building_states(sender_peer_id, authoritative_faction_ids, accepted_states)
+
+
+@rpc("any_peer", "call_remote", "reliable")
+func _server_receive_building_state_deltas(states: Array):
+	if not multiplayer.is_server() or not is_lan_session():
+		return
+	var sender_peer_id := multiplayer.get_remote_sender_id()
+	var authoritative_faction_ids := _get_factions_authoritative_for_peer(sender_peer_id)
+	var accepted_states := _sanitize_building_states(states, authoritative_faction_ids)
+	if authoritative_faction_ids.is_empty() or (accepted_states.is_empty() and not states.is_empty()):
+		return
+	_apply_building_state_deltas(authoritative_faction_ids, accepted_states)
+	_relay_building_state_deltas(sender_peer_id, authoritative_faction_ids, accepted_states)
 
 
 @rpc("any_peer", "call_remote", "reliable")
@@ -812,10 +946,62 @@ func _receive_unit_states(authoritative_faction_ids: Array, states: Array):
 
 
 @rpc("authority", "call_remote", "reliable")
+func _receive_full_unit_state_batch(snapshot_id: int, authoritative_faction_ids: Array, batch_index: int, batch_count: int, states: Array):
+	if multiplayer.is_server() or snapshot_id <= 0 or batch_index < 0 or batch_count <= 0:
+		return
+	if batch_index == 0 or not _incoming_unit_snapshots.has(snapshot_id):
+		_incoming_unit_snapshots[snapshot_id] = {"factions": authoritative_faction_ids, "states": [], "next_batch": 0, "batch_count": batch_count}
+	var snapshot: Dictionary = _incoming_unit_snapshots[snapshot_id]
+	if batch_index != int(snapshot.get("next_batch", 0)):
+		return
+	var accumulated: Array = snapshot.get("states", [])
+	accumulated.append_array(states)
+	snapshot["states"] = accumulated
+	snapshot["next_batch"] = batch_index + 1
+	_incoming_unit_snapshots[snapshot_id] = snapshot
+	if batch_index + 1 >= batch_count:
+		_apply_unit_states(snapshot.get("factions", []), accumulated)
+		_incoming_unit_snapshots.erase(snapshot_id)
+
+
+@rpc("authority", "call_remote", "unreliable_ordered")
+func _receive_unit_state_deltas(authoritative_faction_ids: Array, states: Array):
+	if multiplayer.is_server():
+		return
+	_apply_unit_state_deltas(authoritative_faction_ids, states)
+
+
+@rpc("authority", "call_remote", "reliable")
 func _receive_building_states(authoritative_faction_ids: Array, states: Array):
 	if multiplayer.is_server():
 		return
 	_apply_building_states(authoritative_faction_ids, states)
+
+
+@rpc("authority", "call_remote", "reliable")
+func _receive_full_building_state_batch(snapshot_id: int, authoritative_faction_ids: Array, batch_index: int, batch_count: int, states: Array):
+	if multiplayer.is_server() or snapshot_id <= 0 or batch_index < 0 or batch_count <= 0:
+		return
+	if batch_index == 0 or not _incoming_building_snapshots.has(snapshot_id):
+		_incoming_building_snapshots[snapshot_id] = {"factions": authoritative_faction_ids, "states": [], "next_batch": 0, "batch_count": batch_count}
+	var snapshot: Dictionary = _incoming_building_snapshots[snapshot_id]
+	if batch_index != int(snapshot.get("next_batch", 0)):
+		return
+	var accumulated: Array = snapshot.get("states", [])
+	accumulated.append_array(states)
+	snapshot["states"] = accumulated
+	snapshot["next_batch"] = batch_index + 1
+	_incoming_building_snapshots[snapshot_id] = snapshot
+	if batch_index + 1 >= batch_count:
+		_apply_building_states(snapshot.get("factions", []), accumulated)
+		_incoming_building_snapshots.erase(snapshot_id)
+
+
+@rpc("authority", "call_remote", "reliable")
+func _receive_building_state_deltas(authoritative_faction_ids: Array, states: Array):
+	if multiplayer.is_server():
+		return
+	_apply_building_state_deltas(authoritative_faction_ids, states)
 
 
 @rpc("authority", "call_remote", "reliable")
@@ -853,11 +1039,25 @@ func _relay_unit_states(excluded_peer_id: int, authoritative_faction_ids: Array,
 			_receive_unit_states.rpc_id(peer_id, authoritative_faction_ids, states)
 
 
+func _relay_unit_state_deltas(excluded_peer_id: int, authoritative_faction_ids: Array, states: Array):
+	for raw_peer_id in multiplayer.get_peers():
+		var peer_id := int(raw_peer_id)
+		if peer_id != excluded_peer_id:
+			_receive_unit_state_deltas.rpc_id(peer_id, authoritative_faction_ids, states)
+
+
 func _relay_building_states(excluded_peer_id: int, authoritative_faction_ids: Array, states: Array):
 	for raw_peer_id in multiplayer.get_peers():
 		var peer_id := int(raw_peer_id)
 		if peer_id != excluded_peer_id:
 			_receive_building_states.rpc_id(peer_id, authoritative_faction_ids, states)
+
+
+func _relay_building_state_deltas(excluded_peer_id: int, authoritative_faction_ids: Array, states: Array):
+	for raw_peer_id in multiplayer.get_peers():
+		var peer_id := int(raw_peer_id)
+		if peer_id != excluded_peer_id:
+			_receive_building_state_deltas.rpc_id(peer_id, authoritative_faction_ids, states)
 
 
 func _relay_resource_states(states: Array):
@@ -874,6 +1074,15 @@ func _apply_unit_states(authoritative_faction_ids: Array, states: Array):
 		world.apply_network_unit_states(states, applicable_faction_ids)
 
 
+func _apply_unit_state_deltas(authoritative_faction_ids: Array, states: Array):
+	var applicable_faction_ids := _get_locally_applicable_remote_factions(authoritative_faction_ids)
+	if applicable_faction_ids.is_empty():
+		return
+	var world := _get_world()
+	if is_instance_valid(world) and world.has_method("apply_network_unit_state_deltas"):
+		world.apply_network_unit_state_deltas(states, applicable_faction_ids)
+
+
 func _apply_building_states(authoritative_faction_ids: Array, states: Array):
 	var applicable_faction_ids := _get_locally_applicable_remote_factions(authoritative_faction_ids)
 	if applicable_faction_ids.is_empty():
@@ -881,6 +1090,15 @@ func _apply_building_states(authoritative_faction_ids: Array, states: Array):
 	var world := _get_world()
 	if is_instance_valid(world) and world.has_method("apply_network_building_states"):
 		world.apply_network_building_states(states, applicable_faction_ids)
+
+
+func _apply_building_state_deltas(authoritative_faction_ids: Array, states: Array):
+	var applicable_faction_ids := _get_locally_applicable_remote_factions(authoritative_faction_ids)
+	if applicable_faction_ids.is_empty():
+		return
+	var world := _get_world()
+	if is_instance_valid(world) and world.has_method("apply_network_building_state_deltas"):
+		world.apply_network_building_state_deltas(states, applicable_faction_ids)
 
 
 func _apply_resource_states(states: Array):
@@ -1195,13 +1413,34 @@ func _send_full_world_state(peer_id: int):
 	for faction_id in _get_all_faction_ids():
 		if not owned_factions.has(faction_id):
 			faction_ids.append(faction_id)
-	if world.has_method("get_network_unit_states"):
-		_receive_unit_states.rpc_id(peer_id, faction_ids, world.get_network_unit_states(faction_ids))
+	var snapshot_id := _next_full_snapshot_id
+	_next_full_snapshot_id += 1
 	if world.has_method("get_network_building_states"):
-		_receive_building_states.rpc_id(peer_id, faction_ids, world.get_network_building_states(faction_ids))
+		_send_full_building_snapshot(peer_id, snapshot_id, faction_ids, world.get_network_building_states(faction_ids))
+	# Сначала здания: состояния юнитов могут ссылаться на жильё, заводы и склады.
+	if world.has_method("get_network_unit_states"):
+		_send_full_unit_snapshot(peer_id, snapshot_id, faction_ids, world.get_network_unit_states(faction_ids))
 	var lod_manager := world.get_node_or_null("SimulationLODManager")
 	if is_instance_valid(lod_manager) and lod_manager.has_method("get_network_resource_states"):
-		_receive_resource_states.rpc_id(peer_id, lod_manager.get_network_resource_states())
+		var resource_states: Array = lod_manager.get_network_resource_states()
+		for offset in range(0, resource_states.size(), NETWORK_STATE_BATCH_SIZE):
+			_outgoing_state_batches.append({"kind": &"full_resource", "peer_id": peer_id, "states": resource_states.slice(offset, mini(offset + NETWORK_STATE_BATCH_SIZE, resource_states.size()))})
+
+
+func _send_full_unit_snapshot(peer_id: int, snapshot_id: int, faction_ids: Array, states: Array):
+	var batch_count := maxi(ceili(float(states.size()) / NETWORK_STATE_BATCH_SIZE), 1)
+	for batch_index in range(batch_count):
+		var offset := batch_index * NETWORK_STATE_BATCH_SIZE
+		var batch := states.slice(offset, mini(offset + NETWORK_STATE_BATCH_SIZE, states.size()))
+		_outgoing_state_batches.append({"kind": &"full_unit", "peer_id": peer_id, "snapshot_id": snapshot_id, "factions": faction_ids, "batch_index": batch_index, "batch_count": batch_count, "states": batch})
+
+
+func _send_full_building_snapshot(peer_id: int, snapshot_id: int, faction_ids: Array, states: Array):
+	var batch_count := maxi(ceili(float(states.size()) / NETWORK_STATE_BATCH_SIZE), 1)
+	for batch_index in range(batch_count):
+		var offset := batch_index * NETWORK_STATE_BATCH_SIZE
+		var batch := states.slice(offset, mini(offset + NETWORK_STATE_BATCH_SIZE, states.size()))
+		_outgoing_state_batches.append({"kind": &"full_building", "peer_id": peer_id, "snapshot_id": snapshot_id, "factions": faction_ids, "batch_index": batch_index, "batch_count": batch_count, "states": batch})
 
 
 func _all_remote_worlds_ready() -> bool:
@@ -1276,6 +1515,9 @@ func _find_unit(network_id: int, faction_id: int) -> Unit:
 	var world := _get_world()
 	if network_id <= 0 or not is_instance_valid(world):
 		return null
+	var index := world.get_node_or_null("WorldIndex")
+	if is_instance_valid(index):
+		return index.find_unit(network_id, faction_id) as Unit
 	for candidate in get_tree().get_nodes_in_group("units"):
 		if candidate is Unit and world.is_ancestor_of(candidate) and candidate.network_id == network_id and candidate.faction_id == faction_id:
 			return candidate
@@ -1286,6 +1528,9 @@ func _find_building(network_id: int, faction_id: int) -> Building:
 	var world := _get_world()
 	if network_id <= 0 or not is_instance_valid(world):
 		return null
+	var index := world.get_node_or_null("WorldIndex")
+	if is_instance_valid(index):
+		return index.find_building(network_id, faction_id) as Building
 	for candidate in get_tree().get_nodes_in_group("buildings"):
 		if candidate is Building and world.is_ancestor_of(candidate) and candidate.network_id == network_id and candidate.faction_id == faction_id:
 			return candidate
@@ -1339,10 +1584,14 @@ func _is_client_entity_id_for_peer(network_id: int, peer_id: int) -> bool:
 
 
 func _network_entity_id_exists(network_id: int) -> bool:
-	for candidate in get_tree().get_nodes_in_group("units"):
+	var world := _get_world()
+	var index := world.get_node_or_null("WorldIndex") if is_instance_valid(world) else null
+	var units: Array = index.get_units() if is_instance_valid(index) else get_tree().get_nodes_in_group("units")
+	for candidate in units:
 		if candidate is Unit and candidate.network_id == network_id:
 			return true
-	for candidate in get_tree().get_nodes_in_group("buildings"):
+	var buildings: Array = index.get_buildings() if is_instance_valid(index) else get_tree().get_nodes_in_group("buildings")
+	for candidate in buildings:
 		if candidate is Building and candidate.network_id == network_id:
 			return true
 	return false
@@ -1731,6 +1980,12 @@ func _reset_runtime_state():
 	_pending_resource_amounts.clear()
 	_applying_resource_sync = false
 	_world_ready_peers.clear()
+	_sent_unit_state_signatures.clear()
+	_sent_building_state_signatures.clear()
+	_next_full_snapshot_id = 1
+	_incoming_unit_snapshots.clear()
+	_incoming_building_snapshots.clear()
+	_outgoing_state_batches.clear()
 
 
 func _load_profile():

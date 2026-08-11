@@ -36,7 +36,6 @@ const FOOD_CONSUMPTION_INTERVAL := 45.0
 const STARVATION_DAMAGE := 10
 const AUTO_WORK_DELAY_AFTER_MANUAL_ORDER := 5.0
 const ROAD_SPEED_MULTIPLIER := 1.5
-const ROAD_PATH_WEIGHT := 1.0 / ROAD_SPEED_MULTIPLIER
 const ROAD_SPEED_CHECK_INTERVAL := 0.12
 const ROAD_PATH_MARGIN := 8.0
 const SQUAD_COMMAND_INTERVAL := 0.3
@@ -109,15 +108,13 @@ var lod_pending_level := SimulationLOD.FULL
 var lod_pending_time := 0.0
 var lod_last_simulation_time := 0.0
 var lod_manager: Node
+var world_index: Node
+var world_navigation: WorldNavigation
+var world_audio_pool: Node
 var is_on_road := false
 var road_speed_check_timer := 0.0
-var road_segments_by_cell := {}
-var harvest_sound_players: Array[AudioStreamPlayer2D] = []
-var next_harvest_sound_player := 0
+var muzzle_flash_until_msec := 0
 
-const PATH_CELL_SIZE := 32.0
-const PATH_MAP_SIZE := Vector2i(400, 400)
-const BUILDING_AVOIDANCE_WEIGHT := 9.0
 const FACTION_COLORS: Array[Color] = [
 	Color(1.0, 1.0, 1.0),
 	Color(1.0, 0.62, 0.62),
@@ -131,7 +128,6 @@ const FACTION_COLORS: Array[Color] = [
 @onready var weapon_sprite: Sprite2D = $weapon
 @onready var beret_sprite: Sprite2D = $beret
 @onready var muzzle_flash_sprite: Sprite2D = $muzzleflash
-@onready var muzzle_flash_timer: Timer = $MuzzleFlashTimer
 @onready var collision_shape: CollisionShape2D = $CollisionShape2D
 
 
@@ -145,24 +141,32 @@ func _ready():
 	health = clampi(health, 0, max_health)
 	target_position = global_position
 	last_motion_position = global_position
+	# Новые жители не принимают решения и не едят в одном кадре. Средняя
+	# частота остаётся прежней, исчезают периодические пики большой толпы.
+	if is_equal_approx(idle_check_timer, 1.0):
+		idle_check_timer = 0.35 + float(get_instance_id() % 17) * 0.08
+	if is_equal_approx(food_timer, FOOD_CONSUMPTION_INTERVAL):
+		food_timer = FOOD_CONSUMPTION_INTERVAL * (0.9 + float(get_instance_id() % 21) * 0.01)
 	selection.visible = false
 	lod_manager = get_tree().get_first_node_in_group("simulation_lod_manager")
-	for node_name in ["HarvestSound1", "HarvestSound2", "HarvestSound3", "HarvestSound4"]:
-		var sound_player := get_node_or_null(node_name) as AudioStreamPlayer2D
-		if is_instance_valid(sound_player):
-			sound_player.max_distance = harvest_sound_max_distance
-			harvest_sound_players.append(sound_player)
-	muzzle_flash_timer.timeout.connect(_hide_muzzle_flash)
+	world_index = get_tree().get_first_node_in_group("world_index")
+	world_navigation = get_tree().get_first_node_in_group("world_navigation") as WorldNavigation
+	world_audio_pool = get_tree().get_first_node_in_group("world_audio_pool")
+	if is_instance_valid(world_index):
+		world_index.register_unit(self)
 	_update_faction_visual()
 	_update_equipment_visuals()
 	_set_facing_direction(facing_direction)
 
 
 func configure_faction(new_faction_id: int, new_controller_peer_id: int, is_ai: bool, new_faction_name: String):
+	var previous_faction_id := faction_id
 	faction_id = clampi(new_faction_id, 0, 3)
 	controller_peer_id = new_controller_peer_id
 	ai_controlled = is_ai
 	faction_name = new_faction_name
+	if is_instance_valid(world_index):
+		world_index.refresh_unit_faction(self, previous_faction_id)
 	if is_node_ready():
 		_update_faction_visual()
 		if selected and not can_be_controlled_locally():
@@ -221,15 +225,23 @@ func play_weapon_muzzle_flash(duration := 0.07):
 	if not has_rifle or not is_instance_valid(muzzle_flash_sprite):
 		return
 	muzzle_flash_sprite.visible = true
-	muzzle_flash_timer.start(maxf(duration, 0.01))
+	muzzle_flash_until_msec = Time.get_ticks_msec() + int(maxf(duration, 0.01) * 1000.0)
 
 
 func _hide_muzzle_flash():
+	muzzle_flash_until_msec = 0
 	if is_instance_valid(muzzle_flash_sprite):
 		muzzle_flash_sprite.visible = false
 
 
+func _update_muzzle_flash():
+	if muzzle_flash_until_msec > 0 and Time.get_ticks_msec() >= muzzle_flash_until_msec:
+		_hide_muzzle_flash()
+
+
 func _exit_tree():
+	if is_instance_valid(world_index):
+		world_index.unregister_unit(self)
 	if is_instance_valid(target_tree):
 		target_tree.stop_harvest(self)
 	if is_instance_valid(inside_building):
@@ -240,6 +252,7 @@ func _exit_tree():
 func _physics_process(delta: float):
 	if simulation_lod != SimulationLOD.FULL:
 		return
+	_update_muzzle_flash()
 	_process_food_needs(delta)
 	if health <= 0:
 		return
@@ -292,6 +305,8 @@ func set_lod_render_enabled(enabled: bool):
 
 func _refresh_lod_presentation():
 	visible = lod_render_enabled and not is_instance_valid(inside_building)
+	if not visible or (muzzle_flash_until_msec > 0 and Time.get_ticks_msec() >= muzzle_flash_until_msec):
+		_hide_muzzle_flash()
 	var collision_enabled := simulation_lod == SimulationLOD.FULL and not is_instance_valid(inside_building)
 	if is_instance_valid(collision_shape):
 		collision_shape.set_deferred("disabled", not collision_enabled)
@@ -368,7 +383,7 @@ func _process_food_needs(delta: float):
 
 func _consume_food_from_storage() -> bool:
 	var warehouses: Array[Building] = []
-	for building in get_tree().get_nodes_in_group("buildings"):
+	for building in _get_indexed_buildings("warehouse"):
 		if building is Building and building.faction_id == faction_id and building.is_warehouse() and building.is_completed() and building.has_stored_resource(&"food"):
 			warehouses.append(building)
 	warehouses.sort_custom(func(a: Building, b: Building): return global_position.distance_squared_to(a.global_position) < global_position.distance_squared_to(b.global_position))
@@ -376,6 +391,30 @@ func _consume_food_from_storage() -> bool:
 		if warehouse.take_resource(&"food", 1) == 1:
 			return true
 	return false
+
+
+func _get_indexed_buildings(building_kind := "") -> Array:
+	if not is_instance_valid(world_index):
+		world_index = get_tree().get_first_node_in_group("world_index")
+	if is_instance_valid(world_index):
+		return world_index.get_buildings(faction_id, building_kind)
+	var result: Array[Building] = []
+	for candidate in get_tree().get_nodes_in_group("buildings"):
+		if candidate is Building and candidate.faction_id == faction_id and (building_kind.is_empty() or candidate.building_kind == building_kind):
+			result.append(candidate)
+	return result
+
+
+func _get_indexed_units() -> Array:
+	if not is_instance_valid(world_index):
+		world_index = get_tree().get_first_node_in_group("world_index")
+	if is_instance_valid(world_index):
+		return world_index.get_units(faction_id)
+	var result: Array[Unit] = []
+	for candidate in get_tree().get_nodes_in_group("units"):
+		if candidate is Unit and candidate.faction_id == faction_id:
+			result.append(candidate)
+	return result
 
 
 func _die_from_starvation():
@@ -467,12 +506,10 @@ func _update_road_movement_state(delta: float):
 func _is_on_completed_road() -> bool:
 	if not is_inside_tree():
 		return false
-	# У дорог вне области отрисовки физическая форма отключена системой LOD.
-	# Кэш клеток маршрута позволяет всё равно корректно учитывать такую дорогу.
-	var nearby_roads: Array = road_segments_by_cell.get(_world_to_cell(global_position), [])
-	for road in nearby_roads:
-		if is_instance_valid(road) and road is RoadSegment and not road.under_construction and road.contains_world_point(global_position, ROAD_PATH_MARGIN):
-			return true
+	if not is_instance_valid(world_navigation):
+		world_navigation = get_tree().get_first_node_in_group("world_navigation") as WorldNavigation
+	if is_instance_valid(world_navigation) and world_navigation.has_completed_road_at(global_position, ROAD_PATH_MARGIN):
+		return true
 	var query := PhysicsPointQueryParameters2D.new()
 	query.position = global_position
 	query.collide_with_areas = true
@@ -599,91 +636,20 @@ func _update_motion_recovery(delta: float):
 	path_index = 0
 	path_destination = Vector2(INF, INF)
 	last_motion_position = global_position
+
+
 func _calculate_path(destination: Vector2):
 	path_destination = destination
-	var grid := AStarGrid2D.new()
-	grid.region = Rect2i(Vector2i.ZERO, PATH_MAP_SIZE)
-	grid.cell_size = Vector2.ONE * PATH_CELL_SIZE
-	grid.offset = Vector2.ONE * PATH_CELL_SIZE * 0.5
-	grid.diagonal_mode = AStarGrid2D.DIAGONAL_MODE_ONLY_IF_NO_OBSTACLES
-	grid.update()
-	_apply_road_path_weights(grid)
-
-	for building in get_tree().get_nodes_in_group("buildings"):
-		if building is not Building or building.building_kind == "road":
-			continue
-		var collision := building.get_node_or_null("CollisionShape2D") as CollisionShape2D
-		if collision == null or collision.shape is not RectangleShape2D:
-			continue
-		var half_size: Vector2 = collision.shape.size * 0.5
-		var world_minimum := Vector2(INF, INF)
-		var world_maximum := Vector2(-INF, -INF)
-		for corner in [Vector2(-half_size.x, -half_size.y), Vector2(half_size.x, -half_size.y), Vector2(half_size.x, half_size.y), Vector2(-half_size.x, half_size.y)]:
-			var world_corner: Vector2 = collision.global_transform * corner
-			world_minimum = world_minimum.min(world_corner)
-			world_maximum = world_maximum.max(world_corner)
-		var minimum := _world_to_cell(world_minimum - Vector2.ONE * 12.0)
-		var maximum := _world_to_cell(world_maximum + Vector2.ONE * 12.0)
-		for x in range(minimum.x, maximum.x + 1):
-			for y in range(minimum.y, maximum.y + 1):
-				var cell := Vector2i(x, y)
-				if grid.region.has_point(cell):
-					# Увеличенная зона обхода здания часто захватывает соседнюю
-					# дорогу и раньше перезаписывала её выгодный вес. Завершённая
-					# дорога остаётся проходимым коридором даже рядом со зданием.
-					if road_segments_by_cell.has(cell):
-						continue
-					grid.set_point_weight_scale(cell, BUILDING_AVOIDANCE_WEIGHT)
-
-	var start := _world_to_cell(global_position)
-	var finish := _world_to_cell(destination)
-	if not grid.region.has_point(start) or not grid.region.has_point(finish):
+	if not is_instance_valid(world_navigation):
+		world_navigation = get_tree().get_first_node_in_group("world_navigation") as WorldNavigation
+	if not is_instance_valid(world_navigation):
 		path_points = PackedVector2Array()
 		return
-	grid.set_point_weight_scale(start, 1.0)
-	grid.set_point_weight_scale(finish, 1.0)
-	path_points = grid.get_point_path(start, finish)
+	path_points = world_navigation.find_path(global_position, destination)
 	# AStarGrid2D всегда возвращает центр стартовой клетки первой точкой. Юнит
 	# уже находится внутри этой клетки, и движение к её центру иногда выглядит
 	# как короткий рывок назад при создании или перестроении маршрута.
 	path_index = 1 if path_points.size() > 1 else path_points.size()
-
-
-func _apply_road_path_weights(grid: AStarGrid2D):
-	road_segments_by_cell.clear()
-	for road in get_tree().get_nodes_in_group("roads"):
-		if road is not RoadSegment or road.under_construction:
-			continue
-		var collision := road.get_node_or_null("CollisionShape2D") as CollisionShape2D
-		if collision == null or collision.shape is not RectangleShape2D:
-			continue
-		var rectangle := collision.shape as RectangleShape2D
-		var half_size := rectangle.size * 0.5
-		var world_minimum := Vector2(INF, INF)
-		var world_maximum := Vector2(-INF, -INF)
-		for corner in [Vector2(-half_size.x, -half_size.y), Vector2(half_size.x, -half_size.y), Vector2(half_size.x, half_size.y), Vector2(-half_size.x, half_size.y)]:
-			var world_corner: Vector2 = collision.global_transform * corner
-			world_minimum = world_minimum.min(world_corner)
-			world_maximum = world_maximum.max(world_corner)
-		var minimum := _world_to_cell(world_minimum - Vector2.ONE * ROAD_PATH_MARGIN)
-		var maximum := _world_to_cell(world_maximum + Vector2.ONE * ROAD_PATH_MARGIN)
-		var inverse_transform := collision.global_transform.affine_inverse()
-		for x in range(minimum.x, maximum.x + 1):
-			for y in range(minimum.y, maximum.y + 1):
-				var cell := Vector2i(x, y)
-				if not grid.region.has_point(cell):
-					continue
-				var cell_center := (Vector2(cell) + Vector2.ONE * 0.5) * PATH_CELL_SIZE
-				var local_point := inverse_transform * cell_center
-				if absf(local_point.x) <= half_size.x + ROAD_PATH_MARGIN and absf(local_point.y) <= half_size.y + ROAD_PATH_MARGIN:
-					grid.set_point_weight_scale(cell, ROAD_PATH_WEIGHT)
-					if not road_segments_by_cell.has(cell):
-						road_segments_by_cell[cell] = []
-					road_segments_by_cell[cell].append(road)
-
-
-func _world_to_cell(point: Vector2) -> Vector2i:
-	return Vector2i(floori(point.x / PATH_CELL_SIZE), floori(point.y / PATH_CELL_SIZE))
 
 
 func _process_harvest(delta: float):
@@ -716,16 +682,19 @@ func _process_harvest(delta: float):
 
 
 func _play_harvest_sound():
-	if harvest_sound_players.is_empty():
+	if not is_instance_valid(world_audio_pool):
+		world_audio_pool = get_tree().get_first_node_in_group("world_audio_pool")
+	if not is_instance_valid(world_audio_pool):
 		return
-	var player := harvest_sound_players[next_harvest_sound_player]
-	next_harvest_sound_player = (next_harvest_sound_player + 1) % harvest_sound_players.size()
-	player.stream = ROCK_HARVEST_SOUND if harvest_resource_type == &"stone" else TREE_HARVEST_SOUND
 	var minimum_pitch := minf(harvest_pitch_min, harvest_pitch_max)
 	var maximum_pitch := maxf(harvest_pitch_min, harvest_pitch_max)
-	player.pitch_scale = randf_range(minimum_pitch, maximum_pitch)
-	player.volume_db = harvest_sound_volume_db + randf_range(-1.5, 1.0)
-	player.play()
+	world_audio_pool.play_spatial(
+		ROCK_HARVEST_SOUND if harvest_resource_type == &"stone" else TREE_HARVEST_SOUND,
+		global_position,
+		harvest_sound_max_distance,
+		harvest_sound_volume_db + randf_range(-1.5, 1.0),
+		randf_range(minimum_pitch, maximum_pitch)
+	)
 
 
 func _lod_process_harvest(delta: float):
@@ -1003,11 +972,11 @@ func _find_auto_construction() -> Building:
 	var nearest_distance := INF
 	var prioritize_roads := false
 	if ai_controlled:
-		for candidate in get_tree().get_nodes_in_group("buildings"):
+		for candidate in _get_indexed_buildings("road"):
 			if candidate is Building and candidate.faction_id == faction_id and candidate.building_kind == "road" and candidate.under_construction:
 				prioritize_roads = true
 				break
-	for building in get_tree().get_nodes_in_group("buildings"):
+	for building in _get_indexed_buildings():
 		if building is not Building or building.faction_id != faction_id or not building.under_construction:
 			continue
 		if prioritize_roads and building.building_kind != "road":
@@ -1025,7 +994,7 @@ func _find_auto_construction() -> Building:
 func _find_available_factory() -> Building:
 	var nearest: Building
 	var nearest_distance := INF
-	for building in get_tree().get_nodes_in_group("buildings"):
+	for building in _get_indexed_buildings():
 		if building is not Building or building.faction_id != faction_id or not building.is_factory() or not building.is_completed():
 			continue
 		if building.occupants.size() + _get_reserved_entry_count(building) >= building.get_worker_target() or not building.can_produce_selected_recipe():
@@ -1040,7 +1009,7 @@ func _find_available_factory() -> Building:
 func _find_available_residence() -> Building:
 	var nearest: Building
 	var nearest_distance := INF
-	for building in get_tree().get_nodes_in_group("buildings"):
+	for building in _get_indexed_buildings("residence"):
 		if building is not Building or building.faction_id != faction_id or not building.is_residence() or not building.is_completed():
 			continue
 		if building.occupants.size() + _get_reserved_entry_count(building) >= building.max_occupants:
@@ -1055,7 +1024,7 @@ func _find_available_residence() -> Building:
 func _find_available_barracks() -> Building:
 	var nearest: Building
 	var nearest_distance := INF
-	for building in get_tree().get_nodes_in_group("buildings"):
+	for building in _get_indexed_buildings("barracks"):
 		if building is not Building or building.faction_id != faction_id or not building.is_barracks() or not building.is_completed():
 			continue
 		if building.occupants.size() + _get_reserved_entry_count(building) >= building.max_occupants:
@@ -1068,8 +1037,10 @@ func _find_available_barracks() -> Building:
 
 
 func _get_reserved_entry_count(building: Building) -> int:
+	if is_instance_valid(world_index):
+		return world_index.get_reserved_entry_count(building, self)
 	var reserved := 0
-	for unit in get_tree().get_nodes_in_group("units"):
+	for unit in _get_indexed_units():
 		if not is_instance_valid(unit) or unit == self or unit is not Unit or unit.faction_id != faction_id:
 			continue
 		if unit.task == Task.ENTER_BUILDING and unit.target_building == building and not is_instance_valid(unit.inside_building):
@@ -1488,7 +1459,7 @@ func _assign_random_spread_offsets(members: Array[Unit]):
 
 func _get_squad_members() -> Array[Unit]:
 	var members: Array[Unit] = []
-	for unit in get_tree().get_nodes_in_group("units"):
+	for unit in _get_indexed_units():
 		if is_instance_valid(unit) and unit is Unit and unit.faction_id == faction_id and unit.is_mobilized and unit.squad_id == squad_id:
 			members.append(unit)
 	return members
@@ -1667,7 +1638,7 @@ func _find_resource_near_position(resource_type: StringName, saved_position: Vec
 func _find_free_warehouse(resource_type: StringName) -> Building:
 	var nearest: Building
 	var nearest_distance := INF
-	for building in get_tree().get_nodes_in_group("buildings"):
+	for building in _get_indexed_buildings("warehouse"):
 		if building is not Building or building.faction_id != faction_id or not building.can_accept_worker(resource_type):
 			continue
 		var distance := global_position.distance_squared_to(building.global_position)
@@ -1680,7 +1651,7 @@ func _find_free_warehouse(resource_type: StringName) -> Building:
 func _find_warehouse_with_space(resource_type: StringName) -> Building:
 	var nearest: Building
 	var nearest_distance := INF
-	for building in get_tree().get_nodes_in_group("buildings"):
+	for building in _get_indexed_buildings("warehouse"):
 		if building is not Building or building.faction_id != faction_id or not building.is_warehouse() or not building.is_completed() or not building.has_resource_space(resource_type):
 			continue
 		var distance := global_position.distance_squared_to(building.global_position)
@@ -1693,7 +1664,7 @@ func _find_warehouse_with_space(resource_type: StringName) -> Building:
 func _find_warehouse_with_resource(resource_type: StringName) -> Building:
 	var nearest: Building
 	var nearest_distance := INF
-	for building in get_tree().get_nodes_in_group("buildings"):
+	for building in _get_indexed_buildings("warehouse"):
 		if building is not Building or building.faction_id != faction_id or not building.has_stored_resource(resource_type):
 			continue
 		var distance := global_position.distance_squared_to(building.global_position)
@@ -1709,14 +1680,13 @@ func _get_collection_target(resource_type: StringName) -> int:
 	var total_remaining := target_building.get_remaining_resource(resource_type)
 
 	var carried_by_others := 0
-	for unit in get_tree().get_nodes_in_group("units"):
-		if not is_instance_valid(unit) or unit == self or unit is not Unit or unit.faction_id != faction_id:
-			continue
-		# Материалы резервируются только внутри одной стройки. Раньше груз
-		# одного дорожного строителя блокировал всех строителей той же линии.
-		if unit.target_building != target_building:
-			continue
-		carried_by_others += unit.carried_stone if resource_type == &"stone" else unit.carried_wood
+	if is_instance_valid(world_index):
+		carried_by_others = world_index.get_carried_to_building(target_building, resource_type, self)
+	else:
+		for unit in _get_indexed_units():
+			if not is_instance_valid(unit) or unit == self or unit.target_building != target_building:
+				continue
+			carried_by_others += unit.carried_stone if resource_type == &"stone" else unit.carried_wood
 
 	var available_capacity := carry_capacity - (get_carried_total() - get_carried_resource_amount())
 	return mini(maxi(total_remaining - carried_by_others, 0), available_capacity)
@@ -1817,7 +1787,7 @@ func command_move(destination: Vector2):
 
 
 func _get_reachable_destination(destination: Vector2) -> Vector2:
-	for building in get_tree().get_nodes_in_group("buildings"):
+	for building in _get_indexed_buildings():
 		if building is Building and building.building_kind != "road" and building.contains_world_point(destination, 4.0):
 			return building.get_approach_position(global_position)
 	return destination
@@ -1923,7 +1893,7 @@ func _advance_build_queue():
 	var nearest: Building
 	var nearest_distance := INF
 	if not build_job_kind.is_empty():
-		for building in get_tree().get_nodes_in_group("buildings"):
+		for building in _get_indexed_buildings(build_job_kind):
 			if building is not Building or building.faction_id != faction_id or building.building_kind != build_job_kind or not building.under_construction:
 				continue
 			if building.building_kind == "road" and not building.active_builders.is_empty():

@@ -249,7 +249,10 @@ func _get_local_faction_id() -> int:
 	return 0
 
 
-func _get_faction_units(faction_id: int) -> Array[Unit]:
+func _get_faction_units(faction_id: int) -> Array:
+	var index := world.get_node_or_null("WorldIndex") if is_instance_valid(world) else null
+	if is_instance_valid(index):
+		return index.get_units(faction_id)
 	var result: Array[Unit] = []
 	for candidate in get_tree().get_nodes_in_group("units"):
 		if candidate is Unit and world.is_ancestor_of(candidate) and candidate.faction_id == faction_id:
@@ -257,7 +260,10 @@ func _get_faction_units(faction_id: int) -> Array[Unit]:
 	return result
 
 
-func _get_faction_buildings(faction_id: int) -> Array[Building]:
+func _get_faction_buildings(faction_id: int) -> Array:
+	var index := world.get_node_or_null("WorldIndex") if is_instance_valid(world) else null
+	if is_instance_valid(index):
+		return index.get_buildings(faction_id)
 	var result: Array[Building] = []
 	for candidate in get_tree().get_nodes_in_group("buildings"):
 		if candidate is Building and world.is_ancestor_of(candidate) and candidate.faction_id == faction_id:

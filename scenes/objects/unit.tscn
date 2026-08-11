@@ -47,27 +47,3 @@ texture = ExtResource("7_berret")
 visible = false
 z_index = 5
 texture = ExtResource("6_wxw7q")
-
-[node name="MuzzleFlashTimer" type="Timer" parent="." unique_id=1668920569]
-wait_time = 0.07
-one_shot = true
-
-[node name="HarvestSound1" type="AudioStreamPlayer2D" parent="." unique_id=1191212807]
-volume_db = -7.0
-max_distance = 480.0
-attenuation = 2.0
-
-[node name="HarvestSound2" type="AudioStreamPlayer2D" parent="." unique_id=777058342]
-volume_db = -7.0
-max_distance = 480.0
-attenuation = 2.0
-
-[node name="HarvestSound3" type="AudioStreamPlayer2D" parent="." unique_id=236180751]
-volume_db = -7.0
-max_distance = 480.0
-attenuation = 2.0
-
-[node name="HarvestSound4" type="AudioStreamPlayer2D" parent="." unique_id=533444307]
-volume_db = -7.0
-max_distance = 480.0
-attenuation = 2.0

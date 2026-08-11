@@ -3,6 +3,8 @@ extends CanvasLayer
 var selected_squad_id := 0
 var squad_list_key := ""
 var current_ui_scale := -1.0
+var refresh_timer := 0.0
+var world_index: Node
 
 @onready var launcher: Button = $Launcher
 @onready var panel: PanelContainer = $Panel
@@ -22,6 +24,8 @@ var current_ui_scale := -1.0
 
 
 func _ready():
+	var world := get_tree().current_scene
+	world_index = world.get_node_or_null("WorldIndex") if is_instance_valid(world) else null
 	current_ui_scale = SovereignUITheme.get_scale(get_viewport().get_visible_rect().size)
 	var interface_theme := SovereignUITheme.create_theme(current_ui_scale)
 	launcher.theme = interface_theme
@@ -41,9 +45,11 @@ func _ready():
 	_update_layout()
 
 
-func _process(_delta: float):
+func _process(delta: float):
 	_update_layout()
-	if panel.visible:
+	refresh_timer -= delta
+	if panel.visible and refresh_timer <= 0.0:
+		refresh_timer = 0.15
 		_refresh_army()
 
 
@@ -203,7 +209,8 @@ func _issue_order(order: StringName):
 func _get_local_soldiers() -> Array[Unit]:
 	var soldiers: Array[Unit] = []
 	var faction_id := _get_local_faction_id()
-	for unit in get_tree().get_nodes_in_group("units"):
+	var units: Array = world_index.get_units(faction_id) if is_instance_valid(world_index) else get_tree().get_nodes_in_group("units")
+	for unit in units:
 		if unit is Unit and unit.faction_id == faction_id and unit.is_mobilized and unit.can_be_controlled_locally():
 			soldiers.append(unit)
 	soldiers.sort_custom(func(a: Unit, b: Unit): return a.network_id < b.network_id)
@@ -230,7 +237,8 @@ func _find_squad_commander(members: Array) -> Unit:
 
 func _find_local_government() -> GovernmentBuilding:
 	var faction_id := _get_local_faction_id()
-	for building in get_tree().get_nodes_in_group("buildings"):
+	var buildings: Array = world_index.get_buildings(faction_id, "government") if is_instance_valid(world_index) else get_tree().get_nodes_in_group("buildings")
+	for building in buildings:
 		if building is GovernmentBuilding and building.faction_id == faction_id and building.is_completed():
 			return building
 	return null

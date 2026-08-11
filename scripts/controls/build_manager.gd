@@ -91,6 +91,9 @@ var building_rotation_offset := 0.0
 var interface_theme: Theme
 var current_ui_scale := -1.0
 var build_buttons: Array[Button] = []
+var government_build_button: Button
+var world_index: Node
+var hud_refresh_timer := 0.0
 
 @onready var world: Node2D = get_parent()
 @onready var buildings: Node2D = world.get_node("buildings")
@@ -98,6 +101,7 @@ var build_buttons: Array[Button] = []
 
 
 func _ready():
+	world_index = world.get_node_or_null("WorldIndex")
 	naming_rng.randomize()
 	current_ui_scale = SovereignUITheme.get_scale(get_viewport().get_visible_rect().size)
 	interface_theme = SovereignUITheme.create_theme(current_ui_scale)
@@ -186,7 +190,7 @@ func _create_interface():
 	_add_build_button(build_box, "Электростанция — 30 дерева, 15 камня", POWER_PLANT_SCENE)
 	_add_build_button(build_box, "Казарма — 25 дерева, 10 камня", BARRACKS_SCENE)
 	_add_build_button(build_box, "Военный завод — 35 дерева, 25 камня", MILITARY_FACTORY_SCENE)
-	_add_build_button(build_box, "Правительство — 30 дерева, 20 камня", GOVERNMENT_SCENE)
+	government_build_button = _add_build_button(build_box, "Правительство — 30 дерева, 20 камня", GOVERNMENT_SCENE)
 	var road_button := Button.new()
 	road_button.text = "Построить дорогу линией"
 	road_button.pressed.connect(_begin_road_mode)
@@ -368,13 +372,14 @@ func _create_building_panel():
 	box.add_child(dismantle_button)
 
 
-func _add_build_button(box: VBoxContainer, text: String, scene: PackedScene):
+func _add_build_button(box: VBoxContainer, text: String, scene: PackedScene) -> Button:
 	var button := Button.new()
 	button.text = text
 	button.pressed.connect(_begin_building_placement.bind(scene))
 	_configure_build_button(button, scene)
 	box.add_child(button)
 	build_buttons.append(button)
+	return button
 
 
 func _configure_build_button(button: Button, scene: PackedScene):
@@ -388,20 +393,23 @@ func _configure_build_button(button: Button, scene: PackedScene):
 	preview.free()
 
 
-func _process(_delta: float):
+func _process(delta: float):
 	if is_instance_valid(ghost):
 		_snap_building_to_road(world.get_global_mouse_position())
 		_update_placement_validity()
 	if road_mode and road_start != null and is_instance_valid(road_preview):
 		var road_end := _snap_road_end(road_start, world.get_global_mouse_position())
 		road_preview.points = PackedVector2Array([road_start, road_end])
-		road_preview.default_color = ROAD_PREVIEW_INVALID_COLOR if _road_line_has_parallel_conflict(road_start, road_end) else ROAD_PREVIEW_VALID_COLOR
+		road_preview.default_color = ROAD_PREVIEW_INVALID_COLOR if _road_line_has_placement_conflict(road_start, road_end) else ROAD_PREVIEW_VALID_COLOR
 	if selecting:
 		tactical_overlay.show_selection(selection_start, world.get_global_mouse_position())
 	if forming:
 		tactical_overlay.show_formation(_get_formation_positions(formation_start, world.get_global_mouse_position()))
-	_update_hud()
-	_update_responsive_layout()
+	hud_refresh_timer -= delta
+	if hud_refresh_timer <= 0.0:
+		hud_refresh_timer = 0.2
+		_update_hud()
+		_update_responsive_layout()
 
 
 func _update_responsive_layout():
@@ -461,11 +469,15 @@ func _update_responsive_layout():
 	resource_panel.position = Vector2(viewport_size.x - right_width - 12.0, 12.0)
 	resource_panel.custom_minimum_size = Vector2.ZERO
 	resource_panel.size = Vector2(right_width, minf(205.0 * ui_scale, maxf(viewport_size.y - 24.0, 1.0)))
-	var menu_top := minf(180.0 * ui_scale, viewport_size.y * 0.32)
+	# Keep the construction menu close to the unit panel instead of leaving a
+	# large empty strip between them.
+	var menu_top := minf(unit_panel.position.y + unit_panel.size.y + 8.0 * ui_scale, viewport_size.y * 0.32)
+	# The notification toggle occupies the bottom-left corner of the viewport.
+	var menu_bottom_margin := 54.0 * ui_scale
 	var menu_width := minf(285.0 * ui_scale, available_size.x)
 	menu.position = Vector2(12.0, menu_top)
 	menu.custom_minimum_size = Vector2.ZERO
-	menu.size = Vector2(menu_width, maxf(viewport_size.y - menu_top - 8.0, 1.0))
+	menu.size = Vector2(menu_width, maxf(viewport_size.y - menu_top - menu_bottom_margin, 1.0))
 	building_panel.visible = building_open
 	if building_open:
 		var building_top := resource_panel.position.y + resource_panel.size.y + 6.0
@@ -519,12 +531,17 @@ func _update_hud():
 	var residence_count := 0
 	var housing_capacity := 0
 	var local_faction_id := _get_local_faction_id()
-	for unit in get_tree().get_nodes_in_group("units"):
+	var faction_units: Array = world_index.get_units(local_faction_id) if is_instance_valid(world_index) else get_tree().get_nodes_in_group("units")
+	for unit in faction_units:
 		if unit is Unit and unit.faction_id == local_faction_id:
 			population += 1
 			if unit.is_mobilized:
 				mobilized += 1
-	for building in get_tree().get_nodes_in_group("buildings"):
+	var faction_buildings: Array = world_index.get_buildings(local_faction_id) if is_instance_valid(world_index) else get_tree().get_nodes_in_group("buildings")
+	var has_government := false
+	for building in faction_buildings:
+		if building is Building and building.faction_id == local_faction_id and building.is_government() and not building.placement_preview:
+			has_government = true
 		if building is Building and building.faction_id == local_faction_id and building.is_residence() and building.is_completed():
 			residence_count += 1
 			housing_capacity += building.max_occupants
@@ -549,6 +566,9 @@ func _update_hud():
 			army_capacity += building.max_occupants
 	var food_per_minute := ceili(float(population) * 60.0 / Unit.FOOD_CONSUMPTION_INTERVAL)
 	resource_status.text = "%s\nРесурсы: %d/%d\nДерево %d | Камень %d | Железо %d | Уголь %d\nДоски %d | Инструменты %d\nЕда %d | Расход %d/мин\nБроня %d | Автоматы %d\nЭлектричество %d/%d\nНаселение %d/%d | Дома %d\nАрмия %d/%d\nДобыча %d | Производство %d" % [_get_local_faction_name(), wood + stone + iron + coal + planks + tools + food + armor + rifles, total_capacity, wood, stone, iron, coal, planks, tools, food, food_per_minute, armor, rifles, electricity, electricity_capacity, population, housing_capacity, residence_count, mobilized, army_capacity, workers, factory_workers]
+	if is_instance_valid(government_build_button):
+		government_build_button.disabled = has_government
+		government_build_button.tooltip_text = "У фракции уже есть правительство" if has_government else ""
 	_update_building_panel()
 
 
@@ -960,7 +980,8 @@ func _handle_tactical_release(event: InputEventMouseButton):
 
 
 func _has_visible_unit_at(point: Vector2) -> bool:
-	for unit in get_tree().get_nodes_in_group("units"):
+	var units: Array = world_index.get_units() if is_instance_valid(world_index) else get_tree().get_nodes_in_group("units")
+	for unit in units:
 		if unit is Unit and unit.visible and unit.global_position.distance_to(point) <= 16.0:
 			return true
 	return false
@@ -972,14 +993,15 @@ func _apply_box_selection(from: Vector2, to: Vector2, additive: bool):
 		for already_selected in Unit.get_selected_units():
 			selected.append(already_selected)
 	var rect := Rect2(from, to - from).abs()
+	var units: Array = world_index.get_units() if is_instance_valid(world_index) else get_tree().get_nodes_in_group("units")
 	if rect.size.length() < 8.0:
-		for unit in get_tree().get_nodes_in_group("units"):
+		for unit in units:
 			if unit is Unit and unit.can_be_controlled_locally() and unit.global_position.distance_to(to) <= 16.0:
 				if unit not in selected:
 					selected.append(unit)
 				break
 	else:
-		for unit in get_tree().get_nodes_in_group("units"):
+		for unit in units:
 			if unit is Unit and unit.can_be_controlled_locally() and rect.has_point(unit.global_position) and unit not in selected:
 				selected.append(unit)
 	Unit.set_selection(selected)
@@ -1054,6 +1076,8 @@ func _update_mode_button():
 
 func _begin_building_placement(scene: PackedScene):
 	_cancel_all_placement()
+	if scene == GOVERNMENT_SCENE and _faction_has_government(_get_local_faction_id()):
+		return
 	building_rotation_offset = 0.0
 	selected_scene = scene
 	ghost = scene.instantiate() as Building
@@ -1095,6 +1119,8 @@ func _rotate_building_preview(angle: float):
 
 func _update_placement_validity():
 	placement_valid = is_instance_valid(snapped_road)
+	if ghost.is_government() and _faction_has_government(ghost.faction_id):
+		placement_valid = false
 	var collision := ghost.get_node_or_null("CollisionShape2D") as CollisionShape2D
 	if placement_valid and collision != null and collision.shape != null:
 		var query := PhysicsShapeQueryParameters2D.new()
@@ -1113,6 +1139,8 @@ func _update_placement_validity():
 
 func _place_building():
 	if not placement_valid or not is_instance_valid(snapped_road):
+		return
+	if ghost.is_government() and _faction_has_government(ghost.faction_id):
 		return
 	var street := snapped_road.street_name
 	var number: int = house_numbers.get(street, 0) + 1
@@ -1167,7 +1195,7 @@ func _create_road_line(start: Vector2, end: Vector2):
 	var delta := end - start
 	if delta.length() < 8.0:
 		return
-	if _road_line_has_parallel_conflict(start, end):
+	if _road_line_has_placement_conflict(start, end):
 		return
 	var direction := delta.normalized()
 	var street := _road_name_for_start(direction)
@@ -1192,7 +1220,7 @@ func _create_road_line(start: Vector2, end: Vector2):
 		network_manager.request_spawn_buildings(specifications, Unit.get_selected_units())
 
 
-func _road_line_has_parallel_conflict(start: Vector2, end: Vector2) -> bool:
+func _road_line_has_placement_conflict(start: Vector2, end: Vector2) -> bool:
 	var delta := end - start
 	if delta.length() < 8.0:
 		return false
@@ -1208,8 +1236,8 @@ func _road_line_has_parallel_conflict(start: Vector2, end: Vector2) -> bool:
 
 func _road_segment_overlaps_existing(local_position: Vector2, local_angle: float) -> bool:
 	var candidate_position := roads.to_global(local_position)
-	var candidate_direction := Vector2.RIGHT.rotated(local_angle + roads.global_rotation)
-	for existing in get_tree().get_nodes_in_group("roads"):
+	var candidate_direction: Vector2 = Vector2.RIGHT.rotated(local_angle + roads.global_rotation)
+	for existing in _get_indexed_roads():
 		if existing is not RoadSegment or not is_instance_valid(existing):
 			continue
 		var existing_direction := Vector2.RIGHT.rotated(existing.global_rotation)
@@ -1227,7 +1255,56 @@ func _road_segment_overlaps_existing(local_position: Vector2, local_angle: float
 		# друг от друга минимум на расстоянии двух ширин дороги (60 px).
 		if distance_along_road < RoadSegment.SEGMENT_LENGTH - 2.0:
 			return true
+	for existing in _get_indexed_buildings():
+		if existing is not Building or existing is RoadSegment or not is_instance_valid(existing) or existing.placement_preview:
+			continue
+		if _road_footprint_overlaps_building(candidate_position, candidate_direction, existing):
+			return true
 	return false
+
+
+func _road_footprint_overlaps_building(road_center: Vector2, road_axis_x: Vector2, building: Building) -> bool:
+	var collision := building.get_node_or_null("CollisionShape2D") as CollisionShape2D
+	if collision == null or collision.shape is not RectangleShape2D:
+		return false
+	var rectangle := collision.shape as RectangleShape2D
+	var building_transform: Transform2D = collision.global_transform
+	var building_scale := Vector2(building_transform.x.length(), building_transform.y.length())
+	var building_half_size: Vector2 = rectangle.size * building_scale * 0.5
+	var building_axis_x: Vector2 = building_transform.x.normalized()
+	var building_axis_y: Vector2 = building_transform.y.normalized()
+	var road_axis_y: Vector2 = road_axis_x.orthogonal()
+	return _oriented_rectangles_overlap(
+		road_center,
+		road_axis_x,
+		road_axis_y,
+		RoadSegment.FOOTPRINT_HALF_SIZE,
+		collision.global_position,
+		building_axis_x,
+		building_axis_y,
+		building_half_size
+	)
+
+
+func _oriented_rectangles_overlap(
+	center_a: Vector2,
+	axis_a_x: Vector2,
+	axis_a_y: Vector2,
+	half_size_a: Vector2,
+	center_b: Vector2,
+	axis_b_x: Vector2,
+	axis_b_y: Vector2,
+	half_size_b: Vector2
+) -> bool:
+	var offset: Vector2 = center_b - center_a
+	var separating_axes: Array[Vector2] = [axis_a_x, axis_a_y, axis_b_x, axis_b_y]
+	for axis in separating_axes:
+		var radius_a: float = half_size_a.x * absf(axis_a_x.dot(axis)) + half_size_a.y * absf(axis_a_y.dot(axis))
+		var radius_b: float = half_size_b.x * absf(axis_b_x.dot(axis)) + half_size_b.y * absf(axis_b_y.dot(axis))
+		# Простое касание границ допустимо, пересечение площадей — нет.
+		if absf(offset.dot(axis)) >= radius_a + radius_b - 0.01:
+			return false
+	return true
 
 
 func _road_name_for_start(direction: Vector2) -> String:
@@ -1257,7 +1334,7 @@ func _street_name_is_used(street_name: String, except_name := "") -> bool:
 		return false
 	if used_street_names.has(street_name):
 		return true
-	for road in get_tree().get_nodes_in_group("roads"):
+	for road in _get_indexed_roads():
 		if road is RoadSegment and road.street_name == street_name and road.street_name != except_name:
 			return true
 	return false
@@ -1291,7 +1368,7 @@ func _generate_street_name() -> String:
 func _nearest_road(point: Vector2, max_distance: float) -> RoadSegment:
 	var nearest: RoadSegment
 	var best := max_distance * max_distance
-	for road in get_tree().get_nodes_in_group("roads"):
+	for road in _get_indexed_roads():
 		if road.faction_id != _get_local_faction_id() or road.under_construction:
 			continue
 		var direction: Vector2 = Vector2.RIGHT.rotated(road.rotation)
@@ -1307,7 +1384,7 @@ func _nearest_road(point: Vector2, max_distance: float) -> RoadSegment:
 func _nearest_road_endpoint(point: Vector2, max_distance: float) -> Dictionary:
 	var result := {}
 	var best := max_distance * max_distance
-	for road in get_tree().get_nodes_in_group("roads"):
+	for road in _get_indexed_roads():
 		if road is not RoadSegment or road.faction_id != _get_local_faction_id():
 			continue
 		var direction := Vector2.RIGHT.rotated(road.global_rotation)
@@ -1386,6 +1463,25 @@ func _cancel_all_placement():
 func _get_local_faction_id() -> int:
 	var network_manager := get_node_or_null("/root/NetworkManager")
 	return network_manager.get_local_faction_id() if is_instance_valid(network_manager) else 0
+
+
+func _get_indexed_roads() -> Array:
+	if is_instance_valid(world_index):
+		return world_index.get_buildings(-1, "road")
+	return get_tree().get_nodes_in_group("roads")
+
+
+func _get_indexed_buildings() -> Array:
+	if is_instance_valid(world_index):
+		return world_index.get_buildings()
+	return get_tree().get_nodes_in_group("buildings")
+
+
+func _faction_has_government(faction_id: int) -> bool:
+	for building in _get_indexed_buildings():
+		if building is Building and is_instance_valid(building) and building.faction_id == faction_id and building.is_government() and not building.placement_preview:
+			return true
+	return false
 
 
 func _get_local_faction_name() -> String:

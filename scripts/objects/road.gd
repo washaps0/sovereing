@@ -4,6 +4,9 @@ extends Building
 const SEGMENT_LENGTH := 64.0
 const ROAD_WIDTH := 30.0
 const MIN_PARALLEL_SPACING := ROAD_WIDTH * 2.0
+# Фактический размер CollisionShape2D с учётом масштаба корня road.tscn.
+# Используется проверкой размещения до создания дорожного сегмента.
+const FOOTPRINT_HALF_SIZE := Vector2(34.0, 16.0)
 
 var street_name := "Улица"
 

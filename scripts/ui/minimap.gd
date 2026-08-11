@@ -18,12 +18,14 @@ var refresh_timer := 0.0
 var dragging := false
 var current_ui_scale := -1.0
 var last_viewport_size := Vector2.ZERO
+var world_index: Node
 
 
 func _ready():
 	world = get_tree().current_scene as Node2D
 	if is_instance_valid(world):
 		camera = world.get_node_or_null("Camera2D") as Camera2D
+		world_index = world.get_node_or_null("WorldIndex")
 	panel = get_parent().get_parent() as PanelContainer
 	title = get_parent().get_node_or_null("Title") as Label
 	if is_instance_valid(panel):
@@ -95,7 +97,8 @@ func _draw():
 func _draw_roads(map_rect: Rect2):
 	if not is_instance_valid(world):
 		return
-	for candidate in get_tree().get_nodes_in_group("roads"):
+	var roads: Array = world_index.get_buildings(-1, "road") if is_instance_valid(world_index) else get_tree().get_nodes_in_group("roads")
+	for candidate in roads:
 		if candidate is not RoadSegment or not world.is_ancestor_of(candidate):
 			continue
 		var road := candidate as RoadSegment
@@ -109,7 +112,8 @@ func _draw_roads(map_rect: Rect2):
 func _draw_buildings(map_rect: Rect2):
 	if not is_instance_valid(world):
 		return
-	for candidate in get_tree().get_nodes_in_group("buildings"):
+	var buildings: Array = world_index.get_buildings() if is_instance_valid(world_index) else get_tree().get_nodes_in_group("buildings")
+	for candidate in buildings:
 		if candidate is not Building or candidate is RoadSegment or not world.is_ancestor_of(candidate):
 			continue
 		var building := candidate as Building
@@ -123,7 +127,8 @@ func _draw_buildings(map_rect: Rect2):
 func _draw_units(map_rect: Rect2):
 	if not is_instance_valid(world):
 		return
-	for candidate in get_tree().get_nodes_in_group("units"):
+	var units: Array = world_index.get_units() if is_instance_valid(world_index) else get_tree().get_nodes_in_group("units")
+	for candidate in units:
 		if candidate is not Unit or not world.is_ancestor_of(candidate):
 			continue
 		var unit := candidate as Unit
