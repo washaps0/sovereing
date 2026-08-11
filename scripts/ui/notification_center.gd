@@ -2,22 +2,27 @@ class_name NotificationCenter
 extends CanvasLayer
 
 @export_range(0.5, 10.0, 0.5) var scan_interval := 2.0
-@export_range(1, 10, 1) var maximum_visible_messages := 6
-@export var panel_width := 430.0
+@export_range(1, 10, 1) var maximum_visible_messages := 4
+@export var panel_width := 380.0
+@export var panel_height := 220.0
 
 var world: Node2D
 var scan_timer := 0.0
 var current_signature := ""
 var current_ui_scale := -1.0
 var last_viewport_size := Vector2.ZERO
+var user_collapsed := false
+var active_warning_count := 0
 
 @onready var panel: PanelContainer = $Panel
+@onready var toggle_button: Button = $Toggle
 @onready var title: Label = $Panel/Content/Header/Title
-@onready var messages: VBoxContainer = $Panel/Content/Messages
+@onready var messages: VBoxContainer = $Panel/Content/Scroll/Messages
 
 
 func _ready():
 	world = get_tree().current_scene as Node2D
+	toggle_button.pressed.connect(_toggle_notifications)
 	_update_layout()
 	_scan_notifications()
 
@@ -38,13 +43,22 @@ func _update_layout():
 	var ui_scale := SovereignUITheme.get_scale(viewport_size)
 	if not is_equal_approx(current_ui_scale, ui_scale):
 		current_ui_scale = ui_scale
-		panel.theme = SovereignUITheme.create_theme(ui_scale)
+		var interface_theme := SovereignUITheme.create_theme(ui_scale)
+		panel.theme = interface_theme
+		toggle_button.theme = interface_theme
 	var width := minf(panel_width * ui_scale, maxf(viewport_size.x - 24.0, 180.0))
-	var top := 58.0 * ui_scale
-	panel.offset_left = -width * 0.5
-	panel.offset_right = width * 0.5
-	panel.offset_top = top
-	panel.offset_bottom = minf(top + 260.0 * ui_scale, viewport_size.y - 12.0)
+	var height := minf(panel_height * ui_scale, maxf(viewport_size.y - 24.0, 120.0))
+	var margin := 12.0 * ui_scale
+	var toggle_height := 34.0 * ui_scale
+	var toggle_width := minf(190.0 * ui_scale, width)
+	toggle_button.offset_left = margin
+	toggle_button.offset_right = margin + toggle_width
+	toggle_button.offset_top = -margin - toggle_height
+	toggle_button.offset_bottom = -margin
+	panel.offset_left = margin
+	panel.offset_right = margin + width
+	panel.offset_top = -margin - toggle_height - 6.0 * ui_scale - height
+	panel.offset_bottom = -margin - toggle_height - 6.0 * ui_scale
 
 
 func _scan_notifications():
@@ -62,13 +76,14 @@ func _scan_notifications():
 	_collect_housing_warnings(warnings, units, buildings)
 	_collect_army_warnings(warnings, units)
 	warnings.sort_custom(func(a: Dictionary, b: Dictionary): return int(a.severity) > int(b.severity))
+	var total_warning_count := warnings.size()
 	if warnings.size() > maximum_visible_messages:
 		warnings.resize(maximum_visible_messages)
-	var signature := JSON.stringify(warnings)
+	var signature := JSON.stringify({"total": total_warning_count, "warnings": warnings})
 	if signature == current_signature:
 		return
 	current_signature = signature
-	_rebuild_messages(warnings)
+	_rebuild_messages(warnings, total_warning_count)
 
 
 func _collect_food_warnings(warnings: Array[Dictionary], units: Array[Unit], buildings: Array[Building]):
@@ -180,11 +195,11 @@ func _add_warning(warnings: Array[Dictionary], severity: int, message: String):
 	warnings.append({"severity": severity, "message": message})
 
 
-func _rebuild_messages(warnings: Array[Dictionary]):
+func _rebuild_messages(warnings: Array[Dictionary], total_warning_count: int):
 	for child in messages.get_children():
 		child.queue_free()
-	panel.visible = not warnings.is_empty()
-	title.text = "Оповещения: %d" % warnings.size()
+	active_warning_count = total_warning_count
+	title.text = "Оповещения: %d" % active_warning_count
 	for warning in warnings:
 		var label := Label.new()
 		label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -192,6 +207,23 @@ func _rebuild_messages(warnings: Array[Dictionary]):
 		label.add_theme_color_override("font_color", _get_severity_color(int(warning.severity)))
 		label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		messages.add_child(label)
+	_update_visibility()
+
+
+func _toggle_notifications():
+	if active_warning_count <= 0:
+		return
+	user_collapsed = not user_collapsed
+	_update_visibility()
+
+
+func _update_visibility():
+	panel.visible = active_warning_count > 0 and not user_collapsed
+	toggle_button.disabled = active_warning_count <= 0
+	if panel.visible:
+		toggle_button.text = "Скрыть оповещения"
+	else:
+		toggle_button.text = "Оповещения: %d" % active_warning_count
 
 
 func _get_severity_icon(severity: int) -> String:

@@ -6,15 +6,26 @@
 layer = 125
 script = ExtResource("1_notifications")
 
+[node name="Toggle" type="Button" parent="."]
+anchors_preset = 3
+anchor_top = 1.0
+anchor_bottom = 1.0
+offset_left = 12.0
+offset_top = -46.0
+offset_right = 202.0
+offset_bottom = -12.0
+grow_vertical = 0
+text = "Оповещения: 0"
+
 [node name="Panel" type="PanelContainer" parent="."]
-anchors_preset = 10
-anchor_left = 0.5
-anchor_right = 0.5
-offset_left = -215.0
-offset_top = 58.0
-offset_right = 215.0
-offset_bottom = 318.0
-grow_horizontal = 2
+anchors_preset = 3
+anchor_top = 1.0
+anchor_bottom = 1.0
+offset_left = 12.0
+offset_top = -272.0
+offset_right = 392.0
+offset_bottom = -52.0
+grow_vertical = 0
 mouse_filter = 2
 
 [node name="Content" type="VBoxContainer" parent="Panel"]
@@ -38,8 +49,15 @@ mouse_filter = 2
 layout_mode = 2
 mouse_filter = 2
 
-[node name="Messages" type="VBoxContainer" parent="Panel/Content"]
+[node name="Scroll" type="ScrollContainer" parent="Panel/Content"]
 layout_mode = 2
 size_flags_vertical = 3
+horizontal_scroll_mode = 0
+vertical_scroll_mode = 0
+mouse_filter = 2
+
+[node name="Messages" type="VBoxContainer" parent="Panel/Content/Scroll"]
+layout_mode = 2
+size_flags_horizontal = 3
 theme_override_constants/separation = 8
 mouse_filter = 2
