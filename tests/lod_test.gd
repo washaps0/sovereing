@@ -8,6 +8,7 @@ func _init():
 func _run():
 	await _test_coarse_unit_movement()
 	await _test_coarse_harvest()
+	await _test_harvester_returns_while_offscreen()
 	await _test_streamed_world()
 	print("LOD_TEST_OK")
 	quit()
@@ -49,6 +50,52 @@ func _test_coarse_harvest():
 	assert(tree.wood_amount == 16)
 	assert(unit.global_position == Vector2.ZERO)
 	holder.queue_free()
+	await process_frame
+
+
+func _test_harvester_returns_while_offscreen():
+	var world := Node2D.new()
+	for node_name in ["trees", "rocks", "roads", "buildings"]:
+		var container := Node2D.new()
+		container.name = node_name
+		world.add_child(container)
+	var camera := Camera2D.new()
+	camera.name = "Camera2D"
+	camera.zoom = Vector2.ONE * 4.0
+	world.add_child(camera)
+	var manager := SimulationLODManager.new()
+	manager.name = "SimulationLODManager"
+	world.add_child(manager)
+	var warehouse := preload("res://scenes/objects/buildings/warehouse.tscn").instantiate() as Building
+	warehouse.position = Vector2(200, 0)
+	world.get_node("buildings").add_child(warehouse)
+	var unit := preload("res://scenes/objects/unit.tscn").instantiate() as Unit
+	unit.position = Vector2(280, 0)
+	unit.carry_capacity = 3
+	unit.harvest_interval = 0.1
+	unit.food_timer = 10000.0
+	world.add_child(unit)
+	root.add_child(world)
+	await process_frame
+	await process_frame
+	var record_id := manager.register_resource_data("tree", Vector2(600, 0), 0, unit.carry_capacity)
+	var tree = manager._get_or_materialize_resource(manager._resource_records_by_id[record_id])
+	unit.command_harvest(tree)
+	var left_full_simulation := false
+	var furthest_x := unit.global_position.x
+	var previous_time_scale := Engine.time_scale
+	Engine.time_scale = 2.0
+	for frame_index in range(300):
+		await physics_frame
+		left_full_simulation = left_full_simulation or unit.simulation_lod != Unit.SimulationLOD.FULL
+		furthest_x = maxf(furthest_x, unit.global_position.x)
+		if warehouse.get_stored_resource(&"wood") >= unit.carry_capacity:
+			break
+	Engine.time_scale = previous_time_scale
+	assert(left_full_simulation)
+	assert(warehouse.get_stored_resource(&"wood") == unit.carry_capacity)
+	assert(unit.global_position.x < 310.0)
+	world.queue_free()
 	await process_frame
 
 

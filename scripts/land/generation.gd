@@ -19,6 +19,10 @@ const GOVERNMENT_SCENE := preload("res://scenes/objects/buildings/government.tsc
 const ROAD_SCENE := preload("res://scenes/objects/buildings/road.tscn")
 const SPAWN_MARGIN := 320.0
 const SPAWN_CLEAR_RADIUS := 230.0
+const AI_STRATEGY_INTERVAL := 6.0
+const AI_MAX_CONSTRUCTION_BACKLOG := 2
+const AI_MIN_CIVILIAN_WORKERS := 6
+const AI_ATTACK_MIN_SOLDIERS := 8
 
 @export var starting_unit_count := 5
 @export var unit_spawn_position := Vector2(300, 300)
@@ -48,6 +52,8 @@ const ROCK_SCENE := preload("res://scenes/objects/rock.tscn")
 
 var rng := RandomNumberGenerator.new()
 var world_seed := 12345
+var ai_strategy_timer := 2.0
+var ai_strategy_cycle := 0
 
 func generate_ground():
 	# Один TileMapLayer хранит и отрисовывает землю чанками. Раньше для карты
@@ -144,6 +150,18 @@ func _ready():
 		Unit.next_name_index = 0
 		var slots: Array = network_manager.get_session_slots() if is_instance_valid(network_manager) and network_manager.has_session() else _get_default_session_slots()
 		spawn_session_units(slots)
+
+
+func _process(delta: float):
+	ai_strategy_timer -= delta
+	if ai_strategy_timer > 0.0:
+		return
+	ai_strategy_timer = AI_STRATEGY_INTERVAL
+	var network_manager := get_node_or_null("/root/NetworkManager")
+	if is_instance_valid(network_manager) and network_manager.is_lan_session() and not multiplayer.is_server():
+		return
+	ai_strategy_cycle += 1
+	_run_ai_strategy()
 
 
 func get_save_data() -> Dictionary:
@@ -592,6 +610,145 @@ func set_faction_controller(faction_id: int, controller_peer_id: int, ai_control
 		_ensure_ai_starting_plan(faction_id, faction_name)
 
 
+func _run_ai_strategy():
+	var ai_factions := {}
+	for candidate in get_tree().get_nodes_in_group("units"):
+		if candidate is Unit and is_ancestor_of(candidate) and candidate.ai_controlled:
+			ai_factions[candidate.faction_id] = candidate.faction_name
+	for raw_faction_id in ai_factions:
+		var faction_id := int(raw_faction_id)
+		var faction_name := str(ai_factions[raw_faction_id])
+		_ensure_ai_starting_plan(faction_id, faction_name)
+		_configure_ai_economy(faction_id)
+		_configure_ai_population_and_army(faction_id)
+		if _get_ai_construction_count(faction_id) <= AI_MAX_CONSTRUCTION_BACKLOG:
+			_plan_ai_expansion(faction_id, faction_name)
+		_issue_ai_attack_orders(faction_id)
+
+
+func _configure_ai_economy(faction_id: int):
+	var mine_index := 0
+	var factory_index := 0
+	for candidate in get_tree().get_nodes_in_group("buildings"):
+		if candidate is not Building or not is_ancestor_of(candidate) or candidate.faction_id != faction_id or not candidate.is_factory():
+			continue
+		var building := candidate as Building
+		building.set_worker_target(building.max_workers)
+		if building.is_food_factory():
+			building.set_recipe(&"food")
+		elif building.is_power_plant():
+			building.set_recipe(&"electricity")
+		elif building.is_mine():
+			var mine_recipes: Array[StringName] = [&"mine_iron", &"mine_coal", &"mine_stone"]
+			building.set_recipe(mine_recipes[(ai_strategy_cycle + mine_index) % mine_recipes.size()])
+			mine_index += 1
+		elif building.is_military_factory():
+			building.set_recipe(_get_ai_needed_equipment_recipe(faction_id))
+		else:
+			building.set_recipe(&"tools" if (ai_strategy_cycle + factory_index) % 2 == 0 else &"planks")
+			factory_index += 1
+
+
+func _get_ai_needed_equipment_recipe(faction_id: int) -> StringName:
+	var armor := 0
+	var rifles := 0
+	for candidate in get_tree().get_nodes_in_group("buildings"):
+		if candidate is Building and is_ancestor_of(candidate) and candidate.faction_id == faction_id and candidate.is_warehouse() and candidate.is_completed():
+			armor += candidate.get_stored_resource(&"armor")
+			rifles += candidate.get_stored_resource(&"rifles")
+	for candidate in get_tree().get_nodes_in_group("units"):
+		if candidate is Unit and is_ancestor_of(candidate) and candidate.faction_id == faction_id:
+			armor += 1 if candidate.has_armor else 0
+			rifles += 1 if candidate.has_rifle else 0
+	return &"armor" if armor <= rifles else &"rifles"
+
+
+func _configure_ai_population_and_army(faction_id: int):
+	var government := _find_ai_government(faction_id)
+	if not is_instance_valid(government) or not government.is_completed():
+		return
+	var population := government.get_population_count()
+	var housing_capacity := government.get_housing_capacity()
+	# ИИ постоянно заполняет всё построенное жильё. Новый район создаётся
+	# планировщиком, когда текущие стройки закончены.
+	government.set_migration_target(maxi(housing_capacity, population))
+	var army_capacity := government.get_army_capacity()
+	var desired_army := mini(int(round(population * 0.55)), maxi(population - AI_MIN_CIVILIAN_WORKERS, 0))
+	government.set_mobilization_target(mini(desired_army, army_capacity))
+
+
+func _find_ai_government(faction_id: int) -> GovernmentBuilding:
+	for candidate in get_tree().get_nodes_in_group("buildings"):
+		if candidate is GovernmentBuilding and is_ancestor_of(candidate) and candidate.faction_id == faction_id:
+			return candidate
+	return null
+
+
+func _get_ai_construction_count(faction_id: int) -> int:
+	var result := 0
+	for candidate in get_tree().get_nodes_in_group("buildings"):
+		if candidate is Building and is_ancestor_of(candidate) and candidate.faction_id == faction_id and candidate.under_construction:
+			result += 1
+	return result
+
+
+func _get_ai_building_count(faction_id: int, building_kind: String) -> int:
+	var result := 0
+	for candidate in get_tree().get_nodes_in_group("buildings"):
+		if candidate is Building and is_ancestor_of(candidate) and candidate.faction_id == faction_id and candidate.building_kind == building_kind:
+			result += 1
+	return result
+
+
+func _issue_ai_attack_orders(faction_id: int):
+	var soldiers: Array[Unit] = []
+	var commanders: Array[Unit] = []
+	var riflemen := 0
+	for candidate in get_tree().get_nodes_in_group("units"):
+		if candidate is not Unit or not is_ancestor_of(candidate) or candidate.faction_id != faction_id or not candidate.is_mobilized:
+			continue
+		soldiers.append(candidate)
+		if candidate.has_rifle:
+			riflemen += 1
+		if candidate.is_squad_commander():
+			commanders.append(candidate)
+	if soldiers.size() < AI_ATTACK_MIN_SOLDIERS or riflemen * 2 < soldiers.size() or commanders.is_empty():
+		return
+	var target := _find_nearest_enemy_target(faction_id, commanders[0].global_position)
+	if not is_instance_valid(target):
+		return
+	for commander_index in range(commanders.size()):
+		var flank := Vector2.from_angle(TAU * float(commander_index) / float(maxi(commanders.size(), 1))) * 48.0
+		var destination := target.global_position + flank
+		if commanders[commander_index].military_order == &"attack" and commanders[commander_index].target_position.distance_to(destination) <= 64.0:
+			continue
+		commanders[commander_index]._command_military_move(destination, &"attack")
+
+
+func _find_nearest_enemy_target(faction_id: int, from_position: Vector2) -> Node2D:
+	var nearest: Node2D
+	var nearest_priority := 100
+	var nearest_distance := INF
+	for candidate in get_tree().get_nodes_in_group("buildings"):
+		if candidate is not Building or not is_ancestor_of(candidate) or candidate.faction_id == faction_id or not candidate.is_completed():
+			continue
+		var priority := 0 if candidate.is_government() else (1 if candidate.is_barracks() else 2)
+		var distance := from_position.distance_squared_to(candidate.global_position)
+		if priority < nearest_priority or (priority == nearest_priority and distance < nearest_distance):
+			nearest = candidate
+			nearest_priority = priority
+			nearest_distance = distance
+	if is_instance_valid(nearest):
+		return nearest
+	for candidate in get_tree().get_nodes_in_group("units"):
+		if candidate is Unit and is_ancestor_of(candidate) and candidate.faction_id != faction_id and candidate.health > 0:
+			var distance := from_position.distance_squared_to(candidate.global_position)
+			if distance < nearest_distance:
+				nearest = candidate
+				nearest_distance = distance
+	return nearest
+
+
 func _ensure_ai_starting_plan(faction_id: int, faction_name: String):
 	# Если у покинутой фракции уже есть поселение, ИИ продолжит имеющиеся
 	# стройки и производство. Для пустого угла создаётся базовый план развития.
@@ -603,40 +760,97 @@ func _ensure_ai_starting_plan(faction_id: int, faction_name: String):
 	var inward_y := 1.0 if faction_id in [0, 1] else -1.0
 	var block_center := base + Vector2(220.0 * inward_x, 190.0 * inward_y)
 	var district_number := faction_id + 1
-	var north_street := "Квартал %d — Север" % district_number
-	var south_street := "Квартал %d — Юг" % district_number
-	var west_street := "Квартал %d — Запад" % district_number
-	var east_street := "Квартал %d — Восток" % district_number
+	var main_street := "Квартал %d — Главная" % district_number
+	var cross_street := "Квартал %d — Выезд" % district_number
 	var next_entity_id := faction_id * 1000 + 101
 
-	# Прямоугольник 384×192: шесть горизонтальных и три вертикальных сегмента
-	# на каждой стороне. Торцы соприкасаются без наложения параллельных дорог.
-	for x_index in range(6):
-		var x_offset := -160.0 + x_index * RoadSegment.SEGMENT_LENGTH
-		_spawn_ai_road_segment(block_center + Vector2(x_offset, -96.0), 0.0, faction_id, faction_name, next_entity_id, north_street)
+	# Открытая стартовая сеть: сквозная главная улица и ответвление наружу.
+	# В отличие от прежнего прямоугольника она не формирует закрытую коробку.
+	for x_index in range(-3, 4):
+		_spawn_ai_road_segment(block_center + Vector2(x_index * RoadSegment.SEGMENT_LENGTH, 0.0), 0.0, faction_id, faction_name, next_entity_id, main_street)
 		next_entity_id += 1
-		_spawn_ai_road_segment(block_center + Vector2(x_offset, 96.0), 0.0, faction_id, faction_name, next_entity_id, south_street)
-		next_entity_id += 1
-	for y_index in range(-1, 2):
-		_spawn_ai_road_segment(block_center + Vector2(-192.0, y_index * RoadSegment.SEGMENT_LENGTH), PI * 0.5, faction_id, faction_name, next_entity_id, west_street)
-		next_entity_id += 1
-		_spawn_ai_road_segment(block_center + Vector2(192.0, y_index * RoadSegment.SEGMENT_LENGTH), PI * 0.5, faction_id, faction_name, next_entity_id, east_street)
+	for y_index in range(-2, 3):
+		_spawn_ai_road_segment(block_center + Vector2(224.0 * inward_x, y_index * RoadSegment.SEGMENT_LENGTH), PI * 0.5, faction_id, faction_name, next_entity_id, cross_street)
 		next_entity_id += 1
 
-	# Здания стоят двумя рядами вдоль северной и южной дорог. Интервалы
-	# рассчитаны по реальным коллизиям самых широких зданий.
+	# Здания стоят двумя рядами вдоль главной улицы. Интервалы рассчитаны по
+	# реальным коллизиям самых широких зданий.
 	var building_id := faction_id * 1000 + 201
-	_spawn_ai_building(WAREHOUSE_SCENE, block_center + Vector2(-112.0, -45.0), PI, faction_id, faction_name, building_id, north_street, 1)
+	_spawn_ai_building(WAREHOUSE_SCENE, block_center + Vector2(-120.0, -62.0), PI, faction_id, faction_name, building_id, main_street, 1)
 	building_id += 1
-	_spawn_ai_building(RESIDENCE_SCENE, block_center + Vector2(0.0, -45.0), PI, faction_id, faction_name, building_id, north_street, 2)
+	_spawn_ai_building(RESIDENCE_SCENE, block_center + Vector2(0.0, -62.0), PI, faction_id, faction_name, building_id, main_street, 2)
 	building_id += 1
-	_spawn_ai_building(FACTORY_SCENE, block_center + Vector2(112.0, -45.0), PI, faction_id, faction_name, building_id, north_street, 3)
+	_spawn_ai_building(FACTORY_SCENE, block_center + Vector2(120.0, -62.0), PI, faction_id, faction_name, building_id, main_street, 3)
 	building_id += 1
-	_spawn_ai_building(FOOD_FACTORY_SCENE, block_center + Vector2(-112.0, 45.0), 0.0, faction_id, faction_name, building_id, south_street, 1)
+	_spawn_ai_building(FOOD_FACTORY_SCENE, block_center + Vector2(-120.0, 62.0), 0.0, faction_id, faction_name, building_id, main_street, 4)
 	building_id += 1
-	_spawn_ai_building(MINE_SCENE, block_center + Vector2(0.0, 45.0), 0.0, faction_id, faction_name, building_id, south_street, 2)
+	_spawn_ai_building(MINE_SCENE, block_center + Vector2(0.0, 62.0), 0.0, faction_id, faction_name, building_id, main_street, 5)
 	building_id += 1
-	_spawn_ai_building(POWER_PLANT_SCENE, block_center + Vector2(112.0, 45.0), 0.0, faction_id, faction_name, building_id, south_street, 3)
+	_spawn_ai_building(POWER_PLANT_SCENE, block_center + Vector2(120.0, 62.0), 0.0, faction_id, faction_name, building_id, main_street, 6)
+
+
+func _plan_ai_expansion(faction_id: int, faction_name: String):
+	var residence_count := _get_ai_building_count(faction_id, "residence")
+	var expansion_stage := maxi(int(floor(float(maxi(residence_count - 1, 0)) / 3.0)) + 1, 1)
+	var base := get_faction_spawn_position(faction_id)
+	var inward_x := 1.0 if faction_id in [0, 2] else -1.0
+	var inward_y := 1.0 if faction_id in [0, 1] else -1.0
+	var starting_center := base + Vector2(220.0 * inward_x, 190.0 * inward_y)
+	var column := int((expansion_stage + 1) / 2)
+	var lane := 1.0 if expansion_stage % 2 == 1 else -1.0
+	var district_center := starting_center + Vector2(448.0 * column * inward_x, 256.0 * lane * inward_y)
+	var world_limit := Vector2(MAP_WIDTH * TILE_SIZE, MAP_HEIGHT * TILE_SIZE) - Vector2.ONE * SPAWN_MARGIN
+	district_center = district_center.clamp(Vector2.ONE * SPAWN_MARGIN, world_limit)
+	var street_name := "Магистраль ИИ %d-%d" % [faction_id + 1, expansion_stage]
+	var next_entity_id := _next_ai_entity_id()
+	next_entity_id = _spawn_ai_road_connection(starting_center, district_center, faction_id, faction_name, next_entity_id, street_name)
+	# Район открыт в сторону магистрали: одна сквозная улица вместо замкнутой
+	# коробки. Все следующие районы соединяются с этой сетью.
+	for segment_index in range(-3, 4):
+		_spawn_ai_road_segment(district_center + Vector2(segment_index * RoadSegment.SEGMENT_LENGTH, 0.0), 0.0, faction_id, faction_name, next_entity_id, street_name)
+		next_entity_id += 1
+
+	var planned_scenes: Array[PackedScene] = [RESIDENCE_SCENE, RESIDENCE_SCENE, RESIDENCE_SCENE]
+	planned_scenes.append(GOVERNMENT_SCENE if not is_instance_valid(_find_ai_government(faction_id)) else WAREHOUSE_SCENE)
+	planned_scenes.append(BARRACKS_SCENE)
+	planned_scenes.append(MILITARY_FACTORY_SCENE)
+	planned_scenes.append(FOOD_FACTORY_SCENE)
+	planned_scenes.append(MINE_SCENE if expansion_stage % 2 == 1 else FACTORY_SCENE)
+	var x_slots: Array[float] = [-198.0, -90.0, 90.0, 198.0]
+	for scene_index in range(planned_scenes.size()):
+		var upper_row := scene_index < x_slots.size()
+		var slot_index := scene_index if upper_row else scene_index - x_slots.size()
+		var building_position := district_center + Vector2(x_slots[slot_index], -62.0 if upper_row else 62.0)
+		var building_rotation := PI if upper_row else 0.0
+		_spawn_ai_building(planned_scenes[scene_index], building_position, building_rotation, faction_id, faction_name, next_entity_id, street_name, slot_index + 1)
+		next_entity_id += 1
+
+
+func _spawn_ai_road_connection(start: Vector2, finish: Vector2, faction_id: int, faction_name: String, next_entity_id: int, street_name: String) -> int:
+	var horizontal_distance := finish.x - start.x
+	var horizontal_direction := signf(horizontal_distance)
+	var horizontal_steps := int(round(absf(horizontal_distance) / RoadSegment.SEGMENT_LENGTH))
+	for step_index in range(1, horizontal_steps + 1):
+		var position := start + Vector2(horizontal_direction * RoadSegment.SEGMENT_LENGTH * step_index, 0.0)
+		_spawn_ai_road_segment(position, 0.0, faction_id, faction_name, next_entity_id, street_name)
+		next_entity_id += 1
+	var corner := Vector2(finish.x, start.y)
+	var vertical_distance := finish.y - start.y
+	var vertical_direction := signf(vertical_distance)
+	var vertical_steps := int(round(absf(vertical_distance) / RoadSegment.SEGMENT_LENGTH))
+	for step_index in range(1, vertical_steps + 1):
+		var position := corner + Vector2(0.0, vertical_direction * RoadSegment.SEGMENT_LENGTH * step_index)
+		_spawn_ai_road_segment(position, PI * 0.5, faction_id, faction_name, next_entity_id, street_name)
+		next_entity_id += 1
+	return next_entity_id
+
+
+func _next_ai_entity_id() -> int:
+	var result := 1
+	for candidate in get_tree().get_nodes_in_group("buildings"):
+		if candidate is Building and is_ancestor_of(candidate):
+			result = maxi(result, candidate.network_id + 1)
+	return result
 
 
 func _spawn_ai_road_segment(position: Vector2, rotation_angle: float, faction_id: int, faction_name: String, entity_id: int, street_name: String) -> RoadSegment:

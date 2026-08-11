@@ -94,6 +94,14 @@ func _refresh_lods(initial: bool, elapsed: float):
 		var desired_lod := _get_desired_lod(unit, render_rect, reduced_rect, strategic_rect, local_faction_id)
 		_update_unit_lod(unit, desired_lod, render_rect.has_point(unit.global_position), initial, elapsed)
 		new_buckets[unit.simulation_lod].append(unit)
+		# Добыча и принятие решений ИИ не должны зависеть только от очереди
+		# LOD-бакета. Если тик был пропущен при смене уровня или перестроении
+		# бакетов, здесь проигрывается накопленное время.
+		if unit.simulation_lod != Unit.SimulationLOD.FULL and unit.needs_reliable_offscreen_simulation():
+			var pending_time: float = _clock - unit.lod_last_simulation_time
+			var maximum_gap: float = reduced_tick_interval if unit.needs_frequent_offscreen_simulation() else strategic_tick_interval
+			if pending_time >= maximum_gap:
+				_simulate_pending_time(unit)
 		var unit_chunk := _point_to_chunk(unit.global_position, UNIT_CHUNK_SIZE)
 		if not _unit_chunks.has(unit_chunk):
 			_unit_chunks[unit_chunk] = []
@@ -105,7 +113,7 @@ func _refresh_lods(initial: bool, elapsed: float):
 
 
 func _get_desired_lod(unit: Unit, render_rect: Rect2, reduced_rect: Rect2, strategic_rect: Rect2, local_faction_id: int) -> int:
-	if unit.selected or render_rect.has_point(unit.global_position):
+	if render_rect.has_point(unit.global_position):
 		return Unit.SimulationLOD.FULL
 	var desired_lod := Unit.SimulationLOD.BACKGROUND
 	if reduced_rect.has_point(unit.global_position):
@@ -116,6 +124,13 @@ func _get_desired_lod(unit: Unit, render_rect: Rect2, reduced_rect: Rect2, strat
 	# Приказ, цель которого находится в кадре, важнее текущей позиции юнита.
 	if unit.has_lod_focus_in(render_rect):
 		desired_lod = mini(desired_lod, Unit.SimulationLOD.REDUCED)
+	# Выбор юнита не должен удерживать подробную физику, когда он уже ушёл за
+	# пределы отрисовки. Добытчики всегда получают частый дальний тик, включая
+	# обратный путь к складу и ожидание свободного места.
+	if unit.selected or unit.needs_frequent_offscreen_simulation():
+		desired_lod = mini(desired_lod, Unit.SimulationLOD.REDUCED)
+	elif unit.ai_controlled:
+		desired_lod = mini(desired_lod, Unit.SimulationLOD.STRATEGIC)
 	# Свои жители и явно помеченные командиры/ключевые юниты получают более
 	# частую симуляцию. Неизвестные далёкие фракции остаются в фоне.
 	var importance := unit.simulation_importance

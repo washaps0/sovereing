@@ -34,7 +34,7 @@ const FACTORY_RECIPES := {
 		"inputs": {},
 		"output": &"food",
 		"amount": 1,
-		"time": 4.0,
+		"time": 15.0,
 	},
 	&"mine_stone": {
 		"name": "Камень",
@@ -84,6 +84,7 @@ const FOOD_RECIPES: Array[StringName] = [&"food"]
 const MINE_RECIPES: Array[StringName] = [&"mine_stone", &"mine_coal", &"mine_iron", &"mine_both"]
 const POWER_PLANT_RECIPES: Array[StringName] = [&"electricity"]
 const MILITARY_FACTORY_RECIPES: Array[StringName] = [&"armor", &"rifles"]
+const FACTORY_ELECTRICITY_PER_CYCLE := 1
 
 @export var display_name := "Здание"
 @export var building_kind := "residence"
@@ -645,6 +646,8 @@ func can_produce_selected_recipe() -> bool:
 	for output in _get_recipe_outputs(recipe):
 		if _get_output_space(output) < int(_get_recipe_outputs(recipe)[output]):
 			return false
+	if requires_electricity() and get_network_electricity_amount() < FACTORY_ELECTRICITY_PER_CYCLE:
+		return false
 	var inputs: Dictionary = recipe["inputs"]
 	for resource_type in inputs:
 		if _get_network_amount(resource_type) < int(inputs[resource_type]):
@@ -666,6 +669,8 @@ func get_factory_status_text() -> String:
 			if output == &"electricity":
 				return "Остановлено: запас электричества заполнен (%d/%d)." % [stored_electricity, electricity_capacity]
 			return "Остановлено: на складах нет места по квоте «%s»." % RESOURCE_NAMES.get(output, str(output))
+	if requires_electricity() and get_network_electricity_amount() < FACTORY_ELECTRICITY_PER_CYCLE:
+		return "Остановлено: в энергосети нет электричества."
 	var inputs: Dictionary = recipe["inputs"]
 	for resource_type in inputs:
 		var required := int(inputs[resource_type])
@@ -683,6 +688,8 @@ func produce_selected_recipe() -> bool:
 	if not can_produce_selected_recipe():
 		return false
 	var recipe := get_recipe()
+	if requires_electricity():
+		_take_electricity_from_network(FACTORY_ELECTRICITY_PER_CYCLE)
 	var inputs: Dictionary = recipe["inputs"]
 	for resource_type in inputs:
 		_take_from_network(resource_type, int(inputs[resource_type]))
@@ -719,6 +726,54 @@ func take_electricity(amount: int) -> int:
 	var taken := mini(maxi(amount, 0), stored_electricity)
 	stored_electricity -= taken
 	return taken
+
+
+func requires_electricity() -> bool:
+	# Шахта остаётся доступным источником первого угля, иначе новая экономика
+	# попадает в цикл «для угля нужна энергия, для энергии нужен уголь».
+	return is_factory() and not is_power_plant() and not is_mine()
+
+
+func get_network_electricity_amount() -> int:
+	var total := 0
+	for building in get_tree().get_nodes_in_group("buildings"):
+		if building is Building and building.faction_id == faction_id and building.is_power_plant() and building.is_completed():
+			total += building.stored_electricity
+	return total
+
+
+func get_factory_issues() -> Array[Dictionary]:
+	var issues: Array[Dictionary] = []
+	if not is_factory() or not is_completed() or get_worker_target() <= 0:
+		return issues
+	if occupants.is_empty():
+		issues.append({"kind": &"no_workers"})
+	if requires_electricity() and get_network_electricity_amount() < FACTORY_ELECTRICITY_PER_CYCLE:
+		issues.append({"kind": &"no_electricity"})
+	var recipe := get_recipe()
+	var outputs := _get_recipe_outputs(recipe)
+	for output in outputs:
+		if _get_output_space(output) < int(outputs[output]):
+			# Заполненный внутренний аккумулятор электростанции — штатная пауза,
+			# а не проблема, требующая постоянного предупреждения.
+			if output != &"electricity":
+				issues.append({"kind": &"output_full", "resource": output})
+	var inputs: Dictionary = recipe["inputs"]
+	for resource_type in inputs:
+		if _get_network_amount(resource_type) < int(inputs[resource_type]):
+			issues.append({"kind": &"missing_input", "resource": resource_type})
+	return issues
+
+
+func _take_electricity_from_network(amount: int) -> int:
+	var remaining := maxi(amount, 0)
+	for building in get_tree().get_nodes_in_group("buildings"):
+		if building is not Building or building.faction_id != faction_id or not building.is_power_plant() or not building.is_completed():
+			continue
+		remaining -= building.take_electricity(remaining)
+		if remaining <= 0:
+			break
+	return amount - remaining
 
 
 func _get_warehouses() -> Array[Building]:

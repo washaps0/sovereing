@@ -13,7 +13,6 @@ var current_ui_scale := -1.0
 @onready var summary: Label = $Panel/Scroll/Content/Summary
 @onready var squad_list: ItemList = $Panel/Scroll/Content/SquadList
 @onready var details: Label = $Panel/Scroll/Content/Details
-@onready var select_button: Button = $Panel/Scroll/Content/Actions/SelectSquad
 @onready var organize_button: Button = $Panel/Scroll/Content/Actions/Organize
 @onready var hold_button: Button = $Panel/Scroll/Content/Orders/Hold
 @onready var spread_button: Button = $Panel/Scroll/Content/Orders/Spread
@@ -30,15 +29,14 @@ func _ready():
 	launcher.pressed.connect(toggle_menu)
 	close_button.pressed.connect(close_menu)
 	squad_list.item_selected.connect(_on_squad_selected)
-	squad_list.item_activated.connect(func(_index): _select_current_squad())
-	select_button.pressed.connect(_select_current_squad)
+	squad_list.item_activated.connect(_on_squad_selected)
 	organize_button.pressed.connect(_organize_army)
 	hold_button.pressed.connect(_issue_order.bind(&"hold"))
 	spread_button.pressed.connect(_issue_order.bind(&"spread_out"))
 	watch_button.pressed.connect(_issue_order.bind(&"watch_directions"))
 	regroup_button.pressed.connect(_issue_order.bind(&"regroup"))
 	return_button.pressed.connect(_issue_order.bind(&"return_to_base"))
-	for button in [close_button, select_button, organize_button, hold_button, spread_button, watch_button, regroup_button, return_button]:
+	for button in [close_button, organize_button, hold_button, spread_button, watch_button, regroup_button, return_button]:
 		button.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	_update_layout()
 
@@ -85,15 +83,17 @@ func _update_layout():
 	launcher.position = Vector2(maxf((viewport_size.x - launcher.size.x) * 0.5, 8.0), maxf(viewport_size.y - launcher.size.y - 8.0, 8.0))
 	if not panel.visible:
 		return
-	var panel_size := Vector2(minf(460.0 * ui_scale, maxf(viewport_size.x - 16.0, 1.0)), minf(540.0 * ui_scale, maxf(viewport_size.y - 16.0, 1.0)))
+	var panel_width := minf(330.0 * ui_scale, maxf(viewport_size.x - 16.0, 1.0))
+	var panel_height := minf(470.0 * ui_scale, maxf(viewport_size.y - 80.0, 1.0))
+	var panel_size := Vector2(panel_width, panel_height)
 	panel.custom_minimum_size = Vector2.ZERO
-	panel.position = (viewport_size - panel_size) * 0.5
+	panel.position = Vector2(maxf(viewport_size.x - panel_size.x - 8.0, 8.0), maxf((viewport_size.y - panel_size.y) * 0.5, 8.0))
 	panel.size = panel_size
-	actions.columns = 1 if panel_size.x < 340.0 else 2
-	orders.columns = 1 if panel_size.x < 340.0 else 2
-	var list_height := 80.0 if compact else 125.0
+	actions.columns = 1
+	orders.columns = 1 if panel_size.x < 260.0 else 2
+	var list_height := 76.0 if compact else 112.0
 	squad_list.custom_minimum_size.y = list_height * ui_scale
-	details.custom_minimum_size.y = list_height * ui_scale
+	details.custom_minimum_size.y = (58.0 if compact else 76.0) * ui_scale
 	title.add_theme_font_size_override("font_size", maxi(roundi(17.0 * ui_scale), 12))
 
 
@@ -124,7 +124,7 @@ func _rebuild_squad_list(squads: Dictionary):
 		var members: Array = squads[squad_id]
 		var commander := _find_squad_commander(members)
 		var commander_name := commander.unit_name if is_instance_valid(commander) else "не назначен"
-		var index := squad_list.add_item("Отряд %d — %d/%d • командир: %s" % [squad_id, members.size(), GovernmentBuilding.SQUAD_SIZE, commander_name])
+		var index := squad_list.add_item("Отряд %d • %d/%d • %s" % [squad_id, members.size(), GovernmentBuilding.SQUAD_SIZE, commander_name])
 		squad_list.set_item_metadata(index, squad_id)
 		if squad_id == selected_squad_id:
 			squad_list.select(index)
@@ -137,7 +137,7 @@ func _rebuild_squad_list(squads: Dictionary):
 func _refresh_selected_squad(squads: Dictionary):
 	var members: Array = squads.get(selected_squad_id, [])
 	var has_squad := not members.is_empty()
-	for button in [select_button, hold_button, spread_button, watch_button, regroup_button, return_button]:
+	for button in [hold_button, spread_button, watch_button, regroup_button, return_button]:
 		button.disabled = not has_squad
 	organize_button.disabled = not is_instance_valid(_find_local_government())
 	if not has_squad:
@@ -147,32 +147,38 @@ func _refresh_selected_squad(squads: Dictionary):
 	var armored := 0
 	var armed := 0
 	var at_base := 0
-	var member_lines := PackedStringArray()
 	for member in members:
 		armored += 1 if member.has_armor else 0
 		armed += 1 if member.has_rifle else 0
 		at_base += 1 if is_instance_valid(member.inside_building) and member.inside_building.is_barracks() else 0
-		var equipment := "%s%s" % ["броня " if member.has_armor else "", "автомат" if member.has_rifle else ""]
-		if equipment.strip_edges().is_empty():
-			equipment = "без снаряжения"
-		member_lines.append("• %s — %s, %s" % [member.unit_name, member.military_rank, equipment.strip_edges()])
 	var order_text := commander.get_military_order_name() if is_instance_valid(commander) else "нет командира"
 	var commander_name := commander.unit_name if is_instance_valid(commander) else "не назначен"
-	details.text = "Командир: %s\nПриказ: %s\nНа базе: %d/%d • Броня: %d/%d • Автоматы: %d/%d\n%s" % [commander_name, order_text, at_base, members.size(), armored, members.size(), armed, members.size(), "\n".join(member_lines)]
+	details.text = "Командир: %s • приказ: %s\nНа базе: %d/%d • броня: %d/%d • автоматы: %d/%d" % [commander_name, order_text, at_base, members.size(), armored, members.size(), armed, members.size()]
 
 
 func _on_squad_selected(index: int):
 	if index >= 0 and index < squad_list.item_count:
 		selected_squad_id = int(squad_list.get_item_metadata(index))
 		_refresh_army()
+		_select_current_squad(true)
 
 
-func _select_current_squad():
+func _select_current_squad(focus_camera := false):
 	var members: Array[Unit] = []
 	for soldier in _get_local_soldiers():
 		if soldier.squad_id == selected_squad_id:
 			members.append(soldier)
 	Unit.set_selection(members)
+	if not focus_camera or members.is_empty():
+		return
+	var commander := _find_squad_commander(members)
+	var focus_unit := commander if is_instance_valid(commander) else members[0]
+	var current_world := get_tree().current_scene
+	var camera: Camera2D
+	if is_instance_valid(current_world):
+		camera = current_world.get_node_or_null("Camera2D") as Camera2D
+	if is_instance_valid(camera):
+		camera.global_position = focus_unit.global_position
 
 
 func _organize_army():

@@ -390,6 +390,21 @@ func has_lod_focus_in(rect: Rect2) -> bool:
 	return task == Task.MOVE and rect.has_point(target_position)
 
 
+func needs_frequent_offscreen_simulation() -> bool:
+	# Постоянный приказ добычи должен продолжать весь цикл за камерой:
+	# дойти до ресурса, заполнить инвентарь, разгрузиться и выбрать следующую
+	# цель. Активные работы ИИ также нельзя оставлять на редком фоновом тике.
+	if continuous_harvest:
+		return true
+	return task in [Task.HARVEST, Task.DELIVER_TO_WAREHOUSE, Task.FETCH_FROM_WAREHOUSE] or (ai_controlled and task in [Task.MOVE, Task.BUILD, Task.ENTER_BUILDING])
+
+
+func needs_reliable_offscreen_simulation() -> bool:
+	# Даже без текущего пути ИИ должен продолжать выбирать работу, производить
+	# ресурсы и выходить из дома. Для этого достаточно стратегической частоты.
+	return ai_controlled or needs_frequent_offscreen_simulation()
+
+
 func _move_toward(destination: Vector2, stop_distance := 3.0) -> bool:
 	if global_position.distance_to(destination) <= stop_distance:
 		velocity = Vector2.ZERO
@@ -591,6 +606,11 @@ func _calculate_path(destination: Vector2):
 			for y in range(minimum.y, maximum.y + 1):
 				var cell := Vector2i(x, y)
 				if grid.region.has_point(cell):
+					# Увеличенная зона обхода здания часто захватывает соседнюю
+					# дорогу и раньше перезаписывала её выгодный вес. Завершённая
+					# дорога остаётся проходимым коридором даже рядом со зданием.
+					if road_segments_by_cell.has(cell):
+						continue
 					grid.set_point_weight_scale(cell, BUILDING_AVOIDANCE_WEIGHT)
 
 	var start := _world_to_cell(global_position)
@@ -1937,6 +1957,7 @@ func get_military_assignment_text() -> String:
 func get_military_order_name() -> String:
 	match military_order:
 		&"move": return "движение"
+		&"attack": return "наступление"
 		&"spread_out": return "рассредоточение"
 		&"watch_directions": return "круговой обзор"
 		&"regroup": return "сбор у командира"
