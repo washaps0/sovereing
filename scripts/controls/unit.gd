@@ -468,7 +468,12 @@ func needs_frequent_offscreen_simulation() -> bool:
 	# цель. Активные работы ИИ также нельзя оставлять на редком фоновом тике.
 	if continuous_harvest:
 		return true
-	return task in [Task.HARVEST, Task.DELIVER_TO_WAREHOUSE, Task.FETCH_FROM_WAREHOUSE] or (ai_controlled and task in [Task.MOVE, Task.BUILD, Task.ENTER_BUILDING])
+	# Any unit that is physically travelling must keep the reduced tick rate.
+	# Otherwise a manual move or an entrance order can spend long periods on a
+	# strategic tick and appear to stop whenever the camera leaves the area.
+	if task in [Task.MOVE, Task.HARVEST, Task.BUILD, Task.DELIVER_TO_WAREHOUSE, Task.FETCH_FROM_WAREHOUSE, Task.ENTER_BUILDING]:
+		return true
+	return squad_follow_active and _can_follow_squad_commander()
 
 
 func needs_reliable_offscreen_simulation() -> bool:
@@ -583,15 +588,18 @@ func _finish_manual_move():
 	_spread_squad_after_arrival()
 
 
-func _lod_navigate_toward(destination: Vector2, delta: float, stop_distance := 3.0) -> float:
+func _lod_navigate_toward(destination: Vector2, delta: float, stop_distance := 3.0, repath_distance := 8.0) -> float:
 	var remaining_time := delta
-	# Уже рассчитанный маршрут сохраняется и проходится по тем же точкам. Для
-	# далёкого приказа новый AStar не строится: стратегический LOD идёт напрямую.
-	var path_matches := path_destination.distance_to(destination) <= 8.0
+	# Уже рассчитанный маршрут сохраняется и проходится по тем же точкам. Новый
+	# AStar строится только при заметном изменении цели, а не на каждом LOD-тике.
+	var path_matches := path_destination.distance_to(destination) <= repath_distance
 	if not path_matches:
-		path_points = PackedVector2Array()
-		path_index = 0
-		path_destination = destination
+		# Jobs can change their destination while already off-screen (resource ->
+		# warehouse -> construction, or home -> factory). Build a real route at
+		# that transition instead of walking straight through buildings and then
+		# becoming stuck when FULL simulation is restored.
+		_calculate_path(destination)
+		path_matches = true
 	if path_matches and not path_points.is_empty() and path_index < path_points.size():
 		while path_index < path_points.size() and remaining_time > 0.0:
 			remaining_time = _lod_move_direct(path_points[path_index], remaining_time, 5.0)
@@ -1015,9 +1023,9 @@ func _find_auto_construction() -> Building:
 
 func _get_ai_construction_priority(building: Building) -> int:
 	match building.building_kind:
-		"mine": return 0
-		"power_plant": return 1
-		"food_factory": return 2
+		"power_plant": return 0
+		"food_factory": return 1
+		"mine": return 2
 		"residence": return 3
 		"road": return 4
 		_: return 5
@@ -1372,7 +1380,10 @@ func _lod_process_squad_following(delta: float) -> bool:
 	squad_follow_target = squad_commander_unit.global_position + squad_formation_offset
 	target_position = squad_follow_target
 	task = Task.MOVE
-	_lod_move_direct(squad_follow_target, delta, SQUAD_FOLLOW_STOP_DISTANCE)
+	# The formation target moves every tick. A wider repath threshold keeps the
+	# route useful without rebuilding AStar for every few pixels of commander
+	# movement.
+	_lod_navigate_toward(squad_follow_target, delta, SQUAD_FOLLOW_STOP_DISTANCE, 48.0)
 	if global_position.distance_to(squad_follow_target) <= SQUAD_FOLLOW_STOP_DISTANCE + 0.01:
 		task = Task.IDLE
 		if not squad_formation_offset.is_zero_approx():

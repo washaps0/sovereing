@@ -27,12 +27,15 @@ func _draw():
 		var offensive_points := _as_vector_points(plan.get("offensive_points", []))
 		var has_front := front_points.size() >= 2
 		var has_offensive := bool(plan.get("has_offensive", false))
+		var offensive_active := bool(plan.get("offensive_active", false))
 		if has_front:
 			_draw_order_polyline(front_points, Color(0.15, 0.75, 1.0, 0.92), 5.0)
 		if has_offensive and offensive_points.size() >= 2:
-			_draw_order_polyline(offensive_points, Color(1.0, 0.35, 0.12, 0.95), 5.0)
-		if has_front and has_offensive and offensive_points.size() >= 2:
-			_draw_advance_arrow(_polyline_center(front_points), _polyline_center(offensive_points))
+			var offensive_color := Color(1.0, 0.2, 0.08, 0.98) if offensive_active else Color(1.0, 0.62, 0.18, 0.72)
+			_draw_order_polyline(offensive_points, offensive_color, 5.0)
+		if has_front and offensive_active and offensive_points.size() >= 2:
+			var offensive_center := _polyline_center(offensive_points)
+			_draw_advance_arrow(_nearest_polyline_point(front_points, offensive_center), offensive_center)
 	if order_line_preview_visible and order_line_preview_points.size() >= 2:
 		var preview_color := Color(1.0, 0.4, 0.15, 0.9) if order_line_preview_type == &"offensive_line" else Color(0.2, 0.85, 1.0, 0.9)
 		_draw_order_polyline(order_line_preview_points, preview_color, 4.0)
@@ -48,6 +51,22 @@ func _draw_order_polyline(points: Array[Vector2], color: Color, width: float):
 
 func _polyline_center(points: Array[Vector2]) -> Vector2:
 	return points[int(points.size() / 2)]
+
+
+func _nearest_polyline_point(points: Array[Vector2], target: Vector2) -> Vector2:
+	var nearest := points[0] if not points.is_empty() else target
+	var nearest_distance := INF
+	for index in range(points.size() - 1):
+		var segment := points[index + 1] - points[index]
+		if segment.length_squared() <= 0.001:
+			continue
+		var ratio := clampf((target - points[index]).dot(segment) / segment.length_squared(), 0.0, 1.0)
+		var candidate := points[index] + segment * ratio
+		var distance := candidate.distance_squared_to(target)
+		if distance < nearest_distance:
+			nearest_distance = distance
+			nearest = candidate
+	return nearest
 
 
 func _as_vector_points(raw_points) -> Array[Vector2]:

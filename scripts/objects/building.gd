@@ -215,12 +215,11 @@ func set_lod_active(active: bool):
 		next_construction_sound_time_msec = 0
 	visible = active
 	input_pickable = active
-	monitoring = active
-	# Правительство продолжает миграционную симуляцию вне экрана.
-	set_process(active or is_government())
-	var collision := get_node_or_null("CollisionShape2D") as CollisionShape2D
-	if collision != null:
-		collision.set_deferred("disabled", not active)
+	# Camera distance controls presentation only. Housekeeping, collisions and
+	# area monitoring stay identical off-screen, otherwise builders and workers
+	# can lose their targets merely because the player moved the camera.
+	monitoring = true
+	set_process(true)
 
 
 func _update_overlay_orientation():
