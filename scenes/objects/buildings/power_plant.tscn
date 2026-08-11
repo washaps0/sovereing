@@ -1,0 +1,28 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://scripts/objects/building.gd" id="1_building"]
+[ext_resource type="Texture2D" path="res://assets/objects/buildings/powerplant.png" id="2_power"]
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_power"]
+size = Vector2(65.333336, 29.333334)
+
+[node name="power_plant" type="Area2D"]
+scale = Vector2(1.5, 1.5)
+script = ExtResource("1_building")
+display_name = "Электростанция"
+building_kind = "power_plant"
+wood_required = 30
+stone_required = 15
+build_time = 12.0
+electricity_capacity = 20
+max_workers = 2
+desired_workers = 2
+max_occupants = 0
+
+[node name="Sprite2D" type="Sprite2D" parent="."]
+scale = Vector2(1.5, 1.5)
+texture = ExtResource("2_power")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="."]
+position = Vector2(0, -1.333333)
+shape = SubResource("RectangleShape2D_power")

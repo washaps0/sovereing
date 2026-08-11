@@ -4,6 +4,8 @@ const RESIDENCE_SCENE := preload("res://scenes/objects/buildings/residence.tscn"
 const WAREHOUSE_SCENE := preload("res://scenes/objects/buildings/warehouse.tscn")
 const FACTORY_SCENE := preload("res://scenes/objects/buildings/fabric.tscn")
 const FOOD_FACTORY_SCENE := preload("res://scenes/objects/buildings/food_fabric.tscn")
+const MINE_SCENE := preload("res://scenes/objects/buildings/mine.tscn")
+const POWER_PLANT_SCENE := preload("res://scenes/objects/buildings/power_plant.tscn")
 const GOVERNMENT_SCENE := preload("res://scenes/objects/buildings/government.tscn")
 const ROAD_SCENE := preload("res://scenes/objects/buildings/road.tscn")
 const ROAD_PREVIEW_VALID_COLOR := Color(0.95, 0.8, 0.2, 0.8)
@@ -139,6 +141,8 @@ func _create_interface():
 	_add_build_button(build_box, "Склад — 15 дерева", WAREHOUSE_SCENE)
 	_add_build_button(build_box, "Завод — 25 дерева, 10 камня", FACTORY_SCENE)
 	_add_build_button(build_box, "Пищевой завод — 20 дерева, 5 камня", FOOD_FACTORY_SCENE)
+	_add_build_button(build_box, "Шахта — 20 дерева, 10 камня", MINE_SCENE)
+	_add_build_button(build_box, "Электростанция — 30 дерева, 15 камня", POWER_PLANT_SCENE)
 	_add_build_button(build_box, "Правительство — 30 дерева, 20 камня", GOVERNMENT_SCENE)
 	var road_button := Button.new()
 	road_button.text = "Построить дорогу линией"
@@ -214,7 +218,7 @@ func _create_building_panel():
 	factory_settings = VBoxContainer.new()
 	box.add_child(factory_settings)
 	var worker_target_label := Label.new()
-	worker_target_label.text = "Работников на этом заводе:"
+	worker_target_label.text = "Работников в этом здании:"
 	factory_settings.add_child(worker_target_label)
 	factory_worker_target_input = SpinBox.new()
 	factory_worker_target_input.min_value = 0

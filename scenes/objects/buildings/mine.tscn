@@ -1,0 +1,25 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://scripts/objects/building.gd" id="1_building"]
+[ext_resource type="Texture2D" path="res://assets/objects/buildings/mine.png" id="2_mine"]
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_mine"]
+size = Vector2(48, 30)
+
+[node name="mine" type="Area2D"]
+scale = Vector2(1.5, 1.5)
+script = ExtResource("1_building")
+display_name = "Шахта"
+building_kind = "mine"
+wood_required = 20
+stone_required = 10
+build_time = 10.0
+max_workers = 5
+max_occupants = 0
+
+[node name="Sprite2D" type="Sprite2D" parent="."]
+scale = Vector2(1.5, 1.5)
+texture = ExtResource("2_mine")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="."]
+shape = SubResource("RectangleShape2D_mine")
