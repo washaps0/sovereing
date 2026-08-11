@@ -996,6 +996,23 @@ func force_exit_building(building: Building):
 	task = Task.IDLE
 
 
+func on_building_dismantled(building: Building):
+	for index in range(build_queue.size() - 1, -1, -1):
+		if build_queue[index] == building:
+			build_queue.remove_at(index)
+	var affected := inside_building == building or target_building == building or target_warehouse == building
+	if not affected:
+		return
+	_cancel_task()
+	velocity = Vector2.ZERO
+	target_position = global_position
+	path_points = PackedVector2Array()
+	path_index = 0
+	path_destination = Vector2(INF, INF)
+	idle_check_timer = AUTO_WORK_DELAY_AFTER_MANUAL_ORDER
+	task = Task.IDLE
+
+
 func _start_next_tree():
 	var nearest_resource: Node2D = _find_nearest_resource(mining_job_resource_type)
 	if is_instance_valid(nearest_resource) and is_instance_valid(target_warehouse) and target_warehouse.has_resource_space(mining_job_resource_type):
