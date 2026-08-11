@@ -6,6 +6,8 @@ const UNIT_CHUNK_SIZE := 64.0
 const ROCK_MIN_SPACING := 32.0
 const ROCK_POSITION_SEARCH_STEP := 8.0
 const ROCK_POSITION_SEARCH_RINGS := 16
+const LOD_CATCH_UP_SLICE := 0.5
+const MAX_LOD_CATCH_UP_STEPS := 8
 const TREE_SCENE := preload("res://scenes/objects/tree.tscn")
 const ROCK_SCENE := preload("res://scenes/objects/rock.tscn")
 
@@ -15,10 +17,10 @@ const ROCK_SCENE := preload("res://scenes/objects/rock.tscn")
 @export var reduced_margin := 720.0
 @export var strategic_margin := 2400.0
 @export var reduced_tick_interval := 0.12
-@export var strategic_tick_interval := 0.75
-@export var background_tick_interval := 4.0
+@export var strategic_tick_interval := 0.4
+@export var background_tick_interval := 2.0
 @export_range(1, 64, 1) var object_load_budget_per_frame := 24
-@export_range(8, 512, 8) var lod_unit_budget_per_level_per_frame := 128
+@export_range(8, 512, 8) var lod_unit_budget_per_level_per_frame := 192
 
 var camera: Camera2D
 var _clock := 0.0
@@ -97,9 +99,20 @@ func _tick_lod_bucket(level: int, interval: float, delta: float):
 
 func _simulate_pending_time(unit: Unit):
 	var elapsed := maxf(_clock - unit.lod_last_simulation_time, 0.0)
-	if elapsed > 0.0:
-		unit.simulate_lod(elapsed)
-	unit.lod_last_simulation_time = _clock
+	var remaining := elapsed
+	var catch_up_steps := 0
+	# Один большой вызов обрабатывает только текущее состояние юнита. Дробные
+	# шаги позволяют за один редкий фоновый тик последовательно завершить путь,
+	# добычу, доставку и строительство, не теряя прошедшее игровое время.
+	while remaining > 0.0 and catch_up_steps < MAX_LOD_CATCH_UP_STEPS and is_instance_valid(unit):
+		var step := minf(remaining, LOD_CATCH_UP_SLICE)
+		unit.simulate_lod(step)
+		remaining -= step
+		catch_up_steps += 1
+	if remaining > 0.0 and is_instance_valid(unit):
+		unit.simulate_lod(remaining)
+	if is_instance_valid(unit):
+		unit.lod_last_simulation_time = _clock
 
 
 func _refresh_lods(initial: bool, elapsed: float):

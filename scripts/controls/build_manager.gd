@@ -16,6 +16,8 @@ const DISMANTLE_CONFIRMATION_TIME_MS := 4000
 const PARALLEL_ROAD_ALIGNMENT := 0.985
 const UNIT_PANEL_COLLAPSED_WIDTH := 160.0
 const UNIT_PANEL_EXPANDED_WIDTH := 300.0
+const MILITARY_CURVE_POINT_SPACING := 24.0
+const MAX_MILITARY_CURVE_POINTS := 512
 const STREET_NAMES: Array[String] = [
 	"Садовая", "Лесная", "Полевая", "Речная", "Озёрная",
 	"Центральная", "Северная", "Южная", "Восточная", "Западная",
@@ -56,6 +58,12 @@ var selection_start := Vector2.ZERO
 var selection_additive := false
 var forming := false
 var formation_start := Vector2.ZERO
+var platoon_line_mode: StringName = &""
+var platoon_line_commanders: Array[Unit] = []
+var platoon_line_points: Array[Vector2] = []
+var platoon_line_drawing := false
+var platoon_line_id := ""
+var military_line_sequence := 0
 var building_panel: PanelContainer
 var building_scroll: ScrollContainer
 var building_title: Label
@@ -405,11 +413,21 @@ func _process(delta: float):
 		tactical_overlay.show_selection(selection_start, world.get_global_mouse_position())
 	if forming:
 		tactical_overlay.show_formation(_get_formation_positions(formation_start, world.get_global_mouse_position()))
+	if platoon_line_mode != &"" and platoon_line_drawing and not platoon_line_points.is_empty():
+		var mouse_position := world.get_global_mouse_position()
+		if platoon_line_points.back().distance_to(mouse_position) >= MILITARY_CURVE_POINT_SPACING and platoon_line_points.size() < MAX_MILITARY_CURVE_POINTS:
+			platoon_line_points.append(mouse_position)
+		var preview_points: Array[Vector2] = []
+		preview_points.assign(platoon_line_points)
+		if preview_points.back().distance_to(mouse_position) >= 1.0:
+			preview_points.append(mouse_position)
+		tactical_overlay.show_order_line_preview(preview_points, platoon_line_mode)
 	hud_refresh_timer -= delta
 	if hud_refresh_timer <= 0.0:
 		hud_refresh_timer = 0.2
 		_update_hud()
 		_update_responsive_layout()
+		_refresh_platoon_plan_overlay()
 
 
 func _update_responsive_layout():
@@ -882,6 +900,10 @@ func _on_dismantle_selected_building():
 
 func _input(event: InputEvent):
 	if event is InputEventKey and event.pressed and not event.echo:
+		if event.keycode == KEY_ESCAPE and platoon_line_mode != &"":
+			_cancel_platoon_line_mode()
+			get_viewport().set_input_as_handled()
+			return
 		if is_instance_valid(ghost) and event.keycode in [KEY_Q, KEY_E]:
 			_rotate_building_preview(-PI * 0.5 if event.keycode == KEY_Q else PI * 0.5)
 			get_viewport().set_input_as_handled()
@@ -900,6 +922,8 @@ func _input(event: InputEvent):
 	# панелями, иначе клик по миникарте или кнопке одновременно размещает
 	# выбранную постройку/дорогу на земле под интерфейсом.
 	if event is InputEventMouseButton and get_viewport().gui_get_hovered_control() != null:
+		if platoon_line_mode != &"":
+			_cancel_platoon_line_mode()
 		if not event.pressed:
 			if selecting:
 				selecting = false
@@ -907,6 +931,9 @@ func _input(event: InputEvent):
 			if forming:
 				forming = false
 				tactical_overlay.hide_formation()
+		return
+	if platoon_line_mode != &"" and event is InputEventMouseButton:
+		_handle_platoon_line_input(event)
 		return
 
 	if event is not InputEventMouseButton or not event.pressed:
@@ -977,6 +1004,101 @@ func _handle_tactical_release(event: InputEventMouseButton):
 			if is_instance_valid(network_manager):
 				network_manager.request_unit_command(units, &"move", {"destinations": destinations})
 		get_viewport().set_input_as_handled()
+
+
+func begin_platoon_line_drawing(commanders: Array[Unit], line_type: StringName, line_id: String = "") -> bool:
+	if line_type not in [&"front_line", &"offensive_line"]:
+		return false
+	if line_type == &"front_line" and commanders.is_empty():
+		return false
+	if line_type == &"offensive_line" and line_id.is_empty():
+		return false
+	for commander in commanders:
+		if not is_instance_valid(commander) or not commander.is_squad_commander():
+			return false
+	_cancel_all_placement()
+	if selecting:
+		selecting = false
+		tactical_overlay.hide_selection()
+	if forming:
+		forming = false
+		tactical_overlay.hide_formation()
+	platoon_line_commanders.assign(commanders)
+	platoon_line_mode = line_type
+	platoon_line_id = line_id if not line_id.is_empty() else _make_military_line_id()
+	platoon_line_points.clear()
+	platoon_line_drawing = false
+	return true
+
+
+func _handle_platoon_line_input(event: InputEventMouseButton):
+	if event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
+		_cancel_platoon_line_mode()
+		get_viewport().set_input_as_handled()
+		return
+	if event.button_index != MOUSE_BUTTON_LEFT:
+		return
+	if event.pressed:
+		var line_start: Vector2 = world.get_global_mouse_position()
+		platoon_line_points.clear()
+		platoon_line_points.append(line_start)
+		platoon_line_drawing = true
+		get_viewport().set_input_as_handled()
+		return
+	if not platoon_line_drawing or platoon_line_points.is_empty():
+		return
+	var line_end := world.get_global_mouse_position()
+	if platoon_line_points.back().distance_to(line_end) >= 1.0 and platoon_line_points.size() < MAX_MILITARY_CURVE_POINTS:
+		platoon_line_points.append(line_end)
+	if _get_polyline_length(platoon_line_points) >= 16.0 and not platoon_line_commanders.is_empty():
+		var network_manager := get_node_or_null("/root/NetworkManager")
+		if is_instance_valid(network_manager):
+			network_manager.request_unit_command(platoon_line_commanders, &"military_plan", {
+				"plan_action": &"set_offensive" if platoon_line_mode == &"offensive_line" else &"create_front",
+				"line_id": platoon_line_id,
+				"points": platoon_line_points,
+			})
+		else:
+			world.apply_military_plan_command(
+				_get_local_faction_id(),
+				platoon_line_commanders,
+				&"set_offensive" if platoon_line_mode == &"offensive_line" else &"create_front",
+				{"line_id": platoon_line_id, "points": platoon_line_points}
+			)
+	_cancel_platoon_line_mode()
+	get_viewport().set_input_as_handled()
+
+
+func _get_polyline_length(points: Array[Vector2]) -> float:
+	var result := 0.0
+	for index in range(points.size() - 1):
+		result += points[index].distance_to(points[index + 1])
+	return result
+
+
+func _make_military_line_id() -> String:
+	military_line_sequence += 1
+	return "%d:%d:%d:%d" % [_get_local_faction_id(), multiplayer.get_unique_id(), Time.get_ticks_msec(), military_line_sequence]
+
+
+func _cancel_platoon_line_mode():
+	platoon_line_mode = &""
+	platoon_line_commanders.clear()
+	platoon_line_points.clear()
+	platoon_line_drawing = false
+	platoon_line_id = ""
+	if is_instance_valid(tactical_overlay):
+		tactical_overlay.hide_order_line_preview()
+
+
+func _refresh_platoon_plan_overlay():
+	if not is_instance_valid(tactical_overlay):
+		return
+	var plans: Array[Dictionary] = []
+	var faction_id := _get_local_faction_id()
+	if world.has_method("get_military_front_lines"):
+		plans.assign(world.get_military_front_lines(faction_id))
+	tactical_overlay.set_platoon_plans(plans)
 
 
 func _has_visible_unit_at(point: Vector2) -> bool:
@@ -1458,6 +1580,7 @@ func _cancel_road_mode():
 func _cancel_all_placement():
 	_cancel_building_placement()
 	_cancel_road_mode()
+	_cancel_platoon_line_mode()
 
 
 func _get_local_faction_id() -> int:

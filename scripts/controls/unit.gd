@@ -34,6 +34,7 @@ const UNIT_NAMES: Array[String] = [
 ]
 const FOOD_CONSUMPTION_INTERVAL := 45.0
 const STARVATION_DAMAGE := 10
+const AI_STARVATION_GRACE_MEALS := 3
 const AUTO_WORK_DELAY_AFTER_MANUAL_ORDER := 5.0
 const ROAD_SPEED_MULTIPLIER := 1.5
 const ROAD_SPEED_CHECK_INTERVAL := 0.12
@@ -47,6 +48,7 @@ const SQUAD_FOLLOW_VELOCITY_RESPONSE := 7.0
 const SQUAD_SPREAD_RADIUS := 140.0
 const SQUAD_SPREAD_MIN_DISTANCE := 36.0
 const SQUAD_DEFAULT_OFFSET_RADIUS := 78.0
+const SQUAD_LINE_DEPTH_JITTER := 18.0
 const MILITARY_ROLE_TEMPLATES := {
 	&"rifleman": {"name": "Стрелок", "equipment": {&"rifles": 1, &"armor": 1}},
 	&"medic": {"name": "Медик", "equipment": {&"rifles": 1, &"armor": 1}},
@@ -77,8 +79,16 @@ var squad_formation_offset := Vector2.ZERO
 var squad_follow_target := Vector2.ZERO
 var squad_commander_unit: Unit
 var squad_follow_active := false
+var squad_independent_order := false
+var squad_line_direction := Vector2.ZERO
 var squad_command_timer := 0.0
 var squad_command_timeout := 0.0
+var has_platoon_front_line := false
+var platoon_front_start := Vector2.ZERO
+var platoon_front_end := Vector2.ZERO
+var has_platoon_offensive_line := false
+var platoon_offensive_start := Vector2.ZERO
+var platoon_offensive_end := Vector2.ZERO
 var has_armor := false
 var has_rifle := false
 var facing_direction := Vector2.DOWN
@@ -371,10 +381,11 @@ func _process_food_needs(delta: float):
 			missed_meals = 0
 		else:
 			missed_meals += 1
-			health = maxi(health - STARVATION_DAMAGE, 0)
-			if health <= 0:
-				_die_from_starvation()
-				return
+			if not ai_controlled or missed_meals > AI_STARVATION_GRACE_MEALS:
+				health = maxi(health - STARVATION_DAMAGE, 0)
+				if health <= 0:
+					_die_from_starvation()
+					return
 		food_timer += FOOD_CONSUMPTION_INTERVAL
 		meal_events += 1
 	if meal_events >= 64 and food_timer <= 0.0:
@@ -569,6 +580,7 @@ func _finish_manual_move():
 	velocity = Vector2.ZERO
 	idle_check_timer = AUTO_WORK_DELAY_AFTER_MANUAL_ORDER
 	task = Task.IDLE
+	_spread_squad_after_arrival()
 
 
 func _lod_navigate_toward(destination: Vector2, delta: float, stop_distance := 3.0) -> float:
@@ -927,15 +939,23 @@ func _assign_automatic_job(allow_residence: bool) -> bool:
 				return true
 		return false
 
+	# Для ИИ уже запущенная шахта/энергетика/еда важнее новой стройки.
+	# Стратегия ограничивает число мест, поэтому строители всё равно остаются.
+	var factory: Building = _find_available_factory() if ai_controlled else null
+	if is_instance_valid(factory):
+		command_enter_building(factory)
+		return true
+
 	var construction := _find_auto_construction()
 	if is_instance_valid(construction):
 		command_build(construction)
 		return true
 
-	var factory := _find_available_factory()
-	if is_instance_valid(factory):
-		command_enter_building(factory)
-		return true
+	if not ai_controlled:
+		factory = _find_available_factory()
+		if is_instance_valid(factory):
+			command_enter_building(factory)
+			return true
 
 	if ai_controlled and _assign_ai_harvest_job():
 		return true
@@ -970,37 +990,52 @@ func _assign_ai_harvest_job() -> bool:
 func _find_auto_construction() -> Building:
 	var nearest: Building
 	var nearest_distance := INF
-	var prioritize_roads := false
+	var nearest_priority := 100
+	var active_road_builders := 0
 	if ai_controlled:
 		for candidate in _get_indexed_buildings("road"):
-			if candidate is Building and candidate.faction_id == faction_id and candidate.building_kind == "road" and candidate.under_construction:
-				prioritize_roads = true
-				break
+			if candidate is Building and candidate.under_construction:
+				active_road_builders += candidate.active_builders.size()
 	for building in _get_indexed_buildings():
 		if building is not Building or building.faction_id != faction_id or not building.under_construction:
 			continue
-		if prioritize_roads and building.building_kind != "road":
+		if ai_controlled and building.building_kind == "road" and active_road_builders >= 2:
 			continue
 		var limit: int = 1 if building.building_kind == "road" else building.max_builders
 		if building.active_builders.size() >= limit:
 			continue
+		var priority := _get_ai_construction_priority(building) if ai_controlled else 0
 		var distance := global_position.distance_squared_to(building.global_position)
-		if distance < nearest_distance:
+		if priority < nearest_priority or (priority == nearest_priority and distance < nearest_distance):
+			nearest_priority = priority
 			nearest_distance = distance
 			nearest = building
 	return nearest
 
 
+func _get_ai_construction_priority(building: Building) -> int:
+	match building.building_kind:
+		"mine": return 0
+		"power_plant": return 1
+		"food_factory": return 2
+		"residence": return 3
+		"road": return 4
+		_: return 5
+
+
 func _find_available_factory() -> Building:
 	var nearest: Building
 	var nearest_distance := INF
+	var nearest_priority := 100
 	for building in _get_indexed_buildings():
 		if building is not Building or building.faction_id != faction_id or not building.is_factory() or not building.is_completed():
 			continue
 		if building.occupants.size() + _get_reserved_entry_count(building) >= building.get_worker_target() or not building.can_produce_selected_recipe():
 			continue
+		var priority := 0 if building.is_mine() else (1 if building.is_power_plant() else (2 if building.is_food_factory() else 3))
 		var distance := global_position.distance_squared_to(building.global_position)
-		if distance < nearest_distance:
+		if priority < nearest_priority or (priority == nearest_priority and distance < nearest_distance):
+			nearest_priority = priority
 			nearest_distance = distance
 			nearest = building
 	return nearest
@@ -1227,6 +1262,10 @@ func mobilize(barracks: Building = null) -> bool:
 	platoon_commander_network_id = 0
 	military_order = &"hold"
 	squad_formation_offset = Vector2.ZERO
+	squad_independent_order = false
+	squad_line_direction = Vector2.ZERO
+	has_platoon_front_line = false
+	has_platoon_offensive_line = false
 	_stop_following_squad_commander()
 	refresh_military_visuals()
 	if is_instance_valid(barracks) and settle_in_barracks(barracks):
@@ -1249,6 +1288,10 @@ func demobilize():
 	platoon_commander_network_id = 0
 	military_order = &"hold"
 	squad_formation_offset = Vector2.ZERO
+	squad_independent_order = false
+	squad_line_direction = Vector2.ZERO
+	has_platoon_front_line = false
+	has_platoon_offensive_line = false
 	_stop_following_squad_commander()
 	refresh_military_visuals()
 	velocity = Vector2.ZERO
@@ -1259,6 +1302,10 @@ func demobilize():
 
 func is_squad_commander() -> bool:
 	return is_mobilized and squad_id > 0 and network_id == squad_commander_network_id
+
+
+func is_platoon_commander() -> bool:
+	return is_mobilized and platoon_id > 0 and network_id == platoon_commander_network_id
 
 
 func _process_squad_leadership(delta: float):
@@ -1277,6 +1324,10 @@ func _broadcast_squad_follow_targets():
 	var commander_available := not is_instance_valid(inside_building) and military_order != &"return_to_base"
 	for member in _get_squad_members():
 		if member == self:
+			continue
+		# Личный приказ бойца важнее периодического построения отряда. Без этой
+		# проверки командир каждые несколько кадров возвращал бы его на своё место.
+		if member.squad_independent_order:
 			continue
 		if not commander_available:
 			member._stop_following_squad_commander()
@@ -1330,7 +1381,7 @@ func _lod_process_squad_following(delta: float) -> bool:
 
 
 func _can_follow_squad_commander() -> bool:
-	return is_mobilized and not is_squad_commander() and squad_id > 0 and squad_follow_active and is_instance_valid(squad_commander_unit) and not is_instance_valid(squad_commander_unit.inside_building) and military_order != &"return_to_base" and not is_instance_valid(inside_building)
+	return is_mobilized and not is_squad_commander() and not squad_independent_order and squad_id > 0 and squad_follow_active and is_instance_valid(squad_commander_unit) and not is_instance_valid(squad_commander_unit.inside_building) and military_order != &"return_to_base" and not is_instance_valid(inside_building)
 
 
 func _follow_squad_commander(delta: float):
@@ -1397,7 +1448,7 @@ func issue_squad_order(order: StringName) -> bool:
 	military_order = order
 	match order:
 		&"spread_out":
-			_assign_random_spread_offsets(members)
+			_assign_random_spread_offsets(members, anchor)
 			for member in members:
 				member._command_military_hold(order, member.facing_direction)
 		&"watch_directions":
@@ -1429,9 +1480,41 @@ func issue_squad_order(order: StringName) -> bool:
 	return true
 
 
-func _assign_random_spread_offsets(members: Array[Unit]):
+func _spread_squad_after_arrival():
+	if not is_squad_commander():
+		return
+	var members := _get_squad_members()
+	if members.size() <= 1:
+		return
+	members.sort_custom(func(a: Unit, b: Unit):
+		if a == self:
+			return true
+		if b == self:
+			return false
+		return a.network_id < b.network_id
+	)
+	# Новое построение назначается один раз по прибытии командира. Бойцы затем
+	# расходятся к своим точкам обычным следованием, в том числе в фоновом LOD.
+	for member in members:
+		member.squad_independent_order = false
+	if military_order in [&"front_line", &"offensive_line"] and not squad_line_direction.is_zero_approx():
+		_assign_line_spread_offsets(members, squad_line_direction, target_position)
+	else:
+		_assign_random_spread_offsets(members, target_position)
+	squad_command_timer = SQUAD_COMMAND_INTERVAL
+	_broadcast_squad_follow_targets()
+
+
+func _assign_random_spread_offsets(members: Array[Unit], anchor: Vector2):
 	var offset_rng := RandomNumberGenerator.new()
-	offset_rng.randomize()
+	# Одинаковый приказ даёт одинаковое построение на всех участниках сети.
+	# При перемещении в другую точку схема меняется вместе с координатами цели.
+	offset_rng.seed = (
+		int(network_id) * 1103515245
+		+ int(squad_id) * 12345
+		+ roundi(anchor.x) * 73856093
+		+ roundi(anchor.y) * 19349663
+	)
 	var occupied_offsets: Array[Vector2] = [Vector2.ZERO]
 	for member in members:
 		if member == self:
@@ -1457,6 +1540,32 @@ func _assign_random_spread_offsets(members: Array[Unit]):
 		occupied_offsets.append(chosen_offset)
 
 
+func _assign_line_spread_offsets(members: Array[Unit], line_direction: Vector2, anchor: Vector2):
+	var along := line_direction.normalized()
+	if along.is_zero_approx():
+		_assign_random_spread_offsets(members, anchor)
+		return
+	var depth := along.orthogonal()
+	var offset_rng := RandomNumberGenerator.new()
+	offset_rng.seed = (
+		int(network_id) * 1103515245
+		+ int(squad_id) * 12345
+		+ roundi(anchor.x) * 73856093
+		+ roundi(anchor.y) * 19349663
+	)
+	var slot := 0
+	for member in members:
+		if member == self:
+			member.squad_formation_offset = Vector2.ZERO
+			continue
+		var rank: int = slot / 2 + 1
+		var side := -1.0 if slot % 2 == 0 else 1.0
+		var along_distance := minf(float(rank) * SQUAD_SPREAD_MIN_DISTANCE, SQUAD_SPREAD_RADIUS)
+		var depth_offset := offset_rng.randf_range(-SQUAD_LINE_DEPTH_JITTER, SQUAD_LINE_DEPTH_JITTER)
+		member.squad_formation_offset = along * along_distance * side + depth * depth_offset
+		slot += 1
+
+
 func _get_squad_members() -> Array[Unit]:
 	var members: Array[Unit] = []
 	for unit in _get_indexed_units():
@@ -1465,16 +1574,78 @@ func _get_squad_members() -> Array[Unit]:
 	return members
 
 
-func _command_military_move(destination: Vector2, order: StringName):
+func _get_platoon_squad_commanders() -> Array[Unit]:
+	var commanders: Array[Unit] = []
+	for unit in _get_indexed_units():
+		if is_instance_valid(unit) and unit is Unit and unit.faction_id == faction_id and unit.is_mobilized and unit.platoon_id == platoon_id and unit.is_squad_commander():
+			commanders.append(unit)
+	commanders.sort_custom(func(a: Unit, b: Unit):
+		return a.squad_id < b.squad_id if a.squad_id != b.squad_id else a.network_id < b.network_id
+	)
+	return commanders
+
+
+func issue_platoon_line(line_type: StringName, line_start: Vector2, line_end: Vector2) -> bool:
+	# Общая армейская линия может быть поделена на очень короткие участки,
+	# поэтому минимальная длина здесь меньше, чем у нарисованной игроком линии.
+	if not is_platoon_commander() or line_start.distance_to(line_end) < 0.01:
+		return false
+	if line_type == &"offensive_line" and not has_platoon_front_line:
+		return false
+	if line_type not in [&"front_line", &"offensive_line"]:
+		return false
+	if line_type == &"front_line":
+		has_platoon_front_line = true
+		platoon_front_start = line_start
+		platoon_front_end = line_end
+		# Старая цель наступления относится к предыдущему фронту.
+		has_platoon_offensive_line = false
+		platoon_offensive_start = Vector2.ZERO
+		platoon_offensive_end = Vector2.ZERO
+	else:
+		has_platoon_offensive_line = true
+		platoon_offensive_start = line_start
+		platoon_offensive_end = line_end
+	var commanders := _get_platoon_squad_commanders()
+	if commanders.is_empty():
+		return false
+	var line_direction := (line_end - line_start).normalized()
+	for index in range(commanders.size()):
+		var ratio := 0.5 if commanders.size() == 1 else float(index) / float(commanders.size() - 1)
+		var destination := line_start.lerp(line_end, ratio)
+		commanders[index]._command_military_move(destination, line_type, line_direction)
+	return true
+
+
+func request_platoon_line(line_type: StringName, line_start: Vector2, line_end: Vector2):
+	var network_manager := get_node_or_null("/root/NetworkManager")
+	if is_instance_valid(network_manager):
+		network_manager.request_unit_command([self], &"platoon_line", {
+			"line_type": line_type,
+			"line_start": line_start,
+			"line_end": line_end,
+		})
+	else:
+		issue_platoon_line(line_type, line_start, line_end)
+
+
+func _command_military_move(destination: Vector2, order: StringName, formation_direction: Vector2 = Vector2.ZERO):
 	if not is_mobilized:
 		return
-	command_move(destination)
+	command_move(destination, false, formation_direction)
 	military_order = order
+	if is_squad_commander():
+		for member in _get_squad_members():
+			member.squad_independent_order = false
+		squad_command_timer = SQUAD_COMMAND_INTERVAL
+		_broadcast_squad_follow_targets()
 
 
 func _command_military_hold(order: StringName, direction: Vector2):
 	if not is_mobilized:
 		return
+	squad_independent_order = false
+	squad_line_direction = Vector2.ZERO
 	_cancel_task()
 	velocity = Vector2.ZERO
 	target_position = global_position
@@ -1490,6 +1661,8 @@ func _command_military_hold(order: StringName, direction: Vector2):
 func command_return_to_base():
 	if not is_mobilized:
 		return
+	squad_independent_order = false
+	squad_line_direction = Vector2.ZERO
 	military_order = &"return_to_base"
 	_stop_following_squad_commander()
 	if is_instance_valid(inside_building) and inside_building.is_barracks():
@@ -1777,8 +1950,14 @@ func request_squad_order(order: StringName):
 		issue_squad_order(order)
 
 
-func command_move(destination: Vector2):
+func command_move(destination: Vector2, independent_order: bool = true, formation_direction: Vector2 = Vector2.ZERO):
 	_cancel_task()
+	if is_mobilized and squad_id > 0 and not is_squad_commander():
+		squad_independent_order = independent_order
+		if squad_independent_order:
+			_stop_following_squad_commander()
+	if is_mobilized:
+		squad_line_direction = formation_direction.normalized()
 	target_position = _get_reachable_destination(destination)
 	_calculate_path(target_position)
 	if is_mobilized:
@@ -2014,6 +2193,8 @@ func get_military_order_name() -> String:
 	match military_order:
 		&"move": return "движение"
 		&"attack": return "наступление"
+		&"front_line": return "занимает линию фронта"
+		&"offensive_line": return "движется к линии наступления"
 		&"spread_out": return "рассредоточение"
 		&"watch_directions": return "круговой обзор"
 		&"regroup": return "сбор у командира"
