@@ -79,12 +79,19 @@ const FACTORY_RECIPES := {
 		"outputs": {&"rifles": 1},
 		"time": 6.0,
 	},
+	&"forestry": {
+		"name": "Лесничество",
+		"inputs": {},
+		"outputs": {&"wood": 1},
+		"time": 1.0,
+	},
 }
 const INDUSTRIAL_RECIPES: Array[StringName] = [&"planks", &"tools"]
 const FOOD_RECIPES: Array[StringName] = [&"food"]
 const MINE_RECIPES: Array[StringName] = [&"mine_stone", &"mine_coal", &"mine_iron", &"mine_both"]
 const POWER_PLANT_RECIPES: Array[StringName] = [&"electricity"]
 const MILITARY_FACTORY_RECIPES: Array[StringName] = [&"armor", &"rifles"]
+const FORESTRY_RECIPES: Array[StringName] = [&"forestry"]
 const FACTORY_ELECTRICITY_PER_CYCLE := 1
 
 @export var display_name := "Здание"
@@ -460,7 +467,11 @@ func is_warehouse() -> bool:
 
 
 func is_factory() -> bool:
-	return building_kind in ["factory", "food_factory", "mine", "power_plant", "military_factory"]
+	return building_kind in ["factory", "food_factory", "mine", "power_plant", "military_factory", "lumberjack_cabin"]
+
+
+func is_lumberjack_cabin() -> bool:
+	return building_kind == "lumberjack_cabin"
 
 
 func is_food_factory() -> bool:
@@ -675,6 +686,8 @@ func get_recipe() -> Dictionary:
 
 
 func get_available_recipe_types() -> Array[StringName]:
+	if is_lumberjack_cabin():
+		return FORESTRY_RECIPES
 	if is_food_factory():
 		return FOOD_RECIPES
 	if is_mine():
@@ -799,7 +812,7 @@ func take_electricity(amount: int) -> int:
 func requires_electricity() -> bool:
 	# Шахта остаётся доступным источником первого угля, иначе новая экономика
 	# попадает в цикл «для угля нужна энергия, для энергии нужен уголь».
-	return is_factory() and not is_power_plant() and not is_mine()
+	return is_factory() and not is_power_plant() and not is_mine() and not is_lumberjack_cabin()
 
 
 func get_network_electricity_amount() -> int:

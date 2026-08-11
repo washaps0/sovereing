@@ -270,6 +270,9 @@ func rebuild_spatial_index():
 	for candidate in get_tree().get_nodes_in_group("resources"):
 		if not is_instance_valid(candidate) or candidate is not Node2D or not get_parent().is_ancestor_of(candidate):
 			continue
+		# Forestry trees are simulated and saved by their cabin, not as wild resources.
+		if candidate.has_meta("managed_forestry_tree"):
+			continue
 		if int(candidate.get("lod_record_id")) <= 0:
 			var resource_kind := "tree" if candidate.is_in_group("trees") else "rock"
 			var variant := int(candidate.get("tree_variant")) if resource_kind == "tree" else int(candidate.get("rock_variant"))
@@ -308,6 +311,16 @@ func register_resource_data(resource_kind: String, position: Vector2, variant: i
 	if is_instance_valid(existing_node):
 		existing_node.set("lod_record_id", record_id)
 	return record_id
+
+
+func has_resource_near(position: Vector2, minimum_distance: float) -> bool:
+	var search_area := Rect2(position - Vector2.ONE * minimum_distance, Vector2.ONE * minimum_distance * 2.0)
+	var minimum_distance_squared := minimum_distance * minimum_distance
+	for chunk in _get_chunks_in_rect(search_area, RESOURCE_CHUNK_SIZE):
+		for record in _resource_chunks.get(chunk, []):
+			if int(record.get("amount", 0)) > 0 and position.distance_squared_to(record.get("position", Vector2.ZERO)) < minimum_distance_squared:
+				return true
+	return false
 
 
 func _find_available_rock_position(requested_position: Vector2) -> Vector2:

@@ -31,7 +31,7 @@ const CLIENT_ENTITY_ID_BASE := 10000000000
 const CLIENT_ENTITY_ID_STRIDE := 1000000
 const NETWORK_BUILDING_KINDS: Array[String] = [
 	"residence", "warehouse", "factory", "food_factory", "mine",
-	"power_plant", "barracks", "military_factory", "government", "road",
+	"power_plant", "barracks", "military_factory", "government", "lumberjack_cabin", "road",
 ]
 
 var local_nickname := "Игрок"
