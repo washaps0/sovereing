@@ -3,14 +3,34 @@ extends Node
 const SAVE_DIRECTORY := "user://saves"
 const WORLD_SCENE := "res://scenes/world.tscn"
 const MAIN_MENU_SCENE := "res://scenes/main_menu.tscn"
-const SAVE_VERSION := 6
+const SAVE_VERSION := 9
+const AUTOSAVE_NAME := "Автосохранение"
+const AUTOSAVE_INTERVAL_SECONDS := 120.0
 
 var current_seed := 12345
 var pending_save_data: Dictionary = {}
+var autosave_elapsed := 0.0
+var last_autosave_error := ""
 
 
 func _ready():
 	_ensure_save_directory()
+
+
+func _process(delta: float):
+	var world := get_tree().current_scene
+	if not is_instance_valid(world) or world.scene_file_path != WORLD_SCENE or not world.has_method("get_save_data"):
+		autosave_elapsed = 0.0
+		return
+	var network_manager := get_node_or_null("/root/NetworkManager")
+	if is_instance_valid(network_manager) and network_manager.is_lan_session() and not network_manager.is_host():
+		autosave_elapsed = 0.0
+		return
+	autosave_elapsed += delta
+	if autosave_elapsed < AUTOSAVE_INTERVAL_SECONDS:
+		return
+	autosave_elapsed = fmod(autosave_elapsed, AUTOSAVE_INTERVAL_SECONDS)
+	last_autosave_error = save_game(AUTOSAVE_NAME, world)
 
 
 func seed_from_text(value: String) -> int:
@@ -28,6 +48,8 @@ func start_new_game(seed_value: int, ai_count := 3):
 		network_manager.prepare_singleplayer(seed_value, ai_count)
 	current_seed = seed_value
 	pending_save_data.clear()
+	autosave_elapsed = 0.0
+	last_autosave_error = ""
 	get_tree().paused = false
 	get_tree().change_scene_to_file(WORLD_SCENE)
 
@@ -43,6 +65,8 @@ func request_load(save_path: String) -> String:
 		network_manager.shutdown_network()
 	current_seed = int(data.meta.get("seed", 12345))
 	pending_save_data = data.world
+	autosave_elapsed = 0.0
+	last_autosave_error = ""
 	get_tree().paused = false
 	get_tree().change_scene_to_file(WORLD_SCENE)
 	return ""
@@ -121,6 +145,8 @@ func return_to_main_menu():
 	if is_instance_valid(network_manager):
 		network_manager.shutdown_network()
 	pending_save_data.clear()
+	autosave_elapsed = 0.0
+	last_autosave_error = ""
 	get_tree().paused = false
 	get_tree().change_scene_to_file(MAIN_MENU_SCENE)
 

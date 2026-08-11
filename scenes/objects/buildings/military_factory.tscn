@@ -1,0 +1,26 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://scripts/objects/building.gd" id="1_building"]
+[ext_resource type="Texture2D" path="res://assets/objects/buildings/military_factory.png" id="2_military_factory"]
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_military_factory"]
+size = Vector2(65.333336, 29.333334)
+
+[node name="military_factory" type="Area2D"]
+scale = Vector2(1.5, 1.5)
+script = ExtResource("1_building")
+display_name = "Военный завод"
+building_kind = "military_factory"
+wood_required = 35
+stone_required = 25
+build_time = 14.0
+max_workers = 5
+max_occupants = 0
+
+[node name="Sprite2D" type="Sprite2D" parent="."]
+scale = Vector2(1.5, 1.5)
+texture = ExtResource("2_military_factory")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="."]
+position = Vector2(0, -1.333333)
+shape = SubResource("RectangleShape2D_military_factory")

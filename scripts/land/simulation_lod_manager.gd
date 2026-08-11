@@ -362,12 +362,9 @@ func find_nearest_resource(resource_type: StringName, point: Vector2) -> Node2D:
 	var furthest_radius := 0
 	for chunk in _resource_chunks:
 		furthest_radius = maxi(furthest_radius, maxi(absi(chunk.x - center.x), absi(chunk.y - center.y)))
-	var nearest_busy: Dictionary = {}
-	var nearest_busy_workers := 2147483647
-	var nearest_busy_distance := INF
+	var nearest_record: Dictionary = {}
+	var nearest_distance := INF
 	for radius in range(furthest_radius + 1):
-		var nearest_free: Dictionary = {}
-		var nearest_free_distance := INF
 		for x in range(center.x - radius, center.x + radius + 1):
 			for y in range(center.y - radius, center.y + radius + 1):
 				if radius > 0 and absi(x - center.x) != radius and absi(y - center.y) != radius:
@@ -376,18 +373,37 @@ func find_nearest_resource(resource_type: StringName, point: Vector2) -> Node2D:
 					if int(record.get("amount", 0)) <= 0 or record.get("resource_type") != resource_type:
 						continue
 					var distance: float = point.distance_squared_to(record.position)
-					var resource = record.get("node")
-					var workers: int = resource.get_harvester_count() if is_instance_valid(resource) else 0
-					if workers == 0 and distance < nearest_free_distance:
-						nearest_free = record
-						nearest_free_distance = distance
-					elif workers < nearest_busy_workers or (workers == nearest_busy_workers and distance < nearest_busy_distance):
-						nearest_busy = record
-						nearest_busy_workers = workers
-						nearest_busy_distance = distance
-		if not nearest_free.is_empty():
-			return _get_or_materialize_resource(nearest_free)
-	return _get_or_materialize_resource(nearest_busy)
+					if distance < nearest_distance:
+						nearest_record = record
+						nearest_distance = distance
+		# Завершаем поиск только когда ближайшая граница ещё не просмотренных
+		# чанков дальше уже найденного ресурса. Так сохраняется индексированный
+		# поиск, но занятость дерева или камня больше не уводит юнита вдаль.
+		if not nearest_record.is_empty():
+			var scanned_minimum := Vector2(center - Vector2i.ONE * radius) * RESOURCE_CHUNK_SIZE
+			var scanned_maximum := Vector2(center + Vector2i.ONE * (radius + 1)) * RESOURCE_CHUNK_SIZE
+			var distance_to_unscanned := minf(
+				minf(point.x - scanned_minimum.x, scanned_maximum.x - point.x),
+				minf(point.y - scanned_minimum.y, scanned_maximum.y - point.y)
+			)
+			if nearest_distance <= distance_to_unscanned * distance_to_unscanned:
+				break
+	return _get_or_materialize_resource(nearest_record)
+
+
+func find_resource_near_position(resource_type: StringName, point: Vector2, tolerance := 32.0) -> Node2D:
+	var search_area := Rect2(point - Vector2.ONE * tolerance, Vector2.ONE * tolerance * 2.0)
+	var nearest_record: Dictionary = {}
+	var nearest_distance := tolerance * tolerance
+	for chunk in _get_chunks_in_rect(search_area, RESOURCE_CHUNK_SIZE):
+		for record in _resource_chunks.get(chunk, []):
+			if int(record.get("amount", 0)) <= 0 or record.get("resource_type") != resource_type:
+				continue
+			var distance: float = point.distance_squared_to(record.get("position", Vector2.ZERO))
+			if distance <= nearest_distance:
+				nearest_distance = distance
+				nearest_record = record
+	return _get_or_materialize_resource(nearest_record)
 
 
 func _get_or_materialize_resource(record: Dictionary) -> Node2D:

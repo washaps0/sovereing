@@ -1,10 +1,12 @@
-[gd_scene load_steps=6 format=3 uid="uid://b7ujr3dbqctcr"]
+[gd_scene load_steps=8 format=3 uid="uid://b7ujr3dbqctcr"]
 
 [ext_resource type="Script" uid="uid://4laychbl83fg" path="res://scripts/land/generation.gd" id="1_nnsk1"]
 [ext_resource type="Script" uid="uid://dkbrrpckqawat" path="res://scripts/controls/camera_2d.gd" id="2_rwgxs"]
 [ext_resource type="Script" path="res://scripts/controls/build_manager.gd" id="3_build_manager"]
 [ext_resource type="Script" path="res://scripts/ui/game_pause_menu.gd" id="4_pause_menu"]
 [ext_resource type="Script" path="res://scripts/land/simulation_lod_manager.gd" id="5_lod_manager"]
+[ext_resource type="PackedScene" path="res://scenes/ui/army_menu.tscn" id="6_army_menu"]
+[ext_resource type="PackedScene" path="res://scenes/ui/minimap.tscn" id="7_minimap"]
 
 [node name="world" type="Node2D" unique_id=1067150204]
 script = ExtResource("1_nnsk1")
@@ -27,8 +29,13 @@ script = ExtResource("2_rwgxs")
 script = ExtResource("5_lod_manager")
 
 [node name="BuildManager" type="CanvasLayer" parent="."]
+layer = 115
 script = ExtResource("3_build_manager")
 
 [node name="GamePauseMenu" type="CanvasLayer" parent="."]
 layer = 200
 script = ExtResource("4_pause_menu")
+
+[node name="ArmyMenu" parent="." instance=ExtResource("6_army_menu")]
+
+[node name="MinimapUI" parent="." instance=ExtResource("7_minimap")]

@@ -1,6 +1,9 @@
 extends CanvasLayer
 
 var overlay: Control
+var panel: PanelContainer
+var content_scroll: ScrollContainer
+var title: Label
 var main_box: VBoxContainer
 var save_box: VBoxContainer
 var save_name_input: LineEdit
@@ -8,11 +11,14 @@ var saves_list: ItemList
 var message_label: Label
 var saves: Array[Dictionary] = []
 var save_menu_button: Button
+var current_ui_scale := -1.0
 
 
 func _ready():
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	_create_interface()
+	get_viewport().size_changed.connect(_update_layout)
+	_update_layout()
 	overlay.visible = false
 
 
@@ -27,7 +33,8 @@ func _unhandled_input(event: InputEvent):
 
 func _create_interface():
 	overlay = Control.new()
-	overlay.theme = SovereignUITheme.create_theme()
+	current_ui_scale = SovereignUITheme.get_scale(get_viewport().get_visible_rect().size)
+	overlay.theme = SovereignUITheme.create_theme(current_ui_scale)
 	overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	overlay.mouse_filter = Control.MOUSE_FILTER_STOP
 	add_child(overlay)
@@ -38,16 +45,20 @@ func _create_interface():
 	var center := CenterContainer.new()
 	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	overlay.add_child(center)
-	var panel := PanelContainer.new()
-	panel.custom_minimum_size = Vector2(430, 0)
+	panel = PanelContainer.new()
 	center.add_child(panel)
+	content_scroll = ScrollContainer.new()
+	content_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	content_scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	panel.add_child(content_scroll)
 	var root_box := VBoxContainer.new()
 	root_box.add_theme_constant_override("separation", 10)
-	panel.add_child(root_box)
-	var title := Label.new()
+	root_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	content_scroll.add_child(root_box)
+	title = Label.new()
 	title.text = "ПАУЗА"
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	title.add_theme_font_size_override("font_size", 30)
+	title.add_theme_font_size_override("font_size", 25)
 	title.add_theme_color_override("font_color", SovereignUITheme.ACCENT_BRIGHT)
 	root_box.add_child(title)
 	var network_label := Label.new()
@@ -84,10 +95,11 @@ func _create_interface():
 	list_label.text = "Все сохранения (выберите для перезаписи):"
 	save_box.add_child(list_label)
 	saves_list = ItemList.new()
-	saves_list.custom_minimum_size = Vector2(390, 180)
+	saves_list.custom_minimum_size = Vector2(0, 120)
+	saves_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	saves_list.item_selected.connect(_on_save_selected)
 	save_box.add_child(saves_list)
-	var buttons := HBoxContainer.new()
+	var buttons := VBoxContainer.new()
 	save_box.add_child(buttons)
 	var save_button := Button.new()
 	save_button.text = "Сохранить"
@@ -108,6 +120,7 @@ func _create_interface():
 func _add_main_button(text: String, callback: Callable) -> Button:
 	var button := Button.new()
 	button.text = text
+	button.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	button.pressed.connect(callback)
 	main_box.add_child(button)
 	return button
@@ -128,6 +141,7 @@ func _show_pause_page():
 	main_box.visible = true
 	save_box.visible = false
 	message_label.text = ""
+	_update_layout()
 
 
 func _show_save_page():
@@ -136,6 +150,23 @@ func _show_save_page():
 	message_label.text = ""
 	_refresh_saves()
 	save_name_input.grab_focus()
+	_update_layout()
+
+
+func _update_layout():
+	if not is_instance_valid(panel):
+		return
+	var viewport_size := get_viewport().get_visible_rect().size
+	var ui_scale := SovereignUITheme.get_scale(viewport_size)
+	if not is_equal_approx(current_ui_scale, ui_scale):
+		current_ui_scale = ui_scale
+		overlay.theme = SovereignUITheme.create_theme(ui_scale)
+	var width := minf(400.0 * ui_scale, maxf(viewport_size.x - 16.0, 1.0))
+	var desired_height := (400.0 if save_box.visible else 245.0) * ui_scale
+	var height := minf(desired_height, maxf(viewport_size.y - 16.0, 1.0))
+	panel.custom_minimum_size = Vector2(width, height)
+	content_scroll.custom_minimum_size = Vector2(maxf(width - 18.0, 1.0), maxf(height - 18.0, 1.0))
+	title.add_theme_font_size_override("font_size", maxi(roundi(24.0 * ui_scale), 16))
 
 
 func _refresh_saves():

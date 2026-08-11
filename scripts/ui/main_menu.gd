@@ -1,6 +1,8 @@
 extends Control
 
 var panel: PanelContainer
+var game_title: Label
+var game_subtitle: Label
 var page_scroll: ScrollContainer
 var page_stack: VBoxContainer
 var pages: Array[Control] = []
@@ -33,10 +35,12 @@ var faction_choice_box: VBoxContainer
 var faction_choice_picker: OptionButton
 var updating_faction_choice := false
 var saves: Array[Dictionary] = []
+var current_ui_scale := -1.0
 
 
 func _ready():
-	theme = SovereignUITheme.create_theme()
+	current_ui_scale = SovereignUITheme.get_scale(get_viewport().get_visible_rect().size)
+	theme = SovereignUITheme.create_theme(current_ui_scale)
 	_create_interface()
 	NetworkManager.lobby_state_changed.connect(_on_lobby_state_changed)
 	NetworkManager.connection_state_changed.connect(_on_connection_state_changed)
@@ -60,10 +64,10 @@ func _create_interface():
 
 	var margin := MarginContainer.new()
 	margin.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	margin.add_theme_constant_override("margin_left", 16)
-	margin.add_theme_constant_override("margin_top", 16)
-	margin.add_theme_constant_override("margin_right", 16)
-	margin.add_theme_constant_override("margin_bottom", 16)
+	margin.add_theme_constant_override("margin_left", 8)
+	margin.add_theme_constant_override("margin_top", 8)
+	margin.add_theme_constant_override("margin_right", 8)
+	margin.add_theme_constant_override("margin_bottom", 8)
 	add_child(margin)
 	var center := CenterContainer.new()
 	center.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -75,17 +79,17 @@ func _create_interface():
 	root_box.add_theme_constant_override("separation", 10)
 	panel.add_child(root_box)
 
-	var title := Label.new()
-	title.text = "SOVEREIGN"
-	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	title.add_theme_font_size_override("font_size", 38)
-	title.add_theme_color_override("font_color", SovereignUITheme.ACCENT_BRIGHT)
-	root_box.add_child(title)
-	var subtitle := Label.new()
-	subtitle.text = "Поселение • Государство • Война"
-	subtitle.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	subtitle.add_theme_color_override("font_color", SovereignUITheme.MUTED)
-	root_box.add_child(subtitle)
+	game_title = Label.new()
+	game_title.text = "SOVEREIGN"
+	game_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	game_title.add_theme_font_size_override("font_size", 32)
+	game_title.add_theme_color_override("font_color", SovereignUITheme.ACCENT_BRIGHT)
+	root_box.add_child(game_title)
+	game_subtitle = Label.new()
+	game_subtitle.text = "Поселение • Государство • Война"
+	game_subtitle.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	game_subtitle.add_theme_color_override("font_color", SovereignUITheme.MUTED)
+	root_box.add_child(game_subtitle)
 
 	page_scroll = ScrollContainer.new()
 	page_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
@@ -150,7 +154,7 @@ func _create_load_page():
 	saves_title.text = "Сохранения:"
 	load_page.add_child(saves_title)
 	saves_list = ItemList.new()
-	saves_list.custom_minimum_size = Vector2(0, 180)
+	saves_list.custom_minimum_size = Vector2(0, 130)
 	saves_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	saves_list.item_selected.connect(_on_save_selected)
 	saves_list.item_activated.connect(func(_index): _load_selected_save())
@@ -190,6 +194,7 @@ func _create_host_setup_page():
 	world_label.text = "Мир:"
 	host_setup_page.add_child(world_label)
 	host_save_picker = OptionButton.new()
+	host_save_picker.fit_to_longest_item = false
 	host_save_picker.item_selected.connect(_on_host_world_selected)
 	host_setup_page.add_child(host_save_picker)
 	var seed_label := Label.new()
@@ -248,7 +253,7 @@ func _create_lobby_page():
 	lobby_address_label.add_theme_color_override("font_color", SovereignUITheme.MUTED)
 	lobby_page.add_child(lobby_address_label)
 	lobby_players_list = ItemList.new()
-	lobby_players_list.custom_minimum_size = Vector2(0, 170)
+	lobby_players_list.custom_minimum_size = Vector2(0, 120)
 	lobby_players_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	lobby_players_list.select_mode = ItemList.SELECT_SINGLE
 	lobby_page.add_child(lobby_players_list)
@@ -260,6 +265,7 @@ func _create_lobby_page():
 	faction_choice_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	faction_choice_box.add_child(faction_choice_label)
 	faction_choice_picker = OptionButton.new()
+	faction_choice_picker.fit_to_longest_item = false
 	faction_choice_picker.item_selected.connect(_on_faction_choice_selected)
 	faction_choice_box.add_child(faction_choice_picker)
 	var ready_hint := Label.new()
@@ -287,7 +293,7 @@ func _add_page_title(page: VBoxContainer, value: String):
 	var label := Label.new()
 	label.text = value
 	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	label.add_theme_font_size_override("font_size", 22)
+	label.add_theme_font_size_override("font_size", 18)
 	label.add_theme_color_override("font_color", SovereignUITheme.ACCENT_BRIGHT)
 	page.add_child(label)
 
@@ -296,6 +302,7 @@ func _add_button(page: VBoxContainer, value: String, callback: Callable) -> Butt
 	var button := Button.new()
 	button.text = value
 	button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	button.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	button.pressed.connect(callback)
 	page.add_child(button)
 	return button
@@ -533,7 +540,13 @@ func _update_layout():
 	if panel == null:
 		return
 	var viewport_size := get_viewport().get_visible_rect().size
-	var width := minf(540.0, maxf(viewport_size.x - 32.0, 280.0))
+	var ui_scale := SovereignUITheme.get_scale(viewport_size)
+	if not is_equal_approx(current_ui_scale, ui_scale):
+		current_ui_scale = ui_scale
+		theme = SovereignUITheme.create_theme(ui_scale)
+	var width := minf(500.0 * ui_scale, maxf(viewport_size.x - 16.0, 1.0))
 	panel.custom_minimum_size.x = width
-	page_stack.custom_minimum_size.x = maxf(width - 32.0, 248.0)
-	page_scroll.custom_minimum_size.y = clampf(viewport_size.y - 190.0, 180.0, 430.0)
+	page_stack.custom_minimum_size.x = maxf(width - 18.0 * ui_scale, 1.0)
+	page_scroll.custom_minimum_size.y = minf(maxf(viewport_size.y - 135.0 * ui_scale, 32.0), 400.0 * ui_scale)
+	game_title.add_theme_font_size_override("font_size", maxi(roundi(30.0 * ui_scale), 18))
+	game_subtitle.visible = viewport_size.y >= 300.0

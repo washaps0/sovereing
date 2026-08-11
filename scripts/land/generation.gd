@@ -13,6 +13,8 @@ const FACTORY_SCENE := preload("res://scenes/objects/buildings/fabric.tscn")
 const FOOD_FACTORY_SCENE := preload("res://scenes/objects/buildings/food_fabric.tscn")
 const MINE_SCENE := preload("res://scenes/objects/buildings/mine.tscn")
 const POWER_PLANT_SCENE := preload("res://scenes/objects/buildings/power_plant.tscn")
+const BARRACKS_SCENE := preload("res://scenes/objects/buildings/barracks.tscn")
+const MILITARY_FACTORY_SCENE := preload("res://scenes/objects/buildings/military_factory.tscn")
 const GOVERNMENT_SCENE := preload("res://scenes/objects/buildings/government.tscn")
 const ROAD_SCENE := preload("res://scenes/objects/buildings/road.tscn")
 const SPAWN_MARGIN := 320.0
@@ -145,6 +147,7 @@ func _ready():
 
 
 func get_save_data() -> Dictionary:
+	_ensure_persistent_building_ids()
 	var data := {
 		"buildings": [],
 		"resources": [],
@@ -172,11 +175,11 @@ func get_save_data() -> Dictionary:
 	for unit in get_tree().get_nodes_in_group("units"):
 		if unit is not Unit or not is_ancestor_of(unit):
 			continue
-		var saved_position: Vector2 = unit.global_position
-		if is_instance_valid(unit.inside_building):
-			saved_position = unit.inside_building.get_exit_position(unit)
+		var target_resource_position: Vector2 = unit.global_position
+		if is_instance_valid(unit.target_tree):
+			target_resource_position = unit.target_tree.global_position
 		data.units.append({
-			"position": _vector_to_data(saved_position),
+			"position": _vector_to_data(unit.global_position),
 			"name": unit.unit_name,
 			"faction_id": unit.faction_id,
 			"faction_name": unit.faction_name,
@@ -189,11 +192,56 @@ func get_save_data() -> Dictionary:
 			"produced_items": unit.produced_items,
 			"food_timer": unit.food_timer,
 			"missed_meals": unit.missed_meals,
+			"is_mobilized": unit.is_mobilized,
+			"military_role": str(unit.military_role),
+			"military_rank": unit.military_rank,
+			"squad_id": unit.squad_id,
+			"platoon_id": unit.platoon_id,
+			"squad_commander_network_id": unit.squad_commander_network_id,
+			"platoon_commander_network_id": unit.platoon_commander_network_id,
+			"military_order": str(unit.military_order),
+			"squad_formation_offset": _vector_to_data(unit.squad_formation_offset),
+			"has_armor": unit.has_armor,
+			"has_rifle": unit.has_rifle,
+			"facing_direction": _vector_to_data(unit.facing_direction),
+			"task": int(unit.task),
+			"target_position": _vector_to_data(unit.target_position),
+			"harvest_resource_type": str(unit.harvest_resource_type),
+			"mining_job_resource_type": str(unit.mining_job_resource_type),
+			"continuous_harvest_order": unit.continuous_harvest,
+			"harvest_target_position": _vector_to_data(target_resource_position),
+			"work_timer": unit.work_timer,
+			"idle_check_timer": unit.idle_check_timer,
+			"production_timer": unit.production_timer,
+			"inside_building_network_id": unit.inside_building.network_id if is_instance_valid(unit.inside_building) else 0,
+			"target_building_network_id": unit.target_building.network_id if is_instance_valid(unit.target_building) else 0,
+			"target_warehouse_network_id": unit.target_warehouse.network_id if is_instance_valid(unit.target_warehouse) else 0,
+			"build_job_kind": unit.build_job_kind,
 		})
 	var camera := get_node_or_null("Camera2D") as Camera2D
 	if camera != null:
 		data["camera"] = {"position": _vector_to_data(camera.position), "zoom": _vector_to_data(camera.zoom)}
 	return data
+
+
+func _ensure_persistent_building_ids():
+	var used_ids := {}
+	var buildings_to_assign: Array[Building] = []
+	for candidate in get_tree().get_nodes_in_group("buildings"):
+		if candidate is not Building or not is_ancestor_of(candidate):
+			continue
+		var building := candidate as Building
+		if building.network_id > 0 and not used_ids.has(building.network_id):
+			used_ids[building.network_id] = true
+		else:
+			buildings_to_assign.append(building)
+	var next_id := 1
+	for building in buildings_to_assign:
+		while used_ids.has(next_id):
+			next_id += 1
+		building.network_id = next_id
+		used_ids[next_id] = true
+		next_id += 1
 
 
 func _serialize_building(building: Building) -> Dictionary:
@@ -214,10 +262,13 @@ func _serialize_building(building: Building) -> Dictionary:
 		"stored": {
 			"wood": building.stored_wood,
 			"stone": building.stored_stone,
+			"iron": building.get_stored_resource(&"iron"),
 			"coal": building.get_stored_resource(&"coal"),
 			"planks": building.get_stored_resource(&"planks"),
 			"tools": building.get_stored_resource(&"tools"),
 			"food": building.get_stored_resource(&"food"),
+			"armor": building.get_stored_resource(&"armor"),
+			"rifles": building.get_stored_resource(&"rifles"),
 		},
 		"limits": limits,
 		"recipe": str(building.selected_recipe),
@@ -229,6 +280,8 @@ func _serialize_building(building: Building) -> Dictionary:
 	elif building is GovernmentBuilding:
 		result["migration_target"] = building.migration_target
 		result["migration_timer"] = building.migration_timer
+		result["mobilization_target"] = building.mobilization_target
+		result["mobilization_timer"] = building.mobilization_timer
 	return result
 
 
@@ -295,6 +348,8 @@ func _restore_building(data: Dictionary):
 		"food_factory": scene = FOOD_FACTORY_SCENE
 		"mine": scene = MINE_SCENE
 		"power_plant": scene = POWER_PLANT_SCENE
+		"barracks": scene = BARRACKS_SCENE
+		"military_factory": scene = MILITARY_FACTORY_SCENE
 		"government": scene = GOVERNMENT_SCENE
 		"road": scene = ROAD_SCENE
 		_: scene = RESIDENCE_SCENE
@@ -321,10 +376,13 @@ func _restore_building(data: Dictionary):
 	var stored: Dictionary = data.get("stored", {})
 	building.stored_wood = int(stored.get("wood", 0))
 	building.stored_stone = int(stored.get("stone", 0))
+	building.stored_products[&"iron"] = int(stored.get("iron", 0))
 	building.stored_products[&"coal"] = int(stored.get("coal", 0))
 	building.stored_products[&"planks"] = int(stored.get("planks", 0))
 	building.stored_products[&"tools"] = int(stored.get("tools", 0))
 	building.stored_products[&"food"] = int(stored.get("food", 0))
+	building.stored_products[&"armor"] = int(stored.get("armor", 0))
+	building.stored_products[&"rifles"] = int(stored.get("rifles", 0))
 	building.stored_electricity = clampi(int(data.get("stored_electricity", 0)), 0, building.electricity_capacity)
 	var limits: Dictionary = data.get("limits", {})
 	_restore_storage_limits(building, limits)
@@ -334,6 +392,8 @@ func _restore_building(data: Dictionary):
 	if building is GovernmentBuilding:
 		building.migration_target = int(data.get("migration_target", 0))
 		building.migration_timer = float(data.get("migration_timer", building.migration_interval))
+		building.mobilization_target = int(data.get("mobilization_target", 0))
+		building.mobilization_timer = float(data.get("mobilization_timer", building.mobilization_interval))
 	if bool(data.get("under_construction", false)):
 		building.under_construction = true
 		building.progress_bar.visible = true
@@ -368,8 +428,59 @@ func _restore_unit(data: Dictionary):
 	unit.produced_items = int(data.get("produced_items", 0))
 	unit.food_timer = float(data.get("food_timer", Unit.FOOD_CONSUMPTION_INTERVAL))
 	unit.missed_meals = int(data.get("missed_meals", 0))
+	unit.is_mobilized = bool(data.get("is_mobilized", false))
+	unit.military_role = StringName(data.get("military_role", "rifleman"))
+	unit.military_rank = str(data.get("military_rank", "Солдат" if unit.is_mobilized else "Гражданский"))
+	unit.simulation_importance = 2 if unit.military_role == &"commander" else (1 if unit.is_mobilized else 0)
+	unit.squad_id = int(data.get("squad_id", 0))
+	unit.platoon_id = int(data.get("platoon_id", 0))
+	unit.squad_commander_network_id = int(data.get("squad_commander_network_id", 0))
+	unit.platoon_commander_network_id = int(data.get("platoon_commander_network_id", 0))
+	unit.military_order = StringName(data.get("military_order", "hold"))
+	unit.squad_formation_offset = _data_to_vector(data.get("squad_formation_offset", [0, 0]))
+	unit.has_armor = bool(data.get("has_armor", false))
+	unit.has_rifle = bool(data.get("has_rifle", false))
+	unit.facing_direction = _data_to_vector(data.get("facing_direction", [0, 1])).normalized()
+	if unit.facing_direction.is_zero_approx():
+		unit.facing_direction = Vector2.DOWN
 	unit.position = _data_to_vector(data.get("position", [300, 300]))
 	add_child(unit)
+	unit.idle_check_timer = maxf(float(data.get("idle_check_timer", 1.0)), 0.0)
+	var inside_building := _find_building_by_network_id(int(data.get("inside_building_network_id", 0)), faction_id)
+	if is_instance_valid(inside_building) and unit.restore_inside_building(inside_building, float(data.get("production_timer", 0.0))):
+		return
+
+	var saved_task := clampi(int(data.get("task", Unit.Task.IDLE)), Unit.Task.IDLE, Unit.Task.REST)
+	var target_building := _find_building_by_network_id(int(data.get("target_building_network_id", 0)), faction_id)
+	var target_warehouse := _find_building_by_network_id(int(data.get("target_warehouse_network_id", 0)), faction_id)
+	if saved_task in [Unit.Task.HARVEST, Unit.Task.DELIVER_TO_WAREHOUSE] or bool(data.get("continuous_harvest_order", false)):
+		unit.restore_harvest_order(
+			StringName(data.get("mining_job_resource_type", data.get("harvest_resource_type", "wood"))),
+			bool(data.get("continuous_harvest_order", false)),
+			_data_to_vector(data.get("harvest_target_position", data.get("position", [300, 300]))),
+			target_warehouse,
+			saved_task,
+			float(data.get("work_timer", unit.harvest_interval))
+		)
+	elif saved_task == Unit.Task.MOVE:
+		unit.command_move(_data_to_vector(data.get("target_position", data.get("position", [300, 300]))))
+		if unit.is_mobilized:
+			unit.military_order = StringName(data.get("military_order", "move"))
+	elif saved_task == Unit.Task.ENTER_BUILDING and is_instance_valid(target_building):
+		unit.command_enter_building(target_building)
+	elif saved_task == Unit.Task.BUILD and is_instance_valid(target_building):
+		unit.command_build(target_building)
+	else:
+		unit.task = Unit.Task.IDLE
+
+
+func _find_building_by_network_id(network_id: int, faction_id: int) -> Building:
+	if network_id <= 0:
+		return null
+	for building in get_tree().get_nodes_in_group("buildings"):
+		if building is Building and is_ancestor_of(building) and building.network_id == network_id and building.faction_id == faction_id:
+			return building
+	return null
 
 
 func _restore_storage_limits(building: Building, limits: Dictionary):
@@ -383,8 +494,14 @@ func _restore_storage_limits(building: Building, limits: Dictionary):
 		building.storage_limits[&"food"] = 40
 	if not limits.has("coal"):
 		building.storage_limits[&"coal"] = 40
+	if not limits.has("iron"):
+		building.storage_limits[&"iron"] = 40
+	if not limits.has("armor"):
+		building.storage_limits[&"armor"] = 20
+	if not limits.has("rifles"):
+		building.storage_limits[&"rifles"] = 20
 	var overflow := maxi(building.get_total_storage_limits() - building.storage_capacity, 0)
-	for resource_type in [&"stone", &"wood", &"planks", &"tools", &"food", &"coal"]:
+	for resource_type in [&"stone", &"wood", &"planks", &"tools", &"food", &"coal", &"iron", &"armor", &"rifles"]:
 		if overflow <= 0:
 			break
 		var current_limit := building.get_storage_limit(resource_type)
@@ -484,28 +601,63 @@ func _ensure_ai_starting_plan(faction_id: int, faction_name: String):
 	var base := get_faction_spawn_position(faction_id)
 	var inward_x := 1.0 if faction_id in [0, 2] else -1.0
 	var inward_y := 1.0 if faction_id in [0, 1] else -1.0
-	var street_name := "Стартовая %d" % (faction_id + 1)
-	var rotation_angle := 0.0 if inward_y > 0.0 else PI
+	var block_center := base + Vector2(220.0 * inward_x, 190.0 * inward_y)
+	var district_number := faction_id + 1
+	var north_street := "Квартал %d — Север" % district_number
+	var south_street := "Квартал %d — Юг" % district_number
+	var west_street := "Квартал %d — Запад" % district_number
+	var east_street := "Квартал %d — Восток" % district_number
+	var next_entity_id := faction_id * 1000 + 101
 
+	# Прямоугольник 384×192: шесть горизонтальных и три вертикальных сегмента
+	# на каждой стороне. Торцы соприкасаются без наложения параллельных дорог.
+	for x_index in range(6):
+		var x_offset := -160.0 + x_index * RoadSegment.SEGMENT_LENGTH
+		_spawn_ai_road_segment(block_center + Vector2(x_offset, -96.0), 0.0, faction_id, faction_name, next_entity_id, north_street)
+		next_entity_id += 1
+		_spawn_ai_road_segment(block_center + Vector2(x_offset, 96.0), 0.0, faction_id, faction_name, next_entity_id, south_street)
+		next_entity_id += 1
+	for y_index in range(-1, 2):
+		_spawn_ai_road_segment(block_center + Vector2(-192.0, y_index * RoadSegment.SEGMENT_LENGTH), PI * 0.5, faction_id, faction_name, next_entity_id, west_street)
+		next_entity_id += 1
+		_spawn_ai_road_segment(block_center + Vector2(192.0, y_index * RoadSegment.SEGMENT_LENGTH), PI * 0.5, faction_id, faction_name, next_entity_id, east_street)
+		next_entity_id += 1
+
+	# Здания стоят двумя рядами вдоль северной и южной дорог. Интервалы
+	# рассчитаны по реальным коллизиям самых широких зданий.
+	var building_id := faction_id * 1000 + 201
+	_spawn_ai_building(WAREHOUSE_SCENE, block_center + Vector2(-112.0, -45.0), PI, faction_id, faction_name, building_id, north_street, 1)
+	building_id += 1
+	_spawn_ai_building(RESIDENCE_SCENE, block_center + Vector2(0.0, -45.0), PI, faction_id, faction_name, building_id, north_street, 2)
+	building_id += 1
+	_spawn_ai_building(FACTORY_SCENE, block_center + Vector2(112.0, -45.0), PI, faction_id, faction_name, building_id, north_street, 3)
+	building_id += 1
+	_spawn_ai_building(FOOD_FACTORY_SCENE, block_center + Vector2(-112.0, 45.0), 0.0, faction_id, faction_name, building_id, south_street, 1)
+	building_id += 1
+	_spawn_ai_building(MINE_SCENE, block_center + Vector2(0.0, 45.0), 0.0, faction_id, faction_name, building_id, south_street, 2)
+	building_id += 1
+	_spawn_ai_building(POWER_PLANT_SCENE, block_center + Vector2(112.0, 45.0), 0.0, faction_id, faction_name, building_id, south_street, 3)
+
+
+func _spawn_ai_road_segment(position: Vector2, rotation_angle: float, faction_id: int, faction_name: String, entity_id: int, street_name: String) -> RoadSegment:
 	var road := ROAD_SCENE.instantiate() as RoadSegment
 	road.faction_id = faction_id
 	road.faction_name = faction_name
-	road.network_id = faction_id * 1000 + 101
-	road.name = "Building_%d" % road.network_id
-	road.position = base + Vector2(105.0 * inward_x, 65.0 * inward_y)
+	road.network_id = entity_id
+	road.name = "Building_%d" % entity_id
+	road.position = position
+	road.rotation = rotation_angle
+	if not _is_ai_road_position_free(road):
+		road.free()
+		return null
 	$roads.add_child(road)
-	road.setup(street_name, 0.0)
+	road.setup(street_name, rotation_angle)
+	_clear_resources_around(position, 40.0)
 	road.begin_construction()
-
-	_spawn_ai_building(WAREHOUSE_SCENE, base + Vector2(75.0 * inward_x, 125.0 * inward_y), rotation_angle, faction_id, faction_name, faction_id * 1000 + 102, street_name, 1)
-	_spawn_ai_building(RESIDENCE_SCENE, base + Vector2(150.0 * inward_x, 125.0 * inward_y), rotation_angle, faction_id, faction_name, faction_id * 1000 + 103, street_name, 2)
-	_spawn_ai_building(FACTORY_SCENE, base + Vector2(110.0 * inward_x, 185.0 * inward_y), rotation_angle, faction_id, faction_name, faction_id * 1000 + 104, street_name, 3)
-	_spawn_ai_building(FOOD_FACTORY_SCENE, base + Vector2(195.0 * inward_x, 185.0 * inward_y), rotation_angle, faction_id, faction_name, faction_id * 1000 + 105, street_name, 4)
-	_spawn_ai_building(MINE_SCENE, base + Vector2(110.0 * inward_x, 245.0 * inward_y), rotation_angle, faction_id, faction_name, faction_id * 1000 + 106, street_name, 5)
-	_spawn_ai_building(POWER_PLANT_SCENE, base + Vector2(205.0 * inward_x, 245.0 * inward_y), rotation_angle, faction_id, faction_name, faction_id * 1000 + 107, street_name, 6)
+	return road
 
 
-func _spawn_ai_building(scene: PackedScene, position: Vector2, rotation_angle: float, faction_id: int, faction_name: String, entity_id: int, street_name: String, house_number: int):
+func _spawn_ai_building(scene: PackedScene, position: Vector2, rotation_angle: float, faction_id: int, faction_name: String, entity_id: int, street_name: String, house_number: int) -> Building:
 	var building := scene.instantiate() as Building
 	building.faction_id = faction_id
 	building.faction_name = faction_name
@@ -513,9 +665,67 @@ func _spawn_ai_building(scene: PackedScene, position: Vector2, rotation_angle: f
 	building.name = "Building_%d" % entity_id
 	building.position = position
 	building.rotation = rotation_angle
+	if not _is_ai_building_position_free(building):
+		building.free()
+		return null
 	$buildings.add_child(building)
 	building.set_address(street_name, house_number)
+	var footprint := _get_building_footprint(building)
+	_clear_resources_around(footprint.get_center(), footprint.size.length() * 0.5)
 	building.begin_construction()
+	return building
+
+
+func _is_ai_road_position_free(candidate: RoadSegment) -> bool:
+	var candidate_direction := Vector2.RIGHT.rotated(candidate.rotation)
+	var candidate_footprint := _get_building_footprint(candidate).grow(3.0)
+	for existing in get_tree().get_nodes_in_group("buildings"):
+		if existing is not Building or not is_instance_valid(existing):
+			continue
+		if existing is RoadSegment:
+			var existing_direction := Vector2.RIGHT.rotated(existing.rotation)
+			if absf(candidate_direction.dot(existing_direction)) < 0.985:
+				continue
+			var offset: Vector2 = existing.position - candidate.position
+			if absf(offset.cross(candidate_direction)) >= RoadSegment.MIN_PARALLEL_SPACING:
+				continue
+			if absf(offset.dot(candidate_direction)) < RoadSegment.SEGMENT_LENGTH - 2.0:
+				return false
+		elif candidate_footprint.intersects(_get_building_footprint(existing)):
+			return false
+	return true
+
+
+func _is_ai_building_position_free(candidate: Building) -> bool:
+	var candidate_footprint := _get_building_footprint(candidate).grow(6.0)
+	for existing in get_tree().get_nodes_in_group("buildings"):
+		if existing is Building and is_instance_valid(existing) and candidate_footprint.intersects(_get_building_footprint(existing)):
+			return false
+	return true
+
+
+func _get_building_footprint(building: Building) -> Rect2:
+	var collision := building.get_node_or_null("CollisionShape2D") as CollisionShape2D
+	if collision == null or collision.shape is not RectangleShape2D:
+		return Rect2(building.position - Vector2.ONE * 24.0, Vector2.ONE * 48.0)
+	var combined_scale := (building.scale * collision.scale).abs()
+	var half_size: Vector2 = collision.shape.size * combined_scale * 0.5
+	var angle := building.rotation + collision.rotation
+	var cosine := absf(cos(angle))
+	var sine := absf(sin(angle))
+	var extents := Vector2(cosine * half_size.x + sine * half_size.y, sine * half_size.x + cosine * half_size.y)
+	var center := building.position + (collision.position * building.scale).rotated(building.rotation)
+	return Rect2(center - extents, extents * 2.0)
+
+
+func _clear_resources_around(center: Vector2, radius: float):
+	var lod_manager := get_node_or_null("SimulationLODManager")
+	if is_instance_valid(lod_manager) and lod_manager.has_method("remove_resources_in_radius"):
+		lod_manager.remove_resources_in_radius(center, radius)
+		return
+	for resource in get_tree().get_nodes_in_group("resources"):
+		if is_instance_valid(resource) and resource.global_position.distance_to(center) <= radius:
+			resource.free()
 
 
 func _clear_spawn_area(center: Vector2):

@@ -1,6 +1,9 @@
 class_name Unit
 extends CharacterBody2D
 
+const TREE_HARVEST_SOUND := preload("res://assets/sounds/tree harvest.mp3")
+const ROCK_HARVEST_SOUND := preload("res://assets/sounds/rock harvest.mp3")
+
 enum Task { IDLE, MOVE, HARVEST, BUILD, DELIVER_TO_WAREHOUSE, FETCH_FROM_WAREHOUSE, ENTER_BUILDING, FACTORY_WORK, REST }
 enum SimulationLOD { FULL, REDUCED, STRATEGIC, BACKGROUND }
 
@@ -8,6 +11,10 @@ enum SimulationLOD { FULL, REDUCED, STRATEGIC, BACKGROUND }
 @export var carry_capacity := 10
 @export var interaction_distance := 20.0
 @export var harvest_interval := 0.5
+@export_range(100.0, 1200.0, 10.0) var harvest_sound_max_distance := 480.0
+@export_range(-30.0, 6.0, 0.5) var harvest_sound_volume_db := -7.0
+@export_range(0.5, 1.5, 0.01) var harvest_pitch_min := 0.9
+@export_range(0.5, 1.5, 0.01) var harvest_pitch_max := 1.1
 @export var unit_name := ""
 @export var max_health := 100
 @export var health := 100
@@ -32,6 +39,21 @@ const ROAD_SPEED_MULTIPLIER := 1.5
 const ROAD_PATH_WEIGHT := 1.0 / ROAD_SPEED_MULTIPLIER
 const ROAD_SPEED_CHECK_INTERVAL := 0.12
 const ROAD_PATH_MARGIN := 8.0
+const SQUAD_COMMAND_INTERVAL := 0.3
+const SQUAD_COMMAND_TIMEOUT := 5.0
+const SQUAD_FOLLOW_STOP_DISTANCE := 2.0
+const SQUAD_FOLLOW_SPEED_MULTIPLIER := 1.12
+const SQUAD_FOLLOW_CORRECTION_RATE := 2.2
+const SQUAD_FOLLOW_VELOCITY_RESPONSE := 7.0
+const SQUAD_SPREAD_RADIUS := 140.0
+const SQUAD_SPREAD_MIN_DISTANCE := 36.0
+const SQUAD_DEFAULT_OFFSET_RADIUS := 78.0
+const MILITARY_ROLE_TEMPLATES := {
+	&"rifleman": {"name": "Стрелок", "equipment": {&"rifles": 1, &"armor": 1}},
+	&"medic": {"name": "Медик", "equipment": {&"rifles": 1, &"armor": 1}},
+	&"grenadier": {"name": "Гранатомётчик", "equipment": {&"rifles": 1, &"armor": 1}},
+	&"commander": {"name": "Командир", "equipment": {&"rifles": 1, &"armor": 1}},
+}
 
 static var selected_unit: Unit
 static var selected_units: Array[Unit] = []
@@ -44,6 +66,23 @@ var task := Task.IDLE
 var carried_wood := 0
 var carried_stone := 0
 var profession := "Безработный"
+var is_mobilized := false
+var military_role: StringName = &"rifleman"
+var military_rank := "Гражданский"
+var squad_id := 0
+var platoon_id := 0
+var squad_commander_network_id := 0
+var platoon_commander_network_id := 0
+var military_order: StringName = &"hold"
+var squad_formation_offset := Vector2.ZERO
+var squad_follow_target := Vector2.ZERO
+var squad_commander_unit: Unit
+var squad_follow_active := false
+var squad_command_timer := 0.0
+var squad_command_timeout := 0.0
+var has_armor := false
+var has_rifle := false
+var facing_direction := Vector2.DOWN
 var harvest_resource_type: StringName = &"wood"
 var mining_job_resource_type: StringName = &"wood"
 var work_timer := 0.0
@@ -73,6 +112,8 @@ var lod_manager: Node
 var is_on_road := false
 var road_speed_check_timer := 0.0
 var road_segments_by_cell := {}
+var harvest_sound_players: Array[AudioStreamPlayer2D] = []
+var next_harvest_sound_player := 0
 
 const PATH_CELL_SIZE := 32.0
 const PATH_MAP_SIZE := Vector2i(400, 400)
@@ -86,6 +127,11 @@ const FACTION_COLORS: Array[Color] = [
 
 @onready var selection: Sprite2D = $selection
 @onready var body: Sprite2D = $body
+@onready var armor_sprite: Sprite2D = $armor
+@onready var weapon_sprite: Sprite2D = $weapon
+@onready var beret_sprite: Sprite2D = $beret
+@onready var muzzle_flash_sprite: Sprite2D = $muzzleflash
+@onready var muzzle_flash_timer: Timer = $MuzzleFlashTimer
 @onready var collision_shape: CollisionShape2D = $CollisionShape2D
 
 
@@ -101,7 +147,15 @@ func _ready():
 	last_motion_position = global_position
 	selection.visible = false
 	lod_manager = get_tree().get_first_node_in_group("simulation_lod_manager")
+	for node_name in ["HarvestSound1", "HarvestSound2", "HarvestSound3", "HarvestSound4"]:
+		var sound_player := get_node_or_null(node_name) as AudioStreamPlayer2D
+		if is_instance_valid(sound_player):
+			sound_player.max_distance = harvest_sound_max_distance
+			harvest_sound_players.append(sound_player)
+	muzzle_flash_timer.timeout.connect(_hide_muzzle_flash)
 	_update_faction_visual()
+	_update_equipment_visuals()
+	_set_facing_direction(facing_direction)
 
 
 func configure_faction(new_faction_id: int, new_controller_peer_id: int, is_ai: bool, new_faction_name: String):
@@ -129,6 +183,52 @@ func _update_faction_visual():
 		body.modulate = FACTION_COLORS[faction_id % FACTION_COLORS.size()]
 
 
+func _update_equipment_visuals():
+	if is_instance_valid(armor_sprite):
+		armor_sprite.visible = has_armor
+	if is_instance_valid(weapon_sprite):
+		weapon_sprite.visible = has_rifle
+	if is_instance_valid(beret_sprite):
+		beret_sprite.visible = is_squad_commander()
+	if is_instance_valid(muzzle_flash_sprite) and not has_rifle:
+		muzzle_flash_sprite.visible = false
+
+
+func set_military_equipment(armor_equipped: bool, rifle_equipped: bool):
+	has_armor = armor_equipped
+	has_rifle = rifle_equipped
+	if is_node_ready():
+		_update_equipment_visuals()
+
+
+func refresh_military_visuals():
+	if is_node_ready():
+		_update_equipment_visuals()
+
+
+func _set_facing_direction(direction: Vector2):
+	if direction.is_zero_approx():
+		return
+	facing_direction = direction.normalized()
+	var equipment_rotation := facing_direction.angle() - PI * 0.5
+	if is_instance_valid(weapon_sprite):
+		weapon_sprite.rotation = equipment_rotation
+	if is_instance_valid(muzzle_flash_sprite):
+		muzzle_flash_sprite.rotation = equipment_rotation
+
+
+func play_weapon_muzzle_flash(duration := 0.07):
+	if not has_rifle or not is_instance_valid(muzzle_flash_sprite):
+		return
+	muzzle_flash_sprite.visible = true
+	muzzle_flash_timer.start(maxf(duration, 0.01))
+
+
+func _hide_muzzle_flash():
+	if is_instance_valid(muzzle_flash_sprite):
+		muzzle_flash_sprite.visible = false
+
+
 func _exit_tree():
 	if is_instance_valid(target_tree):
 		target_tree.stop_harvest(self)
@@ -144,6 +244,10 @@ func _physics_process(delta: float):
 	if health <= 0:
 		return
 	_update_road_movement_state(delta)
+	_process_squad_leadership(delta)
+	if _process_squad_following(delta):
+		_update_motion_recovery(delta)
+		return
 	match task:
 		Task.MOVE:
 			if _follow_path():
@@ -203,6 +307,11 @@ func simulate_lod(delta: float):
 	if health <= 0:
 		return
 	_update_road_movement_state(delta)
+	_process_squad_leadership(delta)
+	if _lod_process_squad_following(delta):
+		last_motion_position = global_position
+		stuck_timer = 0.0
+		return
 	match task:
 		Task.MOVE:
 			_lod_process_move(delta)
@@ -285,10 +394,18 @@ func _move_toward(destination: Vector2, stop_distance := 3.0) -> bool:
 	if global_position.distance_to(destination) <= stop_distance:
 		velocity = Vector2.ZERO
 		return true
-	var direction := global_position.direction_to(destination)
-	direction = (direction + _get_separation_force(direction) * 0.75).normalized()
+	var destination_direction := global_position.direction_to(destination)
+	var separation := _get_separation_force(destination_direction) * 0.75
+	# Расхождение с соседями должно уводить юнита в сторону, но не обратно от
+	# текущей точки маршрута. В плотной группе сумма сил раньше могла полностью
+	# развернуть направление движения и вызывать заметный рывок назад.
+	var backward_component := separation.dot(destination_direction)
+	if backward_component < 0.0:
+		separation -= destination_direction * backward_component
+	var direction := (destination_direction + separation).normalized()
 	if direction.is_zero_approx():
-		direction = global_position.direction_to(destination)
+		direction = destination_direction
+	_set_facing_direction(direction)
 	velocity = direction * _get_current_movement_speed()
 	move_and_slide()
 	return false
@@ -405,6 +522,7 @@ func _lod_move_direct(destination: Vector2, delta: float, stop_distance: float) 
 		velocity = Vector2.ZERO
 		return delta
 	var direction := global_position.direction_to(destination)
+	_set_facing_direction(direction)
 	if simulation_lod != SimulationLOD.FULL:
 		# Крупный LOD-шаг может пройти несколько точек маршрута, поэтому статус
 		# дороги обновляется у каждой точки, а не только один раз за весь тик.
@@ -483,7 +601,10 @@ func _calculate_path(destination: Vector2):
 	grid.set_point_weight_scale(start, 1.0)
 	grid.set_point_weight_scale(finish, 1.0)
 	path_points = grid.get_point_path(start, finish)
-	path_index = 0
+	# AStarGrid2D всегда возвращает центр стартовой клетки первой точкой. Юнит
+	# уже находится внутри этой клетки, и движение к её центру иногда выглядит
+	# как короткий рывок назад при создании или перестроении маршрута.
+	path_index = 1 if path_points.size() > 1 else path_points.size()
 
 
 func _apply_road_path_weights(grid: AStarGrid2D):
@@ -541,6 +662,8 @@ func _process_harvest(delta: float):
 
 	work_timer = harvest_interval
 	var harvested: int = target_tree.harvest(1)
+	if harvested > 0:
+		_play_harvest_sound()
 	if harvest_resource_type == &"stone":
 		carried_stone += harvested
 	else:
@@ -548,6 +671,19 @@ func _process_harvest(delta: float):
 	var enough_for_build := is_instance_valid(target_building) and get_carried_resource_amount() >= _get_collection_target(harvest_resource_type)
 	if get_carried_total() >= carry_capacity or enough_for_build or not is_instance_valid(target_tree) or target_tree.is_depleted():
 		_finish_harvest()
+
+
+func _play_harvest_sound():
+	if harvest_sound_players.is_empty():
+		return
+	var player := harvest_sound_players[next_harvest_sound_player]
+	next_harvest_sound_player = (next_harvest_sound_player + 1) % harvest_sound_players.size()
+	player.stream = ROCK_HARVEST_SOUND if harvest_resource_type == &"stone" else TREE_HARVEST_SOUND
+	var minimum_pitch := minf(harvest_pitch_min, harvest_pitch_max)
+	var maximum_pitch := maxf(harvest_pitch_min, harvest_pitch_max)
+	player.pitch_scale = randf_range(minimum_pitch, maximum_pitch)
+	player.volume_db = harvest_sound_volume_db + randf_range(-1.5, 1.0)
+	player.play()
 
 
 func _lod_process_harvest(delta: float):
@@ -586,10 +722,8 @@ func _finish_harvest():
 	target_tree = null
 	if is_instance_valid(target_building):
 		task = Task.BUILD
-	elif continuous_harvest and is_instance_valid(target_warehouse) and get_carried_resource_amount() > 0:
-		task = Task.DELIVER_TO_WAREHOUSE
 	elif continuous_harvest:
-		_start_next_tree()
+		_resume_priority_harvest_order()
 	else:
 		task = Task.IDLE
 
@@ -749,6 +883,8 @@ func _lod_process_warehouse_fetch(delta: float):
 
 func _process_idle(delta: float):
 	velocity = Vector2.ZERO
+	if is_mobilized:
+		_set_automatic_guard_direction()
 	idle_check_timer -= delta
 	if idle_check_timer > 0.0:
 		return
@@ -756,7 +892,30 @@ func _process_idle(delta: float):
 	_assign_automatic_job(true)
 
 
+func _set_automatic_guard_direction():
+	if not squad_formation_offset.is_zero_approx():
+		_set_facing_direction(squad_formation_offset)
+		return
+	var direction_index := posmod(network_id * 5 + squad_id * 3, 16)
+	_set_facing_direction(Vector2.from_angle(-PI * 0.5 + TAU * float(direction_index) / 16.0))
+
+
 func _assign_automatic_job(allow_residence: bool) -> bool:
+	# Выданный приказ добычи остаётся главным заданием, даже если ресурс
+	# закончился или на складе временно нет места. Автоматические стройка,
+	# завод и возвращение домой не могут его перезаписать.
+	if continuous_harvest and not is_mobilized:
+		return _resume_priority_harvest_order()
+	if is_mobilized:
+		# Полевые отряды не возвращаются в казарму самостоятельно. Возврат
+		# выполняется только после приказа командира через меню войск.
+		if military_order == &"return_to_base":
+			var barracks := _find_available_barracks()
+			if is_instance_valid(barracks):
+				command_enter_building(barracks)
+				return true
+		return false
+
 	var construction := _find_auto_construction()
 	if is_instance_valid(construction):
 		command_build(construction)
@@ -800,8 +959,16 @@ func _assign_ai_harvest_job() -> bool:
 func _find_auto_construction() -> Building:
 	var nearest: Building
 	var nearest_distance := INF
+	var prioritize_roads := false
+	if ai_controlled:
+		for candidate in get_tree().get_nodes_in_group("buildings"):
+			if candidate is Building and candidate.faction_id == faction_id and candidate.building_kind == "road" and candidate.under_construction:
+				prioritize_roads = true
+				break
 	for building in get_tree().get_nodes_in_group("buildings"):
 		if building is not Building or building.faction_id != faction_id or not building.under_construction:
+			continue
+		if prioritize_roads and building.building_kind != "road":
 			continue
 		var limit: int = 1 if building.building_kind == "road" else building.max_builders
 		if building.active_builders.size() >= limit:
@@ -833,6 +1000,21 @@ func _find_available_residence() -> Building:
 	var nearest_distance := INF
 	for building in get_tree().get_nodes_in_group("buildings"):
 		if building is not Building or building.faction_id != faction_id or not building.is_residence() or not building.is_completed():
+			continue
+		if building.occupants.size() + _get_reserved_entry_count(building) >= building.max_occupants:
+			continue
+		var distance := global_position.distance_squared_to(building.global_position)
+		if distance < nearest_distance:
+			nearest_distance = distance
+			nearest = building
+	return nearest
+
+
+func _find_available_barracks() -> Building:
+	var nearest: Building
+	var nearest_distance := INF
+	for building in get_tree().get_nodes_in_group("buildings"):
+		if building is not Building or building.faction_id != faction_id or not building.is_barracks() or not building.is_completed():
 			continue
 		if building.occupants.size() + _get_reserved_entry_count(building) >= building.max_occupants:
 			continue
@@ -924,7 +1106,16 @@ func _process_factory_work(delta: float):
 
 func _process_rest(delta: float):
 	velocity = Vector2.ZERO
-	if not is_instance_valid(inside_building) or not inside_building.is_residence():
+	if not is_instance_valid(inside_building):
+		_exit_current_building()
+		task = Task.IDLE
+		return
+	if inside_building.is_barracks():
+		if not is_mobilized:
+			_exit_current_building()
+			task = Task.IDLE
+		return
+	if not inside_building.is_residence() or is_mobilized:
 		_exit_current_building()
 		task = Task.IDLE
 		return
@@ -932,18 +1123,17 @@ func _process_rest(delta: float):
 	if idle_check_timer > 0.0:
 		return
 	idle_check_timer = 2.0
-	if _has_automatic_work():
-		_exit_current_building()
-		task = Task.IDLE
-		_assign_automatic_job(false)
-
-
-func _has_automatic_work() -> bool:
-	return is_instance_valid(_find_auto_construction()) or is_instance_valid(_find_available_factory())
+	# Житель остаётся закреплённым за домом, пока для него действительно не
+	# найдено и не зарезервировано место на стройке или заводе.
+	_assign_automatic_job(false)
 
 
 func command_enter_building(building: Building):
 	if not is_instance_valid(building) or building.faction_id != faction_id or not building.is_completed():
+		return
+	if is_mobilized and not building.is_barracks():
+		return
+	if not is_mobilized and building.is_barracks():
 		return
 	_cancel_task()
 	if building.is_factory():
@@ -954,7 +1144,7 @@ func command_enter_building(building: Building):
 
 
 func settle_in_residence(residence: Building) -> bool:
-	if not is_instance_valid(residence) or not residence.is_residence() or residence.faction_id != faction_id or not residence.is_completed():
+	if is_mobilized or not is_instance_valid(residence) or not residence.is_residence() or residence.faction_id != faction_id or not residence.is_completed():
 		return false
 	_cancel_task()
 	if not residence.try_enter(self):
@@ -967,6 +1157,339 @@ func settle_in_residence(residence: Building) -> bool:
 	task = Task.REST
 	_refresh_lod_presentation()
 	return true
+
+
+func settle_in_barracks(barracks: Building) -> bool:
+	if not is_mobilized or not is_instance_valid(barracks) or not barracks.is_barracks() or barracks.faction_id != faction_id or not barracks.is_completed():
+		return false
+	_cancel_task()
+	if not barracks.try_enter(self):
+		return false
+	inside_building = barracks
+	target_building = barracks
+	global_position = barracks.global_position
+	velocity = Vector2.ZERO
+	idle_check_timer = 2.0
+	task = Task.REST
+	_refresh_lod_presentation()
+	return true
+
+
+func restore_inside_building(building: Building, saved_production_timer: float) -> bool:
+	if not is_instance_valid(building) or building.faction_id != faction_id or not building.is_completed():
+		return false
+	_cancel_task()
+	if not building.try_enter(self):
+		return false
+	inside_building = building
+	target_building = building
+	global_position = building.global_position
+	velocity = Vector2.ZERO
+	target_position = global_position
+	path_points = PackedVector2Array()
+	path_index = 0
+	path_destination = Vector2(INF, INF)
+	if building.is_factory():
+		production_timer = saved_production_timer if saved_production_timer > 0.0 else building.get_production_time()
+		task = Task.FACTORY_WORK
+	else:
+		idle_check_timer = 2.0
+		task = Task.REST
+	_refresh_lod_presentation()
+	return true
+
+
+func mobilize(barracks: Building = null) -> bool:
+	if health <= 0:
+		return false
+	_cancel_task()
+	is_mobilized = true
+	simulation_importance = maxi(simulation_importance, 1)
+	profession = "Военнослужащий"
+	military_role = &"rifleman"
+	military_rank = "Солдат"
+	squad_id = 0
+	platoon_id = 0
+	squad_commander_network_id = 0
+	platoon_commander_network_id = 0
+	military_order = &"hold"
+	squad_formation_offset = Vector2.ZERO
+	_stop_following_squad_commander()
+	refresh_military_visuals()
+	if is_instance_valid(barracks) and settle_in_barracks(barracks):
+		return true
+	idle_check_timer = AUTO_WORK_DELAY_AFTER_MANUAL_ORDER
+	task = Task.IDLE
+	return true
+
+
+func demobilize():
+	_cancel_task()
+	is_mobilized = false
+	simulation_importance = 0
+	profession = "Безработный"
+	military_role = &"rifleman"
+	military_rank = "Гражданский"
+	squad_id = 0
+	platoon_id = 0
+	squad_commander_network_id = 0
+	platoon_commander_network_id = 0
+	military_order = &"hold"
+	squad_formation_offset = Vector2.ZERO
+	_stop_following_squad_commander()
+	refresh_military_visuals()
+	velocity = Vector2.ZERO
+	target_position = global_position
+	idle_check_timer = AUTO_WORK_DELAY_AFTER_MANUAL_ORDER
+	task = Task.IDLE
+
+
+func is_squad_commander() -> bool:
+	return is_mobilized and squad_id > 0 and network_id == squad_commander_network_id
+
+
+func _process_squad_leadership(delta: float):
+	if not is_squad_commander():
+		return
+	squad_command_timer -= delta
+	if squad_command_timer > 0.0:
+		return
+	squad_command_timer = SQUAD_COMMAND_INTERVAL
+	_broadcast_squad_follow_targets()
+
+
+func _broadcast_squad_follow_targets():
+	if not is_squad_commander():
+		return
+	var commander_available := not is_instance_valid(inside_building) and military_order != &"return_to_base"
+	for member in _get_squad_members():
+		if member == self:
+			continue
+		if not commander_available:
+			member._stop_following_squad_commander()
+			continue
+		if member.squad_formation_offset.is_zero_approx():
+			member.squad_formation_offset = member._make_default_squad_offset()
+		if is_instance_valid(member.inside_building):
+			member._exit_current_building()
+			member.target_building = null
+			member.task = Task.IDLE
+		member.military_order = military_order
+		member.squad_commander_unit = self
+		member.squad_follow_target = global_position + member.squad_formation_offset
+		member.squad_follow_active = true
+		member.squad_command_timeout = SQUAD_COMMAND_TIMEOUT
+
+
+func _process_squad_following(delta: float) -> bool:
+	if squad_follow_active and not is_instance_valid(squad_commander_unit):
+		_stop_following_squad_commander()
+	if not _can_follow_squad_commander():
+		return false
+	squad_command_timeout -= delta
+	if squad_command_timeout <= 0.0:
+		_stop_following_squad_commander()
+		return false
+	squad_follow_target = squad_commander_unit.global_position + squad_formation_offset
+	target_position = squad_follow_target
+	_follow_squad_commander(delta)
+	return true
+
+
+func _lod_process_squad_following(delta: float) -> bool:
+	if squad_follow_active and not is_instance_valid(squad_commander_unit):
+		_stop_following_squad_commander()
+	if not _can_follow_squad_commander():
+		return false
+	squad_command_timeout -= delta
+	if squad_command_timeout <= 0.0:
+		_stop_following_squad_commander()
+		return false
+	squad_follow_target = squad_commander_unit.global_position + squad_formation_offset
+	target_position = squad_follow_target
+	task = Task.MOVE
+	_lod_move_direct(squad_follow_target, delta, SQUAD_FOLLOW_STOP_DISTANCE)
+	if global_position.distance_to(squad_follow_target) <= SQUAD_FOLLOW_STOP_DISTANCE + 0.01:
+		task = Task.IDLE
+		if not squad_formation_offset.is_zero_approx():
+			_set_facing_direction(squad_formation_offset)
+	return true
+
+
+func _can_follow_squad_commander() -> bool:
+	return is_mobilized and not is_squad_commander() and squad_id > 0 and squad_follow_active and is_instance_valid(squad_commander_unit) and not is_instance_valid(squad_commander_unit.inside_building) and military_order != &"return_to_base" and not is_instance_valid(inside_building)
+
+
+func _follow_squad_commander(delta: float):
+	var offset_to_target := squad_follow_target - global_position
+	var distance := offset_to_target.length()
+	var commander_velocity := squad_commander_unit.velocity
+	var correction := offset_to_target * SQUAD_FOLLOW_CORRECTION_RATE
+	var movement_speed := _get_current_movement_speed()
+	var catchup_ratio := clampf(distance / 96.0, 0.0, 1.0)
+	var speed_limit := maxf(movement_speed, commander_velocity.length()) * lerpf(1.0, SQUAD_FOLLOW_SPEED_MULTIPLIER, catchup_ratio)
+	var desired_velocity := (commander_velocity + correction).limit_length(speed_limit)
+	if distance <= SQUAD_FOLLOW_STOP_DISTANCE and commander_velocity.length() < 1.0:
+		desired_velocity = Vector2.ZERO
+	var response := 1.0 - exp(-SQUAD_FOLLOW_VELOCITY_RESPONSE * delta)
+	velocity = velocity.lerp(desired_velocity, clampf(response, 0.0, 1.0))
+	if velocity.length() < 0.5 and desired_velocity.is_zero_approx():
+		velocity = Vector2.ZERO
+		task = Task.IDLE
+		# Остановившиеся бойцы автоматически контролируют разные направления.
+		# Случайное смещение построения задаёт каждому устойчивый сектор обзора.
+		if not squad_formation_offset.is_zero_approx():
+			_set_facing_direction(squad_formation_offset)
+		return
+	task = Task.MOVE
+	_set_facing_direction(velocity)
+	move_and_slide()
+
+
+func _stop_following_squad_commander():
+	squad_follow_active = false
+	squad_command_timeout = 0.0
+	squad_commander_unit = null
+	velocity = Vector2.ZERO
+	if task == Task.MOVE:
+		task = Task.IDLE
+
+
+func _make_default_squad_offset() -> Vector2:
+	var offset_rng := RandomNumberGenerator.new()
+	offset_rng.seed = int(network_id) * 1103515245 + int(squad_id) * 12345
+	var offset := Vector2(
+		offset_rng.randf_range(-SQUAD_DEFAULT_OFFSET_RADIUS, SQUAD_DEFAULT_OFFSET_RADIUS),
+		offset_rng.randf_range(-SQUAD_DEFAULT_OFFSET_RADIUS, SQUAD_DEFAULT_OFFSET_RADIUS)
+	).limit_length(SQUAD_DEFAULT_OFFSET_RADIUS)
+	if offset.length() < SQUAD_SPREAD_MIN_DISTANCE:
+		offset = offset.normalized() * SQUAD_SPREAD_MIN_DISTANCE if not offset.is_zero_approx() else Vector2(SQUAD_SPREAD_MIN_DISTANCE, 0.0)
+	return offset
+
+
+func issue_squad_order(order: StringName) -> bool:
+	if not is_squad_commander():
+		return false
+	var members := _get_squad_members()
+	if members.is_empty():
+		return false
+	members.sort_custom(func(a: Unit, b: Unit):
+		if a == self:
+			return true
+		if b == self:
+			return false
+		return a.network_id < b.network_id
+	)
+	var anchor := global_position
+	military_order = order
+	match order:
+		&"spread_out":
+			_assign_random_spread_offsets(members)
+			for member in members:
+				member._command_military_hold(order, member.facing_direction)
+		&"watch_directions":
+			for index in range(members.size()):
+				var direction := Vector2.from_angle(-PI * 0.5 + TAU * float(index) / float(members.size()))
+				if members[index] != self and members[index].squad_formation_offset.is_zero_approx():
+					members[index].squad_formation_offset = members[index]._make_default_squad_offset()
+				members[index]._command_military_hold(order, direction)
+		&"regroup":
+			var columns := 3
+			for index in range(members.size()):
+				var offset := Vector2.ZERO
+				if index > 0:
+					var slot := index - 1
+					var row: int = slot / columns
+					var column := slot % columns
+					offset = Vector2((column - 1) * 18.0, (row + 1) * 18.0)
+				members[index].squad_formation_offset = offset
+				members[index]._command_military_hold(order, members[index].facing_direction)
+		&"return_to_base":
+			for member in members:
+				member.command_return_to_base()
+		_:
+			for member in members:
+				member.squad_formation_offset = (member.global_position - anchor).limit_length(SQUAD_SPREAD_RADIUS)
+				member._command_military_hold(&"hold", member.facing_direction)
+	squad_command_timer = SQUAD_COMMAND_INTERVAL
+	_broadcast_squad_follow_targets()
+	return true
+
+
+func _assign_random_spread_offsets(members: Array[Unit]):
+	var offset_rng := RandomNumberGenerator.new()
+	offset_rng.randomize()
+	var occupied_offsets: Array[Vector2] = [Vector2.ZERO]
+	for member in members:
+		if member == self:
+			member.squad_formation_offset = Vector2.ZERO
+			continue
+		var chosen_offset := member._make_default_squad_offset()
+		for _attempt in range(32):
+			var candidate := Vector2(
+				offset_rng.randf_range(-SQUAD_SPREAD_RADIUS, SQUAD_SPREAD_RADIUS),
+				offset_rng.randf_range(-SQUAD_SPREAD_RADIUS, SQUAD_SPREAD_RADIUS)
+			)
+			if candidate.length() < SQUAD_SPREAD_MIN_DISTANCE or candidate.length() > SQUAD_SPREAD_RADIUS:
+				continue
+			var overlaps := false
+			for occupied in occupied_offsets:
+				if candidate.distance_to(occupied) < SQUAD_SPREAD_MIN_DISTANCE:
+					overlaps = true
+					break
+			if not overlaps:
+				chosen_offset = candidate
+				break
+		member.squad_formation_offset = chosen_offset
+		occupied_offsets.append(chosen_offset)
+
+
+func _get_squad_members() -> Array[Unit]:
+	var members: Array[Unit] = []
+	for unit in get_tree().get_nodes_in_group("units"):
+		if unit is Unit and unit.faction_id == faction_id and unit.is_mobilized and unit.squad_id == squad_id:
+			members.append(unit)
+	return members
+
+
+func _command_military_move(destination: Vector2, order: StringName):
+	if not is_mobilized:
+		return
+	command_move(destination)
+	military_order = order
+
+
+func _command_military_hold(order: StringName, direction: Vector2):
+	if not is_mobilized:
+		return
+	_cancel_task()
+	velocity = Vector2.ZERO
+	target_position = global_position
+	path_points = PackedVector2Array()
+	path_index = 0
+	path_destination = Vector2(INF, INF)
+	military_order = order
+	idle_check_timer = AUTO_WORK_DELAY_AFTER_MANUAL_ORDER
+	task = Task.IDLE
+	_set_facing_direction(direction)
+
+
+func command_return_to_base():
+	if not is_mobilized:
+		return
+	military_order = &"return_to_base"
+	_stop_following_squad_commander()
+	if is_instance_valid(inside_building) and inside_building.is_barracks():
+		return
+	var barracks := _find_available_barracks()
+	if is_instance_valid(barracks):
+		command_enter_building(barracks)
+		military_order = &"return_to_base"
+	else:
+		_cancel_task()
+		velocity = Vector2.ZERO
+		idle_check_timer = 1.0
+		task = Task.IDLE
 
 
 func _exit_current_building():
@@ -990,6 +1513,8 @@ func _exit_current_building():
 func force_exit_building(building: Building):
 	if inside_building != building:
 		return
+	if is_mobilized and building.is_barracks():
+		military_order = &"hold"
 	_exit_current_building()
 	target_building = null
 	idle_check_timer = AUTO_WORK_DELAY_AFTER_MANUAL_ORDER
@@ -1014,12 +1539,41 @@ func on_building_dismantled(building: Building):
 
 
 func _start_next_tree():
+	if continuous_harvest:
+		_resume_priority_harvest_order()
+		return
 	var nearest_resource: Node2D = _find_nearest_resource(mining_job_resource_type)
-	if is_instance_valid(nearest_resource) and is_instance_valid(target_warehouse) and target_warehouse.has_resource_space(mining_job_resource_type):
+	if is_instance_valid(nearest_resource):
 		_start_harvesting(nearest_resource)
 	else:
-		_release_warehouse()
 		task = Task.IDLE
+
+
+func _resume_priority_harvest_order() -> bool:
+	if not continuous_harvest or is_mobilized:
+		return false
+	harvest_resource_type = mining_job_resource_type
+	if get_carried_resource_amount() > 0:
+		if not is_instance_valid(target_warehouse) or not target_warehouse.has_resource_space(harvest_resource_type):
+			_release_warehouse()
+			target_warehouse = _find_warehouse_with_space(harvest_resource_type)
+		if is_instance_valid(target_warehouse):
+			task = Task.DELIVER_TO_WAREHOUSE
+		else:
+			velocity = Vector2.ZERO
+			task = Task.IDLE
+		return true
+	if get_carried_total() >= carry_capacity:
+		velocity = Vector2.ZERO
+		task = Task.IDLE
+		return true
+	var nearest_resource := _find_nearest_resource(mining_job_resource_type)
+	if is_instance_valid(nearest_resource):
+		_start_harvesting(nearest_resource)
+	else:
+		velocity = Vector2.ZERO
+		task = Task.IDLE
+	return true
 
 
 func _start_harvesting(tree: Node2D):
@@ -1041,16 +1595,8 @@ func _find_nearest_resource(resource_type: StringName) -> Node2D:
 			return indexed_resource
 	var nearest_tree: Node2D
 	var nearest_distance := INF
-	var fewest_workers := 2147483647
 	for tree in get_tree().get_nodes_in_group("resources"):
 		if not is_instance_valid(tree) or tree.is_depleted() or tree.get_resource_type() != resource_type:
-			continue
-		fewest_workers = mini(fewest_workers, tree.get_harvester_count())
-
-	for tree in get_tree().get_nodes_in_group("resources"):
-		if not is_instance_valid(tree) or tree.is_depleted() or tree.get_resource_type() != resource_type:
-			continue
-		if tree.get_harvester_count() > fewest_workers:
 			continue
 		var distance := global_position.distance_squared_to(tree.global_position)
 		if distance < nearest_distance:
@@ -1059,11 +1605,41 @@ func _find_nearest_resource(resource_type: StringName) -> Node2D:
 	return nearest_tree
 
 
+func _find_resource_near_position(resource_type: StringName, saved_position: Vector2) -> Node2D:
+	if is_instance_valid(lod_manager) and lod_manager.has_method("find_resource_near_position"):
+		var indexed_resource = lod_manager.find_resource_near_position(resource_type, saved_position)
+		if is_instance_valid(indexed_resource):
+			return indexed_resource
+	var nearest_resource: Node2D
+	var nearest_distance := 32.0 * 32.0
+	for resource in get_tree().get_nodes_in_group("resources"):
+		if not is_instance_valid(resource) or resource.is_depleted() or resource.get_resource_type() != resource_type:
+			continue
+		var distance := saved_position.distance_squared_to(resource.global_position)
+		if distance <= nearest_distance:
+			nearest_distance = distance
+			nearest_resource = resource
+	return nearest_resource
+
+
 func _find_free_warehouse(resource_type: StringName) -> Building:
 	var nearest: Building
 	var nearest_distance := INF
 	for building in get_tree().get_nodes_in_group("buildings"):
 		if building is not Building or building.faction_id != faction_id or not building.can_accept_worker(resource_type):
+			continue
+		var distance := global_position.distance_squared_to(building.global_position)
+		if distance < nearest_distance:
+			nearest_distance = distance
+			nearest = building
+	return nearest
+
+
+func _find_warehouse_with_space(resource_type: StringName) -> Building:
+	var nearest: Building
+	var nearest_distance := INF
+	for building in get_tree().get_nodes_in_group("buildings"):
+		if building is not Building or building.faction_id != faction_id or not building.is_warehouse() or not building.is_completed() or not building.has_resource_space(resource_type):
 			continue
 		var distance := global_position.distance_squared_to(building.global_position)
 		if distance < nearest_distance:
@@ -1129,6 +1705,8 @@ func command_move(destination: Vector2):
 	_cancel_task()
 	target_position = _get_reachable_destination(destination)
 	_calculate_path(target_position)
+	if is_mobilized:
+		military_order = &"move"
 	task = Task.MOVE
 
 
@@ -1140,19 +1718,64 @@ func _get_reachable_destination(destination: Vector2) -> Vector2:
 
 
 func command_harvest(tree: Node2D):
+	if is_mobilized:
+		return
 	_cancel_task()
 	harvest_resource_type = tree.get_resource_type()
 	mining_job_resource_type = harvest_resource_type
 	profession = "Каменотёс" if harvest_resource_type == &"stone" else "Лесоруб"
+	# Сам приказ постоянный и не зависит от доступного лимита работников склада.
+	# Если зарезервировать место не удалось, юнит всё равно добывает и разгружает
+	# ресурс в ближайший подходящий склад как обычный доставщик.
+	continuous_harvest = true
 	var warehouse := _find_free_warehouse(harvest_resource_type)
-	if continuous_harvest_mode and is_instance_valid(warehouse) and warehouse.assign_worker(self):
+	if is_instance_valid(warehouse) and warehouse.assign_worker(self):
 		target_warehouse = warehouse
+	else:
+		target_warehouse = _find_warehouse_with_space(harvest_resource_type)
+	if get_carried_total() >= carry_capacity:
+		_resume_priority_harvest_order()
+	else:
+		_start_harvesting(tree)
+
+
+func restore_harvest_order(resource_type: StringName, should_repeat: bool, saved_resource_position: Vector2, saved_warehouse: Building, saved_task: int, saved_work_timer: float) -> bool:
+	if is_mobilized or resource_type not in [&"wood", &"stone"]:
+		return false
+	_cancel_task()
+	harvest_resource_type = resource_type
+	mining_job_resource_type = resource_type
+	profession = "Каменотёс" if resource_type == &"stone" else "Лесоруб"
+	if should_repeat:
 		continuous_harvest = true
-	_start_harvesting(tree)
+		var warehouse := saved_warehouse
+		if not is_instance_valid(warehouse) or not warehouse.can_accept_worker(resource_type):
+			warehouse = _find_free_warehouse(resource_type)
+		if is_instance_valid(warehouse) and warehouse.assign_worker(self):
+			target_warehouse = warehouse
+		else:
+			target_warehouse = _find_warehouse_with_space(resource_type)
+	if continuous_harvest and saved_task != Task.HARVEST and get_carried_resource_amount() > 0:
+		_resume_priority_harvest_order()
+		return true
+	var resource := _find_resource_near_position(resource_type, saved_resource_position)
+	if not is_instance_valid(resource):
+		resource = _find_nearest_resource(resource_type)
+	if is_instance_valid(resource):
+		_start_harvesting(resource)
+		if saved_work_timer > 0.0:
+			work_timer = clampf(saved_work_timer, 0.01, harvest_interval)
+		return true
+	if continuous_harvest:
+		_resume_priority_harvest_order()
+		return true
+	_release_warehouse()
+	task = Task.IDLE
+	return false
 
 
 func command_build(building: Building):
-	if not is_instance_valid(building) or building.faction_id != faction_id:
+	if is_mobilized or not is_instance_valid(building) or building.faction_id != faction_id:
 		return
 	_cancel_task()
 	profession = "Строитель"
@@ -1165,6 +1788,8 @@ func command_build(building: Building):
 
 
 func command_build_line(segments: Array[Building]):
+	if is_mobilized:
+		return
 	_cancel_task()
 	var own_segments: Array[Building] = []
 	for segment in segments:
@@ -1285,12 +1910,49 @@ func get_task_text() -> String:
 		Task.FETCH_FROM_WAREHOUSE: return "Берёт материал со склада"
 		Task.ENTER_BUILDING: return "Заходит в здание"
 		Task.FACTORY_WORK: return "Работает на заводе"
-		Task.REST: return "Находится дома"
-		_: return "Свободен"
+		Task.REST: return "В казарме" if is_mobilized else "Находится дома"
+		_:
+			if continuous_harvest:
+				return "Ждёт место на складе" if get_carried_resource_amount() > 0 else "Ждёт ресурс для добычи"
+			return "Свободен"
 
 
 func get_profession_text() -> String:
-	return profession
+	return "%s • %s" % [military_rank, get_military_role_name()] if is_mobilized else profession
+
+
+func get_military_role_name() -> String:
+	var template: Dictionary = MILITARY_ROLE_TEMPLATES.get(military_role, MILITARY_ROLE_TEMPLATES[&"rifleman"])
+	return str(template["name"])
+
+
+func get_military_assignment_text() -> String:
+	if not is_mobilized:
+		return "Не мобилизован"
+	var squad_text := "без отряда" if squad_id <= 0 else "отряд %d" % squad_id
+	var platoon_text := "без взвода" if platoon_id <= 0 else "взвод %d" % platoon_id
+	return "%s, %s • %s • %s" % [squad_text, platoon_text, military_rank, get_military_order_name()]
+
+
+func get_military_order_name() -> String:
+	match military_order:
+		&"move": return "движение"
+		&"spread_out": return "рассредоточение"
+		&"watch_directions": return "круговой обзор"
+		&"regroup": return "сбор у командира"
+		&"return_to_base": return "возврат на базу"
+		_: return "удерживать позицию"
+
+
+func get_military_equipment_text() -> String:
+	if not has_armor and not has_rifle:
+		return "Нет"
+	var items := PackedStringArray()
+	if has_armor:
+		items.append("броня")
+	if has_rifle:
+		items.append("автомат")
+	return ", ".join(items)
 
 
 func get_carried_total() -> int:

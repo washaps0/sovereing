@@ -1,0 +1,110 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://scripts/ui/army_menu.gd" id="1_army"]
+
+[node name="ArmyMenu" type="CanvasLayer"]
+layer = 120
+script = ExtResource("1_army")
+
+[node name="Launcher" type="Button" parent="."]
+offset_left = 385.0
+offset_top = 16.0
+offset_right = 590.0
+offset_bottom = 50.0
+text = "Управление войсками (M)"
+
+[node name="Panel" type="PanelContainer" parent="."]
+visible = false
+offset_left = 326.0
+offset_top = 26.0
+offset_right = 826.0
+offset_bottom = 616.0
+
+[node name="Scroll" type="ScrollContainer" parent="Panel"]
+layout_mode = 2
+horizontal_scroll_mode = 0
+vertical_scroll_mode = 1
+
+[node name="Content" type="VBoxContainer" parent="Panel/Scroll"]
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="Header" type="HBoxContainer" parent="Panel/Scroll/Content"]
+layout_mode = 2
+
+[node name="Title" type="Label" parent="Panel/Scroll/Content/Header"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_font_sizes/font_size = 20
+text = "Управление войсками"
+
+[node name="Close" type="Button" parent="Panel/Scroll/Content/Header"]
+layout_mode = 2
+text = "✕"
+
+[node name="Summary" type="Label" parent="Panel/Scroll/Content"]
+layout_mode = 2
+text = "Мобилизовано: 0"
+
+[node name="SquadsTitle" type="Label" parent="Panel/Scroll/Content"]
+layout_mode = 2
+text = "Отряды:"
+
+[node name="SquadList" type="ItemList" parent="Panel/Scroll/Content"]
+custom_minimum_size = Vector2(0, 150)
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="Details" type="Label" parent="Panel/Scroll/Content"]
+custom_minimum_size = Vector2(0, 150)
+layout_mode = 2
+size_flags_vertical = 3
+text = "Выберите отряд"
+autowrap_mode = 2
+
+[node name="Actions" type="GridContainer" parent="Panel/Scroll/Content"]
+layout_mode = 2
+columns = 2
+
+[node name="SelectSquad" type="Button" parent="Panel/Scroll/Content/Actions"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Выбрать на карте"
+
+[node name="Organize" type="Button" parent="Panel/Scroll/Content/Actions"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Переформировать"
+
+[node name="OrdersTitle" type="Label" parent="Panel/Scroll/Content"]
+layout_mode = 2
+text = "Приказы командира отряда:"
+
+[node name="Orders" type="GridContainer" parent="Panel/Scroll/Content"]
+layout_mode = 2
+columns = 2
+
+[node name="Hold" type="Button" parent="Panel/Scroll/Content/Orders"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Удерживать позицию"
+
+[node name="Spread" type="Button" parent="Panel/Scroll/Content/Orders"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Рассредоточиться"
+
+[node name="Watch" type="Button" parent="Panel/Scroll/Content/Orders"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Смотреть в разные стороны"
+
+[node name="Regroup" type="Button" parent="Panel/Scroll/Content/Orders"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Собраться у командира"
+
+[node name="ReturnToBase" type="Button" parent="Panel/Scroll/Content/Orders"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Вернуться на базу"

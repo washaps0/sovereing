@@ -3,15 +3,18 @@
 [ext_resource type="Script" uid="uid://t2p6018ccmxx" path="res://scripts/controls/unit.gd" id="1_a08q0"]
 [ext_resource type="Texture2D" uid="uid://gy6pjcx7kxw6" path="res://assets/char/character.png" id="2_tg830"]
 [ext_resource type="Texture2D" uid="uid://coccaa1kymlaq" path="res://assets/char/selection.png" id="3_ct7mf"]
+[ext_resource type="Texture2D" uid="uid://ci1hrar6p2jis" path="res://assets/char/armor.png" id="4_mrkw3"]
+[ext_resource type="Texture2D" uid="uid://djpu7qsukonqw" path="res://assets/char/weapon.png" id="5_84xcb"]
+[ext_resource type="Texture2D" uid="uid://cchmhloswm0ha" path="res://assets/char/muzzleflash.png" id="6_wxw7q"]
+[ext_resource type="Texture2D" uid="uid://ckn84ttlys3ua" path="res://assets/char/berret.png" id="7_berret"]
 
 [sub_resource type="CircleShape2D" id="CircleShape2D_pkhve"]
 radius = 9.0
 
 [node name="unit" type="CharacterBody2D" unique_id=1967091442]
 scale = Vector2(0.8, 0.8)
-input_pickable = true
 collision_layer = 2
-collision_mask = 1
+input_pickable = true
 script = ExtResource("1_a08q0")
 
 [node name="CollisionShape2D" type="CollisionShape2D" parent="." unique_id=1279065553]
@@ -24,3 +27,47 @@ texture = ExtResource("2_tg830")
 [node name="selection" type="Sprite2D" parent="." unique_id=1628380144]
 visible = false
 texture = ExtResource("3_ct7mf")
+
+[node name="armor" type="Sprite2D" parent="." unique_id=904519271]
+visible = false
+z_index = 2
+texture = ExtResource("4_mrkw3")
+
+[node name="weapon" type="Sprite2D" parent="." unique_id=88207127]
+visible = false
+z_index = 3
+texture = ExtResource("5_84xcb")
+
+[node name="beret" type="Sprite2D" parent="." unique_id=442024660]
+visible = false
+z_index = 4
+texture = ExtResource("7_berret")
+
+[node name="muzzleflash" type="Sprite2D" parent="." unique_id=573906144]
+visible = false
+z_index = 5
+texture = ExtResource("6_wxw7q")
+
+[node name="MuzzleFlashTimer" type="Timer" parent="." unique_id=1668920569]
+wait_time = 0.07
+one_shot = true
+
+[node name="HarvestSound1" type="AudioStreamPlayer2D" parent="." unique_id=1191212807]
+volume_db = -7.0
+max_distance = 480.0
+attenuation = 2.0
+
+[node name="HarvestSound2" type="AudioStreamPlayer2D" parent="." unique_id=777058342]
+volume_db = -7.0
+max_distance = 480.0
+attenuation = 2.0
+
+[node name="HarvestSound3" type="AudioStreamPlayer2D" parent="." unique_id=236180751]
+volume_db = -7.0
+max_distance = 480.0
+attenuation = 2.0
+
+[node name="HarvestSound4" type="AudioStreamPlayer2D" parent="." unique_id=533444307]
+volume_db = -7.0
+max_distance = 480.0
+attenuation = 2.0

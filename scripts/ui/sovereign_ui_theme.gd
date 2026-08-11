@@ -11,9 +11,20 @@ const MUTED := Color("9eb2bd")
 const DANGER := Color("d96464")
 
 
-static func create_theme() -> Theme:
+static func get_scale(viewport_size: Vector2) -> float:
+	if viewport_size.x <= 0.0 or viewport_size.y <= 0.0:
+		return 1.0
+	return clampf(minf(viewport_size.x / 1152.0, viewport_size.y / 648.0), 0.65, 1.0)
+
+
+static func create_theme(ui_scale := 1.0) -> Theme:
+	ui_scale = clampf(ui_scale, 0.65, 1.0)
+	var label_font_size := maxi(roundi(13.0 * ui_scale), 9)
+	var button_font_size := maxi(roundi(14.0 * ui_scale), 10)
+	var padding := maxi(roundi(9.0 * ui_scale), 5)
+	var radius := maxi(roundi(7.0 * ui_scale), 4)
 	var result := Theme.new()
-	result.default_font_size = 14
+	result.default_font_size = label_font_size
 	result.set_color("font_color", "Label", TEXT)
 	result.set_color("font_shadow_color", "Label", Color(0, 0, 0, 0.5))
 	result.set_constant("shadow_offset_x", "Label", 1)
@@ -22,21 +33,21 @@ static func create_theme() -> Theme:
 	result.set_color("font_hover_color", "Button", Color.WHITE)
 	result.set_color("font_pressed_color", "Button", Color.WHITE)
 	result.set_color("font_disabled_color", "Button", MUTED.darkened(0.25))
-	result.set_font_size("font_size", "Button", 15)
+	result.set_font_size("font_size", "Button", button_font_size)
 	result.set_constant("outline_size", "Button", 0)
 
-	result.set_stylebox("panel", "PanelContainer", _box(PANEL, ACCENT.darkened(0.45), 1, 10, 12))
-	result.set_stylebox("normal", "Button", _box(PANEL_LIGHT, Color("34536a"), 1, 7, 8))
-	result.set_stylebox("hover", "Button", _box(Color("294a60"), ACCENT, 1, 7, 8))
-	result.set_stylebox("pressed", "Button", _box(Color("176079"), ACCENT_BRIGHT, 1, 7, 8))
-	result.set_stylebox("focus", "Button", _box(Color.TRANSPARENT, ACCENT_BRIGHT, 1, 7, 8))
-	result.set_stylebox("disabled", "Button", _box(Color("17232d"), Color("263946"), 1, 7, 8))
+	result.set_stylebox("panel", "PanelContainer", _box(PANEL, ACCENT.darkened(0.45), 1, radius + 2, padding))
+	result.set_stylebox("normal", "Button", _box(PANEL_LIGHT, Color("34536a"), 1, radius, padding - 1))
+	result.set_stylebox("hover", "Button", _box(Color("294a60"), ACCENT, 1, radius, padding - 1))
+	result.set_stylebox("pressed", "Button", _box(Color("176079"), ACCENT_BRIGHT, 1, radius, padding - 1))
+	result.set_stylebox("focus", "Button", _box(Color.TRANSPARENT, ACCENT_BRIGHT, 1, radius, padding - 1))
+	result.set_stylebox("disabled", "Button", _box(Color("17232d"), Color("263946"), 1, radius, padding - 1))
 
 	result.set_color("font_color", "LineEdit", TEXT)
 	result.set_color("font_placeholder_color", "LineEdit", MUTED)
 	result.set_color("caret_color", "LineEdit", ACCENT_BRIGHT)
-	result.set_stylebox("normal", "LineEdit", _box(Color("101c27"), Color("355268"), 1, 6, 8))
-	result.set_stylebox("focus", "LineEdit", _box(Color("12222f"), ACCENT, 2, 6, 8))
+	result.set_stylebox("normal", "LineEdit", _box(Color("101c27"), Color("355268"), 1, radius, padding - 1))
+	result.set_stylebox("focus", "LineEdit", _box(Color("12222f"), ACCENT, 2, radius, padding - 1))
 
 	result.set_color("font_color", "ItemList", TEXT)
 	result.set_color("font_selected_color", "ItemList", Color.WHITE)

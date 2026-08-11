@@ -1,14 +1,17 @@
 class_name Building
 extends Area2D
 
-const RESOURCE_TYPES: Array[StringName] = [&"wood", &"stone", &"coal", &"planks", &"tools", &"food"]
+const RESOURCE_TYPES: Array[StringName] = [&"wood", &"stone", &"iron", &"coal", &"planks", &"tools", &"food", &"armor", &"rifles"]
 const RESOURCE_NAMES := {
 	&"wood": "Дерево",
 	&"stone": "Камень",
+	&"iron": "Железо",
 	&"coal": "Уголь",
 	&"planks": "Доски",
 	&"tools": "Инструменты",
 	&"food": "Еда",
+	&"armor": "Броня",
+	&"rifles": "Автоматы",
 	&"electricity": "Электричество",
 }
 const FACTORY_RECIPES := {
@@ -45,6 +48,12 @@ const FACTORY_RECIPES := {
 		"outputs": {&"coal": 1},
 		"time": 3.0,
 	},
+	&"mine_iron": {
+		"name": "Железо",
+		"inputs": {},
+		"outputs": {&"iron": 1},
+		"time": 3.0,
+	},
 	&"mine_both": {
 		"name": "Камень и уголь (медленнее ×2)",
 		"inputs": {},
@@ -57,11 +66,24 @@ const FACTORY_RECIPES := {
 		"outputs": {&"electricity": 4},
 		"time": 4.0,
 	},
+	&"armor": {
+		"name": "Броня",
+		"inputs": {&"iron": 3, &"coal": 1},
+		"outputs": {&"armor": 1},
+		"time": 8.0,
+	},
+	&"rifles": {
+		"name": "Автоматы",
+		"inputs": {&"iron": 2, &"tools": 1},
+		"outputs": {&"rifles": 1},
+		"time": 6.0,
+	},
 }
 const INDUSTRIAL_RECIPES: Array[StringName] = [&"planks", &"tools"]
 const FOOD_RECIPES: Array[StringName] = [&"food"]
-const MINE_RECIPES: Array[StringName] = [&"mine_stone", &"mine_coal", &"mine_both"]
+const MINE_RECIPES: Array[StringName] = [&"mine_stone", &"mine_coal", &"mine_iron", &"mine_both"]
 const POWER_PLANT_RECIPES: Array[StringName] = [&"electricity"]
+const MILITARY_FACTORY_RECIPES: Array[StringName] = [&"armor", &"rifles"]
 
 @export var display_name := "Здание"
 @export var building_kind := "residence"
@@ -85,7 +107,7 @@ var delivered_stone := 0
 var build_progress := 0.0
 var stored_wood := 0
 var stored_stone := 0
-var stored_products := {&"coal": 0, &"planks": 0, &"tools": 0, &"food": 0}
+var stored_products := {&"iron": 0, &"coal": 0, &"planks": 0, &"tools": 0, &"food": 0, &"armor": 0, &"rifles": 0}
 var stored_electricity := 0
 var storage_limits := {}
 var under_construction := false
@@ -108,7 +130,7 @@ func _ready():
 	add_to_group("buildings")
 	if is_warehouse():
 		storage_capacity = 300
-		storage_limits = {&"wood": 40, &"stone": 120, &"coal": 40, &"planks": 40, &"tools": 20, &"food": 40}
+		storage_limits = {&"wood": 40, &"stone": 40, &"iron": 40, &"coal": 40, &"planks": 40, &"tools": 20, &"food": 40, &"armor": 20, &"rifles": 20}
 	var available_recipes := get_available_recipe_types()
 	if is_factory() and selected_recipe not in available_recipes:
 		selected_recipe = available_recipes[0]
@@ -147,8 +169,8 @@ func _process(_delta: float):
 	if is_factory():
 		status_label.text = ""
 		status_label.visible = false
-	elif is_residence() and is_completed():
-		status_label.text = "Жильцы: %d/%d" % [occupants.size(), max_occupants]
+	elif (is_residence() or is_barracks()) and is_completed():
+		status_label.text = ("Солдаты: %d/%d" if is_barracks() else "Жильцы: %d/%d") % [occupants.size(), max_occupants]
 		status_label.visible = mouse_is_over
 	else:
 		status_label.visible = false
@@ -259,7 +281,7 @@ func _input_event(_viewport: Node, event: InputEvent, _shape_idx: int):
 		if under_construction:
 			for unit in units:
 				unit.command_build(self)
-		elif is_completed() and (is_factory() or is_residence()):
+		elif is_completed() and (is_factory() or is_residence() or is_barracks()):
 			for unit in units:
 				unit.command_enter_building(self)
 		get_viewport().set_input_as_handled()
@@ -369,7 +391,7 @@ func is_warehouse() -> bool:
 
 
 func is_factory() -> bool:
-	return building_kind in ["factory", "food_factory", "mine", "power_plant"]
+	return building_kind in ["factory", "food_factory", "mine", "power_plant", "military_factory"]
 
 
 func is_food_factory() -> bool:
@@ -384,8 +406,16 @@ func is_power_plant() -> bool:
 	return building_kind == "power_plant"
 
 
+func is_military_factory() -> bool:
+	return building_kind == "military_factory"
+
+
 func is_residence() -> bool:
 	return building_kind == "residence"
+
+
+func is_barracks() -> bool:
+	return building_kind == "barracks"
 
 
 func is_government() -> bool:
@@ -421,13 +451,35 @@ func get_total_storage_limits() -> int:
 func set_storage_limit(resource_type: StringName, amount: int):
 	if not is_warehouse() or resource_type not in RESOURCE_TYPES:
 		return
-	var used_by_other_limits := 0
-	for other_type in RESOURCE_TYPES:
-		if other_type != resource_type:
-			used_by_other_limits += get_storage_limit(other_type)
 	var stored_minimum := get_stored_resource(resource_type)
-	var available_maximum := maxi(storage_capacity - used_by_other_limits, stored_minimum)
-	storage_limits[resource_type] = clampi(amount, stored_minimum, available_maximum)
+	var current_limit := get_storage_limit(resource_type)
+	var requested_limit := clampi(amount, stored_minimum, storage_capacity)
+	if requested_limit <= current_limit:
+		storage_limits[resource_type] = requested_limit
+		return
+
+	var quota_needed := requested_limit - current_limit
+	var unallocated := maxi(storage_capacity - get_total_storage_limits(), 0)
+	quota_needed -= mini(quota_needed, unallocated)
+	if quota_needed > 0:
+		var other_resources: Array[StringName] = []
+		for other_type in RESOURCE_TYPES:
+			if other_type != resource_type:
+				other_resources.append(other_type)
+		# Сначала освобождаем самые большие незанятые квоты. Уже лежащие на
+		# складе ресурсы никогда не удаляются и их квота не уменьшается ниже запаса.
+		other_resources.sort_custom(func(a: StringName, b: StringName):
+			return get_storage_limit(a) - get_stored_resource(a) > get_storage_limit(b) - get_stored_resource(b)
+		)
+		for other_type in other_resources:
+			var other_limit := get_storage_limit(other_type)
+			var reducible := maxi(other_limit - get_stored_resource(other_type), 0)
+			var reduction := mini(reducible, quota_needed)
+			storage_limits[other_type] = other_limit - reduction
+			quota_needed -= reduction
+			if quota_needed <= 0:
+				break
+	storage_limits[resource_type] = requested_limit - maxi(quota_needed, 0)
 
 
 func has_storage_space() -> bool:
@@ -512,7 +564,11 @@ func take_resource(resource_type: StringName, amount: int) -> int:
 
 func try_enter(unit: Unit) -> bool:
 	_cleanup_occupants()
-	if not is_instance_valid(unit) or unit.faction_id != faction_id or placement_preview or not is_completed() or (not is_factory() and not is_residence()):
+	if not is_instance_valid(unit) or unit.faction_id != faction_id or placement_preview or not is_completed() or (not is_factory() and not is_residence() and not is_barracks()):
+		return false
+	if is_barracks() and not unit.is_mobilized:
+		return false
+	if is_residence() and unit.is_mobilized:
 		return false
 	if unit in occupants:
 		return true
@@ -556,6 +612,8 @@ func get_available_recipe_types() -> Array[StringName]:
 		return MINE_RECIPES
 	if is_power_plant():
 		return POWER_PLANT_RECIPES
+	if is_military_factory():
+		return MILITARY_FACTORY_RECIPES
 	return INDUSTRIAL_RECIPES
 
 
