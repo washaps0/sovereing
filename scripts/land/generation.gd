@@ -23,6 +23,10 @@ const AI_STRATEGY_INTERVAL := 6.0
 const AI_MAX_CONSTRUCTION_BACKLOG := 2
 const AI_MIN_CIVILIAN_WORKERS := 6
 const AI_ATTACK_MIN_SOLDIERS := 8
+const AI_STARTING_WOOD := 55
+const AI_STARTING_STONE := 30
+const AI_STARTING_COAL := 12
+const AI_STARTING_FOOD := 45
 const AI_DISTRICT_COLUMNS := 3
 const AI_DISTRICT_COLUMN_STEP := 448.0
 const AI_DISTRICT_ROW_STEP := 256.0
@@ -60,6 +64,8 @@ var rng := RandomNumberGenerator.new()
 var world_seed := 12345
 var ai_strategy_timer := 2.0
 var ai_strategy_cycle := 0
+var ai_emergency_food_given := {}
+var military_front_lines := {}
 
 func generate_ground():
 	# Один TileMapLayer хранит и отрисовывает землю чанками. Раньше для карты
@@ -192,6 +198,311 @@ func _process(delta: float):
 	_run_ai_strategy()
 
 
+func get_military_front_lines(faction_id: int) -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	for raw_plan in military_front_lines.values():
+		if raw_plan is Dictionary and int(raw_plan.get("faction_id", -1)) == faction_id:
+			result.append(raw_plan.duplicate(true))
+	result.sort_custom(func(a: Dictionary, b: Dictionary):
+		return str(a.get("line_id", "")) < str(b.get("line_id", ""))
+	)
+	return result
+
+
+func has_military_front_line(faction_id: int, line_id: String) -> bool:
+	if not military_front_lines.has(line_id):
+		return false
+	return int(military_front_lines[line_id].get("faction_id", -1)) == faction_id
+
+
+func apply_military_plan_command(faction_id: int, commanders: Array[Unit], action: StringName, payload: Dictionary) -> bool:
+	var line_id := str(payload.get("line_id", "")).strip_edges().left(96)
+	if line_id.is_empty():
+		return false
+	var squad_ids: Array[int] = []
+	for commander in commanders:
+		if is_instance_valid(commander) and commander.faction_id == faction_id and commander.is_squad_commander() and commander.squad_id not in squad_ids:
+			squad_ids.append(commander.squad_id)
+	match action:
+		&"create_front":
+			var front_points := _coerce_military_line_points(payload.get("points", []))
+			if front_points.size() < 2 or squad_ids.is_empty():
+				return false
+			_detach_squads_from_other_fronts(faction_id, squad_ids, line_id)
+			military_front_lines[line_id] = {
+				"line_id": line_id,
+				"faction_id": faction_id,
+				"name": _make_military_front_name(faction_id),
+				"front_points": front_points,
+				"offensive_points": [],
+				"has_offensive": false,
+				"squad_ids": squad_ids,
+				"attach_all": _squad_ids_cover_whole_army(faction_id, squad_ids),
+			}
+			_redistribute_military_front(line_id, false)
+			return true
+		&"set_offensive":
+			if not has_military_front_line(faction_id, line_id):
+				return false
+			var offensive_points := _coerce_military_line_points(payload.get("points", []))
+			if offensive_points.size() < 2:
+				return false
+			var offensive_plan: Dictionary = military_front_lines[line_id]
+			offensive_plan["offensive_points"] = offensive_points
+			offensive_plan["has_offensive"] = true
+			_redistribute_military_front(line_id, true)
+			return true
+		&"attach":
+			if not has_military_front_line(faction_id, line_id) or squad_ids.is_empty():
+				return false
+			_detach_squads_from_other_fronts(faction_id, squad_ids, line_id)
+			var attach_plan: Dictionary = military_front_lines[line_id]
+			var attached: Array = attach_plan.get("squad_ids", [])
+			for squad_id in squad_ids:
+				if squad_id not in attached:
+					attached.append(squad_id)
+			attach_plan["squad_ids"] = attached
+			attach_plan["attach_all"] = _squad_ids_cover_whole_army(faction_id, attached)
+			_redistribute_military_front(line_id, bool(attach_plan.get("has_offensive", false)))
+			return true
+		&"detach":
+			if not has_military_front_line(faction_id, line_id) or squad_ids.is_empty():
+				return false
+			var detach_plan: Dictionary = military_front_lines[line_id]
+			var remaining: Array = detach_plan.get("squad_ids", []).duplicate()
+			var previously_attached := remaining.duplicate()
+			for squad_id in squad_ids:
+				remaining.erase(squad_id)
+			detach_plan["squad_ids"] = remaining
+			detach_plan["attach_all"] = false
+			for commander in commanders:
+				if is_instance_valid(commander) and commander.is_squad_commander() and commander.squad_id in previously_attached:
+					commander.issue_squad_order(&"hold")
+			_redistribute_military_front(line_id, bool(detach_plan.get("has_offensive", false)))
+			return true
+		&"delete":
+			if not has_military_front_line(faction_id, line_id):
+				return false
+			var delete_plan: Dictionary = military_front_lines[line_id]
+			for commander in _get_front_squad_commanders(faction_id, delete_plan.get("squad_ids", [])):
+				commander.issue_squad_order(&"hold")
+			military_front_lines.erase(line_id)
+			return true
+	return false
+
+
+func _make_military_front_name(faction_id: int) -> String:
+	var used_names := {}
+	for plan in get_military_front_lines(faction_id):
+		used_names[str(plan.get("name", ""))] = true
+	var index := 1
+	while used_names.has("Линия фронта %d" % index):
+		index += 1
+	return "Линия фронта %d" % index
+
+
+func _squad_ids_cover_whole_army(faction_id: int, raw_squad_ids: Array) -> bool:
+	var expected := {}
+	for unit in _get_indexed_units(faction_id):
+		if unit is Unit and unit.is_squad_commander():
+			expected[unit.squad_id] = true
+	if expected.is_empty():
+		return false
+	for squad_id in expected.keys():
+		if squad_id not in raw_squad_ids:
+			return false
+	return true
+
+
+func refresh_military_front_assignments(faction_id: int):
+	var all_squad_ids: Array[int] = []
+	for unit in _get_indexed_units(faction_id):
+		if unit is Unit and unit.is_squad_commander() and unit.squad_id not in all_squad_ids:
+			all_squad_ids.append(unit.squad_id)
+	for line_id in military_front_lines.keys():
+		var plan: Dictionary = military_front_lines[line_id]
+		if int(plan.get("faction_id", -1)) != faction_id:
+			continue
+		var attached: Array = plan.get("squad_ids", []).duplicate()
+		for index in range(attached.size() - 1, -1, -1):
+			if int(attached[index]) not in all_squad_ids:
+				attached.remove_at(index)
+		if bool(plan.get("attach_all", false)):
+			for squad_id in all_squad_ids:
+				if squad_id not in attached:
+					attached.append(squad_id)
+		plan["squad_ids"] = attached
+		_redistribute_military_front(str(line_id), bool(plan.get("has_offensive", false)))
+
+
+func _detach_squads_from_other_fronts(faction_id: int, squad_ids: Array[int], except_line_id: String):
+	var changed_lines: Array[String] = []
+	for raw_line_id in military_front_lines.keys():
+		var other_line_id := str(raw_line_id)
+		if other_line_id == except_line_id:
+			continue
+		var plan: Dictionary = military_front_lines[raw_line_id]
+		if int(plan.get("faction_id", -1)) != faction_id:
+			continue
+		var attached: Array = plan.get("squad_ids", []).duplicate()
+		var changed := false
+		for squad_id in squad_ids:
+			if squad_id in attached:
+				attached.erase(squad_id)
+				changed = true
+		if changed:
+			plan["squad_ids"] = attached
+			plan["attach_all"] = false
+			changed_lines.append(other_line_id)
+	for changed_line_id in changed_lines:
+		var changed_plan: Dictionary = military_front_lines[changed_line_id]
+		_redistribute_military_front(changed_line_id, bool(changed_plan.get("has_offensive", false)))
+
+
+func _redistribute_military_front(line_id: String, use_offensive: bool):
+	if not military_front_lines.has(line_id):
+		return
+	var plan: Dictionary = military_front_lines[line_id]
+	var points := _coerce_military_line_points(plan.get("offensive_points" if use_offensive else "front_points", []))
+	if points.size() < 2:
+		return
+	var commanders := _get_front_squad_commanders(int(plan.get("faction_id", -1)), plan.get("squad_ids", []))
+	for index in range(commanders.size()):
+		var ratio := 0.5 if commanders.size() == 1 else float(index) / float(commanders.size() - 1)
+		var sample := _sample_military_polyline(points, ratio)
+		var destination: Vector2 = sample.get("position", commanders[index].global_position)
+		var formation_direction: Vector2 = sample.get("direction", Vector2.RIGHT)
+		commanders[index]._command_military_move(
+			destination,
+			&"offensive_line" if use_offensive else &"front_line",
+			formation_direction
+		)
+
+
+func _get_front_squad_commanders(faction_id: int, raw_squad_ids) -> Array[Unit]:
+	var squad_ids := {}
+	var commanders: Array[Unit] = []
+	if raw_squad_ids is not Array:
+		return commanders
+	for raw_id in raw_squad_ids:
+		squad_ids[int(raw_id)] = true
+	for unit in _get_indexed_units(faction_id):
+		if unit is Unit and unit.is_squad_commander() and squad_ids.has(unit.squad_id):
+			commanders.append(unit)
+	# Взводы получают соседние участки, а их отряды — соседние точки участка.
+	commanders.sort_custom(func(a: Unit, b: Unit):
+		return a.platoon_id < b.platoon_id if a.platoon_id != b.platoon_id else a.squad_id < b.squad_id
+	)
+	return commanders
+
+
+func _sample_military_polyline(points: Array[Vector2], ratio: float) -> Dictionary:
+	var total_length := 0.0
+	var lengths: Array[float] = []
+	for index in range(points.size() - 1):
+		var segment_length := points[index].distance_to(points[index + 1])
+		lengths.append(segment_length)
+		total_length += segment_length
+	if total_length <= 0.001:
+		return {"position": points[0], "direction": Vector2.RIGHT}
+	var target_distance := clampf(ratio, 0.0, 1.0) * total_length
+	var walked := 0.0
+	for index in range(lengths.size()):
+		var segment_length := lengths[index]
+		if target_distance <= walked + segment_length or index == lengths.size() - 1:
+			var local_ratio := clampf((target_distance - walked) / maxf(segment_length, 0.001), 0.0, 1.0)
+			return {
+				"position": points[index].lerp(points[index + 1], local_ratio),
+				"direction": points[index].direction_to(points[index + 1]),
+			}
+		walked += segment_length
+	return {"position": points.back(), "direction": Vector2.RIGHT}
+
+
+func _coerce_military_line_points(raw_points) -> Array[Vector2]:
+	var points: Array[Vector2] = []
+	if raw_points is not Array:
+		return points
+	for raw_point in raw_points:
+		if raw_point is Vector2:
+			var vector_point: Vector2 = raw_point
+			if points.is_empty() or points.back().distance_to(vector_point) >= 1.0:
+				points.append(vector_point)
+		elif raw_point is Array and raw_point.size() >= 2:
+			var point := Vector2(float(raw_point[0]), float(raw_point[1]))
+			if points.is_empty() or points.back().distance_to(point) >= 1.0:
+				points.append(point)
+	return points
+
+
+func _serialize_military_front_lines() -> Array:
+	var result: Array = []
+	for raw_plan in military_front_lines.values():
+		if raw_plan is not Dictionary:
+			continue
+		var plan: Dictionary = raw_plan
+		var front_data: Array = []
+		for point in _coerce_military_line_points(plan.get("front_points", [])):
+			front_data.append(_vector_to_data(point))
+		var offensive_data: Array = []
+		for point in _coerce_military_line_points(plan.get("offensive_points", [])):
+			offensive_data.append(_vector_to_data(point))
+		result.append({
+			"line_id": str(plan.get("line_id", "")),
+			"faction_id": int(plan.get("faction_id", -1)),
+			"name": str(plan.get("name", "Линия фронта")),
+			"front_points": front_data,
+			"offensive_points": offensive_data,
+			"has_offensive": bool(plan.get("has_offensive", false)),
+			"squad_ids": plan.get("squad_ids", []).duplicate(),
+			"attach_all": bool(plan.get("attach_all", false)),
+		})
+	return result
+
+
+func _restore_military_front_lines(raw_plans: Array):
+	military_front_lines.clear()
+	for raw_plan in raw_plans:
+		if raw_plan is not Dictionary:
+			continue
+		var line_id := str(raw_plan.get("line_id", "")).strip_edges().left(96)
+		var front_points := _coerce_military_line_points(raw_plan.get("front_points", []))
+		if line_id.is_empty() or front_points.size() < 2:
+			continue
+		military_front_lines[line_id] = {
+			"line_id": line_id,
+			"faction_id": int(raw_plan.get("faction_id", -1)),
+			"name": str(raw_plan.get("name", "Линия фронта")),
+			"front_points": front_points,
+			"offensive_points": _coerce_military_line_points(raw_plan.get("offensive_points", [])),
+			"has_offensive": bool(raw_plan.get("has_offensive", false)),
+			"squad_ids": raw_plan.get("squad_ids", []).duplicate(),
+			"attach_all": bool(raw_plan.get("attach_all", false)),
+		}
+
+
+func get_network_military_front_lines(faction_ids: Array = []) -> Array:
+	var faction_filter := _make_network_faction_filter(faction_ids)
+	var result: Array = []
+	for plan in _serialize_military_front_lines():
+		if faction_filter.is_empty() or faction_filter.has(int(plan.get("faction_id", -1))):
+			result.append(plan)
+	return result
+
+
+func apply_network_military_front_lines(raw_plans: Array, faction_ids: Array):
+	var faction_filter := _make_network_faction_filter(faction_ids)
+	var combined_plans := _serialize_military_front_lines()
+	for index in range(combined_plans.size() - 1, -1, -1):
+		if faction_filter.has(int(combined_plans[index].get("faction_id", -1))):
+			combined_plans.remove_at(index)
+	for raw_plan in raw_plans:
+		if raw_plan is not Dictionary or not faction_filter.has(int(raw_plan.get("faction_id", -1))):
+			continue
+		combined_plans.append(raw_plan)
+	_restore_military_front_lines(combined_plans)
+
+
 func get_save_data() -> Dictionary:
 	_ensure_persistent_building_ids()
 	var data := {
@@ -199,6 +510,7 @@ func get_save_data() -> Dictionary:
 		"resources": [],
 		"units": [],
 		"session_slots": [],
+		"military_front_lines": _serialize_military_front_lines(),
 		"continuous_harvest": Unit.continuous_harvest_mode,
 	}
 	var network_manager := get_node_or_null("/root/NetworkManager")
@@ -247,6 +559,14 @@ func get_save_data() -> Dictionary:
 			"platoon_commander_network_id": unit.platoon_commander_network_id,
 			"military_order": str(unit.military_order),
 			"squad_formation_offset": _vector_to_data(unit.squad_formation_offset),
+			"squad_independent_order": unit.squad_independent_order,
+			"squad_line_direction": _vector_to_data(unit.squad_line_direction),
+			"has_platoon_front_line": unit.has_platoon_front_line,
+			"platoon_front_start": _vector_to_data(unit.platoon_front_start),
+			"platoon_front_end": _vector_to_data(unit.platoon_front_end),
+			"has_platoon_offensive_line": unit.has_platoon_offensive_line,
+			"platoon_offensive_start": _vector_to_data(unit.platoon_offensive_start),
+			"platoon_offensive_end": _vector_to_data(unit.platoon_offensive_end),
 			"has_armor": unit.has_armor,
 			"has_rifle": unit.has_rifle,
 			"facing_direction": _vector_to_data(unit.facing_direction),
@@ -404,6 +724,14 @@ func get_network_unit_states(faction_ids: Array = []) -> Array:
 			"platoon_commander_network_id": unit.platoon_commander_network_id,
 			"military_order": str(unit.military_order),
 			"squad_formation_offset": _vector_to_data(unit.squad_formation_offset),
+			"squad_independent_order": unit.squad_independent_order,
+			"squad_line_direction": _vector_to_data(unit.squad_line_direction),
+			"has_platoon_front_line": unit.has_platoon_front_line,
+			"platoon_front_start": _vector_to_data(unit.platoon_front_start),
+			"platoon_front_end": _vector_to_data(unit.platoon_front_end),
+			"has_platoon_offensive_line": unit.has_platoon_offensive_line,
+			"platoon_offensive_start": _vector_to_data(unit.platoon_offensive_start),
+			"platoon_offensive_end": _vector_to_data(unit.platoon_offensive_end),
 			"facing_direction": _vector_to_data(unit.facing_direction),
 			"has_armor": unit.has_armor,
 			"has_rifle": unit.has_rifle,
@@ -526,6 +854,14 @@ func _apply_network_unit_state(unit: Unit, state: Dictionary):
 	unit.platoon_commander_network_id = int(state.get("platoon_commander_network_id", unit.platoon_commander_network_id))
 	unit.military_order = StringName(state.get("military_order", unit.military_order))
 	unit.squad_formation_offset = _data_to_vector(state.get("squad_formation_offset", [0, 0]))
+	unit.squad_independent_order = bool(state.get("squad_independent_order", false))
+	unit.squad_line_direction = _data_to_vector(state.get("squad_line_direction", [0, 0])).normalized()
+	unit.has_platoon_front_line = bool(state.get("has_platoon_front_line", false))
+	unit.platoon_front_start = _data_to_vector(state.get("platoon_front_start", [0, 0]))
+	unit.platoon_front_end = _data_to_vector(state.get("platoon_front_end", [0, 0]))
+	unit.has_platoon_offensive_line = bool(state.get("has_platoon_offensive_line", false))
+	unit.platoon_offensive_start = _data_to_vector(state.get("platoon_offensive_start", [0, 0]))
+	unit.platoon_offensive_end = _data_to_vector(state.get("platoon_offensive_end", [0, 0]))
 	unit.has_armor = bool(state.get("has_armor", unit.has_armor))
 	unit.has_rifle = bool(state.get("has_rifle", unit.has_rifle))
 	unit.facing_direction = _data_to_vector(state.get("facing_direction", [0, 1]))
@@ -797,6 +1133,7 @@ func apply_save_data(data: Dictionary):
 		_restore_building(building_data)
 	for unit_data in data.get("units", []):
 		_restore_unit(unit_data)
+	_restore_military_front_lines(data.get("military_front_lines", []))
 	Unit.continuous_harvest_mode = bool(data.get("continuous_harvest", false))
 	var camera_data: Dictionary = data.get("camera", {})
 	var camera := get_node_or_null("Camera2D") as Camera2D
@@ -931,6 +1268,14 @@ func _restore_unit(data: Dictionary) -> Unit:
 	unit.platoon_commander_network_id = int(data.get("platoon_commander_network_id", 0))
 	unit.military_order = StringName(data.get("military_order", "hold"))
 	unit.squad_formation_offset = _data_to_vector(data.get("squad_formation_offset", [0, 0]))
+	unit.squad_independent_order = bool(data.get("squad_independent_order", false))
+	unit.squad_line_direction = _data_to_vector(data.get("squad_line_direction", [0, 0])).normalized()
+	unit.has_platoon_front_line = bool(data.get("has_platoon_front_line", false))
+	unit.platoon_front_start = _data_to_vector(data.get("platoon_front_start", [0, 0]))
+	unit.platoon_front_end = _data_to_vector(data.get("platoon_front_end", [0, 0]))
+	unit.has_platoon_offensive_line = bool(data.get("has_platoon_offensive_line", false))
+	unit.platoon_offensive_start = _data_to_vector(data.get("platoon_offensive_start", [0, 0]))
+	unit.platoon_offensive_end = _data_to_vector(data.get("platoon_offensive_end", [0, 0]))
 	unit.has_armor = bool(data.get("has_armor", false))
 	unit.has_rifle = bool(data.get("has_rifle", false))
 	unit.facing_direction = _data_to_vector(data.get("facing_direction", [0, 1])).normalized()
@@ -956,7 +1301,11 @@ func _restore_unit(data: Dictionary) -> Unit:
 			float(data.get("work_timer", unit.harvest_interval))
 		)
 	elif saved_task == Unit.Task.MOVE:
-		unit.command_move(_data_to_vector(data.get("target_position", data.get("position", [300, 300]))))
+		unit.command_move(
+			_data_to_vector(data.get("target_position", data.get("position", [300, 300]))),
+			unit.squad_independent_order,
+			unit.squad_line_direction
+		)
 		if unit.is_mobilized:
 			unit.military_order = StringName(data.get("military_order", "move"))
 	elif saved_task == Unit.Task.ENTER_BUILDING and is_instance_valid(target_building):
@@ -1035,6 +1384,10 @@ func spawn_session_units(raw_slots: Array):
 				bool(raw_slot.get("is_ai", true)),
 				str(raw_slot.get("nickname", "ИИ %d" % (faction_id + 1)))
 			)
+			if unit.ai_controlled:
+				# Фоновая фракция должна успеть развернуть пищевую цепочку до
+				# первого приёма пищи даже при редких стратегических тиках.
+				unit.food_timer = Unit.FOOD_CONSUMPTION_INTERVAL * 3.0
 			add_child(unit)
 	for ai_slot in ai_slots:
 		_ensure_ai_starting_plan(int(ai_slot.get("faction_id", 0)), str(ai_slot.get("nickname", "ИИ")))
@@ -1099,6 +1452,7 @@ func _run_ai_strategy():
 		var faction_name := str(ai_factions[raw_faction_id])
 		_ensure_ai_starting_plan(faction_id, faction_name)
 		_configure_ai_economy(faction_id)
+		_provide_ai_emergency_food_if_needed(faction_id)
 		_configure_ai_population_and_army(faction_id)
 		if _get_ai_construction_count(faction_id) <= AI_MAX_CONSTRUCTION_BACKLOG:
 			_plan_ai_expansion(faction_id, faction_name)
@@ -1108,24 +1462,61 @@ func _run_ai_strategy():
 func _configure_ai_economy(faction_id: int):
 	var mine_index := 0
 	var factory_index := 0
+	var population := _get_indexed_units(faction_id).size()
+	var construction_active := _get_ai_construction_count(faction_id) > 0
+	var coal_amount := _get_ai_stored_resource(faction_id, &"coal")
 	for candidate in _get_indexed_buildings("", faction_id):
 		if candidate is not Building or not is_ancestor_of(candidate) or candidate.faction_id != faction_id or not candidate.is_factory():
 			continue
 		var building := candidate as Building
-		building.set_worker_target(building.max_workers)
 		if building.is_food_factory():
+			building.set_worker_target(clampi(ceili(float(population) / 3.0), 1, building.max_workers))
 			building.set_recipe(&"food")
 		elif building.is_power_plant():
+			building.set_worker_target(mini(1, building.max_workers))
 			building.set_recipe(&"electricity")
 		elif building.is_mine():
+			building.set_worker_target(mini(1, building.max_workers))
 			var mine_recipes: Array[StringName] = [&"mine_iron", &"mine_coal", &"mine_stone"]
-			building.set_recipe(mine_recipes[(ai_strategy_cycle + mine_index) % mine_recipes.size()])
+			building.set_recipe(&"mine_coal" if coal_amount < 16 else mine_recipes[(ai_strategy_cycle + mine_index) % mine_recipes.size()])
 			mine_index += 1
 		elif building.is_military_factory():
+			building.set_worker_target(0 if construction_active else mini(1, building.max_workers))
 			building.set_recipe(_get_ai_needed_equipment_recipe(faction_id))
 		else:
+			building.set_worker_target(0 if construction_active else mini(1, building.max_workers))
 			building.set_recipe(&"tools" if (ai_strategy_cycle + factory_index) % 2 == 0 else &"planks")
 			factory_index += 1
+
+
+func _get_ai_stored_resource(faction_id: int, resource_type: StringName) -> int:
+	var total := 0
+	for candidate in _get_indexed_buildings("warehouse", faction_id):
+		if candidate is Building and is_ancestor_of(candidate) and candidate.is_completed():
+			total += candidate.get_stored_resource(resource_type)
+	return total
+
+
+func _provide_ai_emergency_food_if_needed(faction_id: int):
+	# Одноразовая помощь спасает уже начатые сохранения, в которых старая LOD-
+	# логика успела довести всю фракцию до голода. Дальше ИИ обязан кормить
+	# себя самостоятельно через шахту, электростанцию и пищевой завод.
+	if ai_emergency_food_given.has(faction_id) or _get_ai_stored_resource(faction_id, &"food") > 0:
+		return
+	var population := 0
+	var worst_missed_meals := 0
+	for candidate in _get_indexed_units(faction_id):
+		if candidate is Unit and is_ancestor_of(candidate):
+			population += 1
+			worst_missed_meals = maxi(worst_missed_meals, candidate.missed_meals)
+	if population <= 0 or worst_missed_meals < Unit.AI_STARVATION_GRACE_MEALS:
+		return
+	for candidate in _get_indexed_buildings("warehouse", faction_id):
+		if candidate is Building and is_ancestor_of(candidate) and candidate.is_completed():
+			var delivered: int = candidate.store_resource(&"food", maxi(population * 2, 10))
+			if delivered > 0:
+				ai_emergency_food_given[faction_id] = true
+				return
 
 
 func _get_ai_needed_equipment_recipe(faction_id: int) -> StringName:
@@ -1262,7 +1653,21 @@ func _ensure_ai_starting_plan(faction_id: int, faction_name: String):
 	# Здания стоят двумя рядами вдоль главной улицы. Интервалы рассчитаны по
 	# реальным коллизиям самых широких зданий.
 	var building_id := faction_id * 1000 + 201
-	_spawn_ai_building(WAREHOUSE_SCENE, block_center + Vector2(-120.0, -62.0), 0.0, faction_id, faction_name, building_id, main_street, 1)
+	var starting_warehouse := _spawn_ai_building(WAREHOUSE_SCENE, block_center + Vector2(-120.0, -62.0), 0.0, faction_id, faction_name, building_id, main_street, 1)
+	if is_instance_valid(starting_warehouse):
+		# Стартовый лагерь не даёт всем жителям застрять в добыче материалов
+		# для дорог и обеспечивает запас еды до запуска собственного завода.
+		starting_warehouse.delivered_wood = starting_warehouse.wood_required
+		starting_warehouse.delivered_stone = starting_warehouse.stone_required
+		starting_warehouse.build_progress = starting_warehouse.build_time
+		starting_warehouse.under_construction = false
+		starting_warehouse.progress_bar.visible = false
+		starting_warehouse.stored_wood = AI_STARTING_WOOD
+		starting_warehouse.stored_stone = AI_STARTING_STONE
+		starting_warehouse.stored_products[&"coal"] = AI_STARTING_COAL
+		starting_warehouse.stored_products[&"food"] = AI_STARTING_FOOD
+		starting_warehouse._update_visuals()
+		starting_warehouse.notify_navigation_changed()
 	building_id += 1
 	_spawn_ai_building(RESIDENCE_SCENE, block_center + Vector2(0.0, -62.0), 0.0, faction_id, faction_name, building_id, main_street, 2)
 	building_id += 1

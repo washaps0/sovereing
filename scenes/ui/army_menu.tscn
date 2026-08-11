@@ -46,6 +46,65 @@ text = "✕"
 layout_mode = 2
 text = "Мобилизовано: 0"
 
+[node name="PlatoonsTitle" type="Label" parent="Panel/Scroll/Content"]
+layout_mode = 2
+text = "Взводы:"
+
+[node name="PlatoonList" type="ItemList" parent="Panel/Scroll/Content"]
+custom_minimum_size = Vector2(0, 92)
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="PlatoonDetails" type="Label" parent="Panel/Scroll/Content"]
+custom_minimum_size = Vector2(0, 58)
+layout_mode = 2
+text = "Выберите взвод"
+autowrap_mode = 2
+
+[node name="PlatoonPlans" type="GridContainer" parent="Panel/Scroll/Content"]
+layout_mode = 2
+columns = 1
+
+[node name="FrontLine" type="Button" parent="Panel/Scroll/Content/PlatoonPlans"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Нарисовать линию фронта"
+tooltip_text = "Зажмите ЛКМ и ведите мышь по карте — линия может быть изогнутой"
+
+[node name="OffensiveLine" type="Button" parent="Panel/Scroll/Content/PlatoonPlans"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Нарисовать линию наступления"
+tooltip_text = "Рисует изогнутую цель наступления для выбранного плана фронта"
+
+[node name="FrontLinesTitle" type="Label" parent="Panel/Scroll/Content"]
+layout_mode = 2
+text = "Планы фронта:"
+
+[node name="FrontLineList" type="ItemList" parent="Panel/Scroll/Content"]
+custom_minimum_size = Vector2(0, 92)
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="FrontAssignments" type="GridContainer" parent="Panel/Scroll/Content"]
+layout_mode = 2
+columns = 2
+
+[node name="Attach" type="Button" parent="Panel/Scroll/Content/FrontAssignments"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Прикрепить выбранных"
+
+[node name="Detach" type="Button" parent="Panel/Scroll/Content/FrontAssignments"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Открепить выбранных"
+
+[node name="Delete" type="Button" parent="Panel/Scroll/Content/FrontAssignments"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Удалить линию"
+
 [node name="SquadsTitle" type="Label" parent="Panel/Scroll/Content"]
 layout_mode = 2
 text = "Отряды:"

@@ -18,8 +18,9 @@ const DISCOVERY_SCAN_INTERVAL := 1.5
 const DISCOVERY_LOBBY_TIMEOUT_MSEC := 5000
 const UNIT_STATE_SYNC_INTERVAL := 2.0
 const BUILDING_STATE_SYNC_INTERVAL := 5.0
-const MAX_UNITS_PER_COMMAND := 128
+const MAX_UNITS_PER_COMMAND := 1024
 const MAX_BUILDINGS_PER_COMMAND := 256
+const MAX_MILITARY_LINE_POINTS := 512
 const MAX_UNIT_STATES_PER_SYNC := 10000
 const MAX_BUILDING_STATES_PER_SYNC := 5000
 const MAX_RESOURCE_STATES_PER_SYNC := 20000
@@ -479,7 +480,7 @@ func request_unit_command(units: Array, action: StringName, payload: Dictionary 
 			unit_ids.append(candidate.network_id)
 			if unit_ids.size() >= MAX_UNITS_PER_COMMAND:
 				break
-	if unit_ids.is_empty():
+	if unit_ids.is_empty() and action != &"military_plan":
 		return
 	if not is_lan_session():
 		_apply_unit_command(get_local_faction_id(), action, unit_ids, payload)
@@ -843,6 +844,18 @@ func _receive_unit_command(faction_id: int, action: StringName, unit_ids: Array,
 	_apply_unit_command(faction_id, action, unit_ids, payload)
 
 
+@rpc("authority", "call_remote", "reliable")
+func _receive_military_front_lines(authoritative_faction_ids: Array, plans: Array):
+	if multiplayer.is_server():
+		return
+	var applicable_factions := _get_locally_applicable_remote_factions(authoritative_faction_ids)
+	if applicable_factions.is_empty():
+		return
+	var world := _get_world()
+	if is_instance_valid(world) and world.has_method("apply_network_military_front_lines"):
+		world.apply_network_military_front_lines(plans, applicable_factions)
+
+
 @rpc("any_peer", "call_remote", "reliable")
 func _server_request_building_action(network_id: int, action: StringName, payload: Dictionary):
 	if not multiplayer.is_server() or not is_lan_session():
@@ -1198,7 +1211,9 @@ func _take_pending_resource_states() -> Array:
 
 func _handle_server_unit_command(sender_peer_id: int, action: StringName, raw_unit_ids: Array, payload: Dictionary):
 	var faction_id := _get_faction_controlled_by_peer(sender_peer_id)
-	if faction_id < 0 or raw_unit_ids.is_empty() or raw_unit_ids.size() > MAX_UNITS_PER_COMMAND:
+	if faction_id < 0 or raw_unit_ids.size() > MAX_UNITS_PER_COMMAND:
+		return
+	if raw_unit_ids.is_empty() and action != &"military_plan":
 		return
 	var accepted_ids: Array[int] = []
 	for raw_id in raw_unit_ids:
@@ -1207,7 +1222,9 @@ func _handle_server_unit_command(sender_peer_id: int, action: StringName, raw_un
 		if not is_instance_valid(unit) or unit.controller_peer_id != sender_peer_id or unit.ai_controlled:
 			continue
 		accepted_ids.append(network_id)
-	if accepted_ids.is_empty() or not _is_valid_unit_command(action, accepted_ids, payload, faction_id):
+	if accepted_ids.is_empty() and action != &"military_plan":
+		return
+	if not _is_valid_unit_command(action, accepted_ids, payload, faction_id):
 		return
 	_apply_unit_command(faction_id, action, accepted_ids, payload)
 	_relay_unit_command(sender_peer_id, faction_id, action, accepted_ids, payload)
@@ -1242,6 +1259,61 @@ func _is_valid_unit_command(action: StringName, unit_ids: Array[int], payload: D
 			return true
 		&"squad_order":
 			return StringName(payload.get("order", &"")) in [&"hold", &"spread_out", &"watch_directions", &"regroup", &"return_to_base"]
+		&"platoon_line":
+			if unit_ids.is_empty():
+				return false
+			var line_type := StringName(payload.get("line_type", &""))
+			var raw_line_start = payload.get("line_start")
+			var raw_line_end = payload.get("line_end")
+			if line_type not in [&"front_line", &"offensive_line"]:
+				return false
+			for unit_id in unit_ids:
+				var commander := _find_unit(unit_id, faction_id)
+				if not is_instance_valid(commander) or not commander.is_platoon_commander():
+					return false
+				if line_type == &"offensive_line" and not commander.has_platoon_front_line:
+					return false
+			if raw_line_start is not Vector2 or raw_line_end is not Vector2:
+				return false
+			var line_start: Vector2 = raw_line_start
+			var line_end: Vector2 = raw_line_end
+			if not _is_finite_vector(line_start) or not _is_finite_vector(line_end) or line_start.distance_to(line_end) < 16.0:
+				return false
+			var line_world := _get_world()
+			return not is_instance_valid(line_world) or not line_world.has_method("is_network_position_valid") or (line_world.is_network_position_valid(line_start) and line_world.is_network_position_valid(line_end))
+		&"military_plan":
+			var plan_action := StringName(payload.get("plan_action", &""))
+			var line_id := str(payload.get("line_id", "")).strip_edges()
+			if plan_action not in [&"create_front", &"set_offensive", &"attach", &"detach", &"delete"] or line_id.is_empty() or line_id.length() > 96:
+				return false
+			if unit_ids.is_empty() and plan_action in [&"create_front", &"attach", &"detach"]:
+				return false
+			for unit_id in unit_ids:
+				var squad_commander := _find_unit(unit_id, faction_id)
+				if not is_instance_valid(squad_commander) or not squad_commander.is_squad_commander():
+					return false
+			var plan_world := _get_world()
+			if not is_instance_valid(plan_world):
+				return false
+			var plan_exists: bool = plan_world.has_method("has_military_front_line") and bool(plan_world.has_military_front_line(faction_id, line_id))
+			if plan_action == &"create_front" and plan_exists:
+				return false
+			if plan_action != &"create_front" and not plan_exists:
+				return false
+			if plan_action not in [&"create_front", &"set_offensive"]:
+				return true
+			var points: Array = payload.get("points", [])
+			if points.size() < 2 or points.size() > MAX_MILITARY_LINE_POINTS:
+				return false
+			for point in points:
+				if point is not Vector2:
+					return false
+				var world_point: Vector2 = point
+				if not _is_finite_vector(world_point):
+					return false
+				if plan_world.has_method("is_network_position_valid") and not plan_world.is_network_position_valid(world_point):
+					return false
+			return true
 		_:
 			return false
 
@@ -1252,7 +1324,7 @@ func _apply_unit_command(faction_id: int, action: StringName, unit_ids: Array, p
 		var unit := _find_unit(int(raw_id), faction_id)
 		if is_instance_valid(unit):
 			units.append(unit)
-	if units.is_empty():
+	if units.is_empty() and action != &"military_plan":
 		return
 	match action:
 		&"move":
@@ -1284,6 +1356,34 @@ func _apply_unit_command(faction_id: int, action: StringName, unit_ids: Array, p
 				unit.command_build_line(segments)
 		&"squad_order":
 			units[0].issue_squad_order(StringName(payload.get("order", &"hold")))
+		&"platoon_line":
+			var line_start: Vector2 = payload.get("line_start", Vector2.ZERO)
+			var line_end: Vector2 = payload.get("line_end", Vector2.ZERO)
+			var line_type := StringName(payload.get("line_type", &"front_line"))
+			var commanders: Array[Unit] = []
+			for unit in units:
+				if unit.is_platoon_commander():
+					commanders.append(unit)
+			commanders.sort_custom(func(a: Unit, b: Unit):
+				return a.platoon_id < b.platoon_id if a.platoon_id != b.platoon_id else a.network_id < b.network_id
+			)
+			for index in range(commanders.size()):
+				var sector_start_ratio := float(index) / float(commanders.size())
+				var sector_end_ratio := float(index + 1) / float(commanders.size())
+				commanders[index].issue_platoon_line(
+					line_type,
+					line_start.lerp(line_end, sector_start_ratio),
+					line_start.lerp(line_end, sector_end_ratio)
+				)
+		&"military_plan":
+			var plan_world := _get_world()
+			if is_instance_valid(plan_world) and plan_world.has_method("apply_military_plan_command"):
+				plan_world.apply_military_plan_command(
+					faction_id,
+					units,
+					StringName(payload.get("plan_action", &"")),
+					payload
+				)
 
 
 func _handle_server_building_action(sender_peer_id: int, network_id: int, action: StringName, payload: Dictionary):
@@ -1420,6 +1520,8 @@ func _send_full_world_state(peer_id: int):
 	# Сначала здания: состояния юнитов могут ссылаться на жильё, заводы и склады.
 	if world.has_method("get_network_unit_states"):
 		_send_full_unit_snapshot(peer_id, snapshot_id, faction_ids, world.get_network_unit_states(faction_ids))
+	if world.has_method("get_network_military_front_lines"):
+		_receive_military_front_lines.rpc_id(peer_id, faction_ids, world.get_network_military_front_lines(faction_ids))
 	var lod_manager := world.get_node_or_null("SimulationLODManager")
 	if is_instance_valid(lod_manager) and lod_manager.has_method("get_network_resource_states"):
 		var resource_states: Array = lod_manager.get_network_resource_states()

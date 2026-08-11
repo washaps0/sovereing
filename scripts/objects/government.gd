@@ -142,6 +142,7 @@ func organize_army():
 		if unit.squad_id != new_squad_id or unit.squad_commander_network_id != new_commander_network_id:
 			unit.squad_formation_offset = Vector2.ZERO
 			unit.squad_follow_active = false
+		unit.squad_independent_order = false
 		unit.squad_id = squad_index + 1
 		unit.platoon_id = platoon_index + 1
 		unit.squad_commander_network_id = new_commander_network_id
@@ -159,6 +160,9 @@ func organize_army():
 			unit.military_role = &"rifleman"
 			unit.simulation_importance = maxi(unit.simulation_importance, 1)
 		unit.refresh_military_visuals()
+	var current_world := get_tree().current_scene
+	if is_instance_valid(current_world) and current_world.has_method("refresh_military_front_assignments"):
+		current_world.refresh_military_front_assignments(faction_id)
 
 
 func _attempt_mobilization_change() -> bool:
