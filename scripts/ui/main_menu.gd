@@ -27,6 +27,10 @@ var host_saves: Array[Dictionary] = []
 var host_port_input: SpinBox
 var join_address_input: LineEdit
 var join_port_input: SpinBox
+var discovered_lobbies_list: ItemList
+var discovered_lobbies_status: Label
+var join_discovered_button: Button
+var discovered_lobbies: Array = []
 var lobby_settings_label: Label
 var lobby_address_label: Label
 var lobby_players_list: ItemList
@@ -45,9 +49,11 @@ func _ready():
 	NetworkManager.lobby_state_changed.connect(_on_lobby_state_changed)
 	NetworkManager.connection_state_changed.connect(_on_connection_state_changed)
 	NetworkManager.network_error.connect(_on_network_error)
+	NetworkManager.discovered_lobbies_changed.connect(_on_discovered_lobbies_changed)
 	get_viewport().size_changed.connect(_update_layout)
 	_update_layout()
 	_refresh_saves()
+	_on_discovered_lobbies_changed(NetworkManager.get_discovered_lobbies())
 	var notice := NetworkManager.consume_menu_notice()
 	if not notice.is_empty():
 		message_label.text = notice
@@ -178,12 +184,28 @@ func _create_multiplayer_page():
 	nickname_input.placeholder_text = "Игрок"
 	multiplayer_page.add_child(nickname_input)
 	var hint := Label.new()
-	hint.text = "Хост создаёт лобби, остальные подключаются по его локальному IP-адресу."
+	hint.text = "Активные лобби в локальной сети находятся автоматически. Ручной ввод адреса тоже доступен."
 	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	hint.add_theme_color_override("font_color", SovereignUITheme.MUTED)
 	multiplayer_page.add_child(hint)
 	_add_button(multiplayer_page, "Создать игру", _show_host_setup)
-	_add_button(multiplayer_page, "Присоединиться", _show_join_setup)
+	var discovered_title := Label.new()
+	discovered_title.text = "Найденные лобби:"
+	multiplayer_page.add_child(discovered_title)
+	discovered_lobbies_list = ItemList.new()
+	discovered_lobbies_list.custom_minimum_size = Vector2(0, 130)
+	discovered_lobbies_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	discovered_lobbies_list.item_selected.connect(_on_discovered_lobby_selected)
+	discovered_lobbies_list.item_activated.connect(func(_index): _join_discovered_lobby())
+	multiplayer_page.add_child(discovered_lobbies_list)
+	discovered_lobbies_status = Label.new()
+	discovered_lobbies_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	discovered_lobbies_status.add_theme_color_override("font_color", SovereignUITheme.MUTED)
+	multiplayer_page.add_child(discovered_lobbies_status)
+	join_discovered_button = _add_button(multiplayer_page, "Подключиться к выбранному", _join_discovered_lobby)
+	join_discovered_button.disabled = true
+	_add_button(multiplayer_page, "Обновить список", _refresh_discovered_lobbies)
+	_add_button(multiplayer_page, "Ввести адрес вручную", _show_join_setup)
 	_add_button(multiplayer_page, "Назад", func(): _show_page(main_page))
 
 
@@ -342,6 +364,7 @@ func _show_new_game_page():
 
 func _show_multiplayer_page():
 	_show_page(multiplayer_page)
+	NetworkManager.refresh_lan_lobbies()
 	nickname_input.grab_focus()
 
 
@@ -358,6 +381,79 @@ func _show_join_setup():
 	nickname_input.text = NetworkManager.local_nickname
 	_show_page(join_setup_page)
 	join_address_input.grab_focus()
+
+
+func _refresh_discovered_lobbies():
+	join_discovered_button.disabled = true
+	discovered_lobbies_status.text = "Поиск лобби в локальной сети…"
+	NetworkManager.refresh_lan_lobbies()
+
+
+func _on_discovered_lobbies_changed(lobbies: Array):
+	discovered_lobbies = lobbies
+	if discovered_lobbies_list == null:
+		return
+	var selected_key := ""
+	var selected_items := discovered_lobbies_list.get_selected_items()
+	if not selected_items.is_empty():
+		var previous_metadata = discovered_lobbies_list.get_item_metadata(selected_items[0])
+		if previous_metadata is Dictionary:
+			selected_key = str(previous_metadata.get("key", ""))
+	discovered_lobbies_list.clear()
+	var restored_selection := -1
+	for lobby in discovered_lobbies:
+		if lobby is not Dictionary:
+			continue
+		var loaded_game := bool(lobby.get("loaded_game", false))
+		var world_text := "сохранение «%s»" % str(lobby.get("save_name", "Без названия")) if loaded_game else "новый мир • сид %d" % int(lobby.get("seed", 0))
+		var label := "%s • %d/%d • %s\n%s:%d" % [
+			str(lobby.get("host_name", "Хост")),
+			int(lobby.get("players", 1)),
+			int(lobby.get("max_players", NetworkManager.MAX_FACTIONS)),
+			world_text,
+			str(lobby.get("address", "")),
+			int(lobby.get("port", NetworkManager.DEFAULT_PORT)),
+		]
+		var index := discovered_lobbies_list.add_item(label)
+		discovered_lobbies_list.set_item_metadata(index, lobby.duplicate(true))
+		if str(lobby.get("key", "")) == selected_key:
+			restored_selection = index
+	if discovered_lobbies.is_empty():
+		discovered_lobbies_status.text = "Активные лобби пока не найдены. Поиск продолжается автоматически."
+	else:
+		discovered_lobbies_status.text = "Найдено лобби: %d" % discovered_lobbies.size()
+	if restored_selection >= 0:
+		discovered_lobbies_list.select(restored_selection)
+		_on_discovered_lobby_selected(restored_selection)
+	else:
+		join_discovered_button.disabled = true
+
+
+func _on_discovered_lobby_selected(index: int):
+	if index < 0 or index >= discovered_lobbies_list.item_count:
+		join_discovered_button.disabled = true
+		return
+	var lobby = discovered_lobbies_list.get_item_metadata(index)
+	if lobby is not Dictionary:
+		join_discovered_button.disabled = true
+		return
+	var is_full := int(lobby.get("players", 0)) >= int(lobby.get("max_players", NetworkManager.MAX_FACTIONS))
+	join_discovered_button.disabled = is_full
+	discovered_lobbies_status.text = "Лобби заполнено." if is_full else "Можно подключиться к этому лобби."
+
+
+func _join_discovered_lobby():
+	var selected := discovered_lobbies_list.get_selected_items()
+	if selected.is_empty():
+		return
+	var lobby = discovered_lobbies_list.get_item_metadata(selected[0])
+	if lobby is not Dictionary or int(lobby.get("players", 0)) >= int(lobby.get("max_players", NetworkManager.MAX_FACTIONS)):
+		return
+	NetworkManager.set_local_nickname(nickname_input.text)
+	nickname_input.text = NetworkManager.local_nickname
+	join_address_input.text = str(lobby.get("address", ""))
+	join_port_input.value = int(lobby.get("port", NetworkManager.DEFAULT_PORT))
+	_join_lobby()
 
 
 func _start_new_game():

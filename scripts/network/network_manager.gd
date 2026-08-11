@@ -3,6 +3,7 @@ extends Node
 signal lobby_state_changed(players: Array, settings: Dictionary)
 signal connection_state_changed(message: String)
 signal network_error(message: String)
+signal discovered_lobbies_changed(lobbies: Array)
 
 const DEFAULT_PORT := 24567
 const MAX_FACTIONS := 4
@@ -10,6 +11,11 @@ const MAX_REMOTE_PLAYERS := MAX_FACTIONS - 1
 const WORLD_SCENE := "res://scenes/world.tscn"
 const MAIN_MENU_SCENE := "res://scenes/main_menu.tscn"
 const PROFILE_PATH := "user://player.cfg"
+const DISCOVERY_PORT := 24566
+const DISCOVERY_QUERY := "SOVEREIGN_DISCOVER_V1"
+const DISCOVERY_RESPONSE := "SOVEREIGN_LOBBY_V1"
+const DISCOVERY_SCAN_INTERVAL := 1.5
+const DISCOVERY_LOBBY_TIMEOUT_MSEC := 5000
 const UNIT_STATE_SYNC_INTERVAL := 0.1
 const BUILDING_STATE_SYNC_INTERVAL := 0.5
 const MAX_UNITS_PER_COMMAND := 128
@@ -47,6 +53,10 @@ var _building_state_sync_accumulator := 0.0
 var _next_server_entity_id := SERVER_ENTITY_ID_START
 var _authoritative_resource_amounts := {}
 var _world_ready_peers := {}
+var _lan_discovery_peer: PacketPeerUDP
+var _lan_discovery_mode: StringName = &"off"
+var _lan_discovery_timer := 0.0
+var _discovered_lobbies := {}
 
 
 func _ready():
@@ -56,9 +66,11 @@ func _ready():
 	multiplayer.connected_to_server.connect(_on_connected_to_server)
 	multiplayer.connection_failed.connect(_on_connection_failed)
 	multiplayer.server_disconnected.connect(_on_server_disconnected)
+	_start_lobby_scanner()
 
 
 func _process(delta: float):
+	_process_lan_discovery(delta)
 	if not is_lan_session() or not multiplayer.is_server():
 		_unit_state_sync_accumulator = 0.0
 		_building_state_sync_accumulator = 0.0
@@ -125,6 +137,7 @@ func host_lobby(nickname: String, seed_value: int, requested_ai_count: int, port
 		"requires_faction_choice": false,
 	}
 	_reconcile_loaded_lobby_assignments()
+	_start_lobby_advertiser()
 	connection_state_changed.emit("Лобби создано. Ожидание игроков…")
 	_emit_lobby_state()
 	return ""
@@ -143,6 +156,7 @@ func join_lobby(nickname: String, address: String, port: int = DEFAULT_PORT) -> 
 		return "Не удалось начать подключение: %s" % error_string(result)
 
 	multiplayer.multiplayer_peer = peer
+	_stop_lan_discovery()
 	hosting = false
 	lan_session = true
 	lobby_active = true
@@ -164,6 +178,7 @@ func set_ready(value: bool):
 
 func prepare_singleplayer(seed_value: int, ai_count := 3):
 	shutdown_network()
+	_stop_lan_discovery()
 	lan_session = false
 	session_configured = true
 	lobby_active = false
@@ -178,6 +193,7 @@ func prepare_singleplayer(seed_value: int, ai_count := 3):
 
 func prepare_loaded_game(saved_slots: Array):
 	shutdown_network()
+	_stop_lan_discovery()
 	lan_session = false
 	session_configured = true
 	hosting = true
@@ -207,6 +223,7 @@ func shutdown_network():
 	multiplayer.multiplayer_peer = OfflineMultiplayerPeer.new()
 	_reset_runtime_state()
 	manual_shutdown = false
+	_start_lobby_scanner()
 
 
 func get_session_slots() -> Array[Dictionary]:
@@ -218,6 +235,27 @@ func get_session_slots() -> Array[Dictionary]:
 
 func get_lobby_players() -> Array:
 	return _lobby_players_to_array()
+
+
+func get_discovered_lobbies() -> Array:
+	var result: Array = []
+	for lobby in _discovered_lobbies.values():
+		var public_lobby: Dictionary = lobby.duplicate(true)
+		public_lobby.erase("last_seen_msec")
+		result.append(public_lobby)
+	result.sort_custom(func(a: Dictionary, b: Dictionary):
+		var first_host := str(a.get("host_name", "")).to_lower()
+		var second_host := str(b.get("host_name", "")).to_lower()
+		return first_host < second_host if first_host != second_host else str(a.get("address", "")) < str(b.get("address", ""))
+	)
+	return result
+
+
+func refresh_lan_lobbies():
+	if _lan_discovery_mode != &"scanner":
+		_start_lobby_scanner()
+	_lan_discovery_timer = 0.0
+	_send_discovery_query()
 
 
 func get_local_lobby_player() -> Dictionary:
@@ -376,6 +414,137 @@ func get_local_addresses() -> Array[String]:
 	return result
 
 
+func _start_lobby_scanner():
+	if lobby_active or session_configured:
+		return
+	_stop_lan_discovery()
+	var peer := PacketPeerUDP.new()
+	if peer.bind(0, "0.0.0.0") != OK:
+		return
+	peer.set_broadcast_enabled(true)
+	_lan_discovery_peer = peer
+	_lan_discovery_mode = &"scanner"
+	_lan_discovery_timer = 0.0
+
+
+func _start_lobby_advertiser():
+	_stop_lan_discovery()
+	var peer := PacketPeerUDP.new()
+	if peer.bind(DISCOVERY_PORT, "0.0.0.0") != OK:
+		return
+	_lan_discovery_peer = peer
+	_lan_discovery_mode = &"advertiser"
+
+
+func _stop_lan_discovery(clear_discovered := true):
+	if is_instance_valid(_lan_discovery_peer):
+		_lan_discovery_peer.close()
+	_lan_discovery_peer = null
+	_lan_discovery_mode = &"off"
+	_lan_discovery_timer = 0.0
+	if clear_discovered and not _discovered_lobbies.is_empty():
+		_discovered_lobbies.clear()
+		discovered_lobbies_changed.emit([])
+
+
+func _process_lan_discovery(delta: float):
+	if not is_instance_valid(_lan_discovery_peer):
+		return
+	match _lan_discovery_mode:
+		&"scanner":
+			_lan_discovery_timer -= delta
+			if _lan_discovery_timer <= 0.0:
+				_lan_discovery_timer = DISCOVERY_SCAN_INTERVAL
+				_send_discovery_query()
+			_receive_discovery_responses()
+			_expire_discovered_lobbies()
+		&"advertiser":
+			_receive_discovery_queries()
+
+
+func _send_discovery_query():
+	if _lan_discovery_mode != &"scanner" or not is_instance_valid(_lan_discovery_peer):
+		return
+	var query := DISCOVERY_QUERY.to_utf8_buffer()
+	for address in ["255.255.255.255", "127.0.0.1"]:
+		if _lan_discovery_peer.set_dest_address(address, DISCOVERY_PORT) == OK:
+			_lan_discovery_peer.put_packet(query)
+
+
+func _receive_discovery_queries():
+	if not hosting or not lobby_active or match_starting:
+		return
+	while _lan_discovery_peer.get_available_packet_count() > 0:
+		var packet := _lan_discovery_peer.get_packet()
+		var sender_address := _lan_discovery_peer.get_packet_ip()
+		var sender_port := _lan_discovery_peer.get_packet_port()
+		if packet.get_string_from_utf8() != DISCOVERY_QUERY or sender_address.is_empty() or sender_port <= 0:
+			continue
+		var response := {
+			"protocol": DISCOVERY_RESPONSE,
+			"game_port": int(lobby_settings.get("port", DEFAULT_PORT)),
+			"host_name": str(lobby_players.get(1, {}).get("nickname", local_nickname)),
+			"players": lobby_players.size(),
+			"max_players": MAX_FACTIONS,
+			"seed": int(lobby_settings.get("seed", 0)),
+			"loaded_game": bool(lobby_settings.get("loaded_game", false)),
+			"save_name": str(lobby_settings.get("save_name", "")),
+		}
+		if _lan_discovery_peer.set_dest_address(sender_address, sender_port) == OK:
+			_lan_discovery_peer.put_packet(JSON.stringify(response).to_utf8_buffer())
+
+
+func _receive_discovery_responses():
+	while _lan_discovery_peer.get_available_packet_count() > 0:
+		var packet := _lan_discovery_peer.get_packet()
+		var sender_address := _lan_discovery_peer.get_packet_ip()
+		if packet.size() <= 0 or packet.size() > 4096 or sender_address.is_empty():
+			continue
+		var parsed = JSON.parse_string(packet.get_string_from_utf8())
+		if parsed is not Dictionary or str(parsed.get("protocol", "")) != DISCOVERY_RESPONSE:
+			continue
+		var game_port := int(parsed.get("game_port", 0))
+		var players := int(parsed.get("players", 0))
+		var maximum_players := int(parsed.get("max_players", MAX_FACTIONS))
+		if game_port < 1024 or game_port > 65535 or players < 1 or maximum_players < players or maximum_players > MAX_FACTIONS:
+			continue
+		var key := "%s:%d" % [sender_address, game_port]
+		var record := {
+			"key": key,
+			"address": sender_address,
+			"port": game_port,
+			"host_name": _sanitize_nickname(str(parsed.get("host_name", "Хост"))),
+			"players": players,
+			"max_players": maximum_players,
+			"seed": int(parsed.get("seed", 0)),
+			"loaded_game": bool(parsed.get("loaded_game", false)),
+			"save_name": str(parsed.get("save_name", "")).strip_edges().left(64),
+			"last_seen_msec": Time.get_ticks_msec(),
+		}
+		var changed := not _discovered_lobbies.has(key) or _discovery_record_changed(_discovered_lobbies[key], record)
+		_discovered_lobbies[key] = record
+		if changed:
+			discovered_lobbies_changed.emit(get_discovered_lobbies())
+
+
+func _discovery_record_changed(previous: Dictionary, current: Dictionary) -> bool:
+	for field in ["address", "port", "host_name", "players", "max_players", "seed", "loaded_game", "save_name"]:
+		if previous.get(field) != current.get(field):
+			return true
+	return false
+
+
+func _expire_discovered_lobbies():
+	var now := Time.get_ticks_msec()
+	var removed := false
+	for key in _discovered_lobbies.keys():
+		if now - int(_discovered_lobbies[key].get("last_seen_msec", 0)) > DISCOVERY_LOBBY_TIMEOUT_MSEC:
+			_discovered_lobbies.erase(key)
+			removed = true
+	if removed:
+		discovered_lobbies_changed.emit(get_discovered_lobbies())
+
+
 func consume_menu_notice() -> String:
 	var result := menu_notice
 	menu_notice = ""
@@ -444,6 +613,7 @@ func _receive_lobby_state(players: Array, settings: Dictionary):
 func _receive_start_session(raw_slots: Array, settings: Dictionary, saved_world: Dictionary):
 	if session_configured:
 		return
+	_stop_lan_discovery()
 	session_slots.clear()
 	for raw_slot in raw_slots:
 		if raw_slot is Dictionary and session_slots.size() < MAX_FACTIONS:
