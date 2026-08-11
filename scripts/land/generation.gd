@@ -328,12 +328,20 @@ func _serialize_building(building: Building) -> Dictionary:
 	return result
 
 
-func get_network_unit_states() -> Array:
+func get_network_unit_states(faction_ids: Array = []) -> Array:
 	var result: Array = []
+	var faction_filter := _make_network_faction_filter(faction_ids)
 	for candidate in get_tree().get_nodes_in_group("units"):
 		if candidate is not Unit or not is_ancestor_of(candidate):
 			continue
 		var unit := candidate as Unit
+		if not faction_filter.is_empty() and not faction_filter.has(unit.faction_id):
+			continue
+		var target_resource_position := unit.global_position
+		var target_resource_record_id := 0
+		if is_instance_valid(unit.target_tree):
+			target_resource_position = unit.target_tree.global_position
+			target_resource_record_id = int(unit.target_tree.get("lod_record_id"))
 		result.append({
 			"network_id": unit.network_id,
 			"faction_id": unit.faction_id,
@@ -356,6 +364,8 @@ func get_network_unit_states() -> Array:
 			"harvest_resource_type": str(unit.harvest_resource_type),
 			"mining_job_resource_type": str(unit.mining_job_resource_type),
 			"continuous_harvest_order": unit.continuous_harvest,
+			"harvest_target_record_id": target_resource_record_id,
+			"harvest_target_position": _vector_to_data(target_resource_position),
 			"work_timer": unit.work_timer,
 			"idle_check_timer": unit.idle_check_timer,
 			"production_timer": unit.production_timer,
@@ -379,11 +389,21 @@ func get_network_unit_states() -> Array:
 	return result
 
 
-func get_network_building_states() -> Array:
+func get_network_building_states(faction_ids: Array = []) -> Array:
 	var result: Array = []
+	var faction_filter := _make_network_faction_filter(faction_ids)
 	for candidate in get_tree().get_nodes_in_group("buildings"):
-		if candidate is Building and is_ancestor_of(candidate) and not candidate.placement_preview:
+		if candidate is Building and is_ancestor_of(candidate) and not candidate.placement_preview and (faction_filter.is_empty() or faction_filter.has(candidate.faction_id)):
 			result.append(_serialize_building(candidate))
+	return result
+
+
+func _make_network_faction_filter(faction_ids: Array) -> Dictionary:
+	var result := {}
+	for raw_faction_id in faction_ids:
+		var faction_id := int(raw_faction_id)
+		if faction_id >= 0:
+			result[faction_id] = true
 	return result
 
 
@@ -391,18 +411,27 @@ func is_network_position_valid(position: Vector2) -> bool:
 	return position.x >= 0.0 and position.y >= 0.0 and position.x <= MAP_WIDTH * TILE_SIZE and position.y <= MAP_HEIGHT * TILE_SIZE
 
 
-func apply_network_unit_states(states: Array):
+func apply_network_unit_states(states: Array, authoritative_faction_ids: Array = []):
+	var authoritative_factions := _make_network_faction_filter(authoritative_faction_ids)
+	if authoritative_factions.is_empty():
+		for raw_state in states:
+			if raw_state is Dictionary:
+				authoritative_factions[int(raw_state.get("faction_id", -1))] = true
+	if authoritative_factions.is_empty():
+		return
 	var authoritative_keys := {}
 	for building in get_tree().get_nodes_in_group("buildings"):
 		if building is Building and is_ancestor_of(building):
-			building.occupants.clear()
+			for occupant in building.occupants.duplicate():
+				if not is_instance_valid(occupant) or authoritative_factions.has(occupant.faction_id):
+					building.occupants.erase(occupant)
 	for raw_state in states:
 		if raw_state is not Dictionary:
 			continue
 		var state: Dictionary = raw_state
 		var network_id := int(state.get("network_id", 0))
 		var faction_id := int(state.get("faction_id", 0))
-		if network_id <= 0:
+		if network_id <= 0 or not authoritative_factions.has(faction_id):
 			continue
 		var key := "%d:%d" % [faction_id, network_id]
 		authoritative_keys[key] = true
@@ -413,7 +442,7 @@ func apply_network_unit_states(states: Array):
 			continue
 		_apply_network_unit_state(unit, state)
 	for candidate in get_tree().get_nodes_in_group("units"):
-		if candidate is not Unit or not is_ancestor_of(candidate):
+		if candidate is not Unit or not is_ancestor_of(candidate) or not authoritative_factions.has(candidate.faction_id):
 			continue
 		var key := "%d:%d" % [candidate.faction_id, candidate.network_id]
 		if not authoritative_keys.has(key):
@@ -459,6 +488,20 @@ func _apply_network_unit_state(unit: Unit, state: Dictionary):
 	unit.facing_direction = _data_to_vector(state.get("facing_direction", [0, 1]))
 	unit.target_building = _find_building_by_network_id(int(state.get("target_building_network_id", 0)), unit.faction_id)
 	unit.target_warehouse = _find_building_by_network_id(int(state.get("target_warehouse_network_id", 0)), unit.faction_id)
+	if unit.task == Unit.Task.HARVEST:
+		var resource_target := _resolve_network_resource_target(state, unit)
+		if is_instance_valid(resource_target):
+			if is_instance_valid(unit.target_tree) and unit.target_tree != resource_target:
+				unit.target_tree.stop_harvest(unit)
+			unit.target_tree = resource_target
+		else:
+			if is_instance_valid(unit.target_tree):
+				unit.target_tree.stop_harvest(unit)
+			unit.target_tree = null
+	else:
+		if is_instance_valid(unit.target_tree):
+			unit.target_tree.stop_harvest(unit)
+		unit.target_tree = null
 	unit.inside_building = _find_building_by_network_id(int(state.get("inside_building_network_id", 0)), unit.faction_id)
 	if is_instance_valid(unit.inside_building) and unit not in unit.inside_building.occupants:
 		unit.inside_building.occupants.append(unit)
@@ -470,7 +513,27 @@ func _apply_network_unit_state(unit: Unit, state: Dictionary):
 	unit._refresh_lod_presentation()
 
 
-func apply_network_building_states(states: Array):
+func _resolve_network_resource_target(state: Dictionary, unit: Unit) -> Node2D:
+	var lod_manager := get_node_or_null("SimulationLODManager")
+	if not is_instance_valid(lod_manager):
+		return null
+	var record_id := int(state.get("harvest_target_record_id", 0))
+	if record_id > 0:
+		var record: Dictionary = lod_manager._resource_records_by_id.get(record_id, {})
+		if not record.is_empty() and int(record.get("amount", 0)) > 0:
+			return lod_manager._get_or_materialize_resource(record)
+	var resource_position := _data_to_vector(state.get("harvest_target_position", [unit.global_position.x, unit.global_position.y]))
+	return lod_manager.find_resource_near_position(unit.harvest_resource_type, resource_position, 48.0)
+
+
+func apply_network_building_states(states: Array, authoritative_faction_ids: Array = []):
+	var authoritative_factions := _make_network_faction_filter(authoritative_faction_ids)
+	if authoritative_factions.is_empty():
+		for raw_state in states:
+			if raw_state is Dictionary:
+				authoritative_factions[int(raw_state.get("faction_id", -1))] = true
+	if authoritative_factions.is_empty():
+		return
 	var authoritative_keys := {}
 	for raw_state in states:
 		if raw_state is not Dictionary:
@@ -478,7 +541,7 @@ func apply_network_building_states(states: Array):
 		var state: Dictionary = raw_state
 		var network_id := int(state.get("network_id", 0))
 		var faction_id := int(state.get("faction_id", 0))
-		if network_id <= 0:
+		if network_id <= 0 or not authoritative_factions.has(faction_id):
 			continue
 		var key := "%d:%d" % [faction_id, network_id]
 		authoritative_keys[key] = true
@@ -488,7 +551,7 @@ func apply_network_building_states(states: Array):
 		if is_instance_valid(building):
 			_apply_network_building_state(building, state)
 	for candidate in get_tree().get_nodes_in_group("buildings"):
-		if candidate is not Building or not is_ancestor_of(candidate) or candidate.placement_preview:
+		if candidate is not Building or not is_ancestor_of(candidate) or candidate.placement_preview or not authoritative_factions.has(candidate.faction_id):
 			continue
 		var key := "%d:%d" % [candidate.faction_id, candidate.network_id]
 		if not authoritative_keys.has(key):

@@ -489,7 +489,7 @@ func _get_separation_force(desired_direction: Vector2) -> Vector2:
 	var force := Vector2.ZERO
 	var nearby_units: Array = lod_manager.get_nearby_units(global_position) if is_instance_valid(lod_manager) and lod_manager.has_method("get_nearby_units") else get_tree().get_nodes_in_group("units")
 	for other in nearby_units:
-		if other == self or other is not Unit:
+		if not is_instance_valid(other) or other == self or other is not Unit:
 			continue
 		var distance: float = global_position.distance_to(other.global_position)
 		if distance > 0.01 and distance < 24.0:
@@ -703,7 +703,7 @@ func _process_harvest(delta: float):
 		return
 
 	work_timer = harvest_interval
-	var harvested: int = target_tree.harvest(1)
+	var harvested: int = target_tree.harvest(1, faction_id)
 	if harvested > 0:
 		_play_harvest_sound()
 	if harvest_resource_type == &"stone":
@@ -744,7 +744,7 @@ func _lod_process_harvest(delta: float):
 	for event_index in range(event_limit):
 		if work_timer > 0.0 or not is_instance_valid(target_tree):
 			break
-		var harvested: int = target_tree.harvest(1)
+		var harvested: int = target_tree.harvest(1, faction_id)
 		if harvest_resource_type == &"stone":
 			carried_stone += harvested
 		else:
@@ -1070,7 +1070,7 @@ func _find_available_barracks() -> Building:
 func _get_reserved_entry_count(building: Building) -> int:
 	var reserved := 0
 	for unit in get_tree().get_nodes_in_group("units"):
-		if unit == self or unit is not Unit or unit.faction_id != faction_id:
+		if not is_instance_valid(unit) or unit == self or unit is not Unit or unit.faction_id != faction_id:
 			continue
 		if unit.task == Task.ENTER_BUILDING and unit.target_building == building and not is_instance_valid(unit.inside_building):
 			reserved += 1
@@ -1489,7 +1489,7 @@ func _assign_random_spread_offsets(members: Array[Unit]):
 func _get_squad_members() -> Array[Unit]:
 	var members: Array[Unit] = []
 	for unit in get_tree().get_nodes_in_group("units"):
-		if unit is Unit and unit.faction_id == faction_id and unit.is_mobilized and unit.squad_id == squad_id:
+		if is_instance_valid(unit) and unit is Unit and unit.faction_id == faction_id and unit.is_mobilized and unit.squad_id == squad_id:
 			members.append(unit)
 	return members
 
@@ -1710,7 +1710,7 @@ func _get_collection_target(resource_type: StringName) -> int:
 
 	var carried_by_others := 0
 	for unit in get_tree().get_nodes_in_group("units"):
-		if unit == self or unit is not Unit or unit.faction_id != faction_id:
+		if not is_instance_valid(unit) or unit == self or unit is not Unit or unit.faction_id != faction_id:
 			continue
 		# Материалы резервируются только внутри одной стройки. Раньше груз
 		# одного дорожного строителя блокировал всех строителей той же линии.

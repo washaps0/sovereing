@@ -49,21 +49,21 @@ func set_lod_active(active: bool):
 	$CollisionShape2D.set_deferred("disabled", not active)
 
 
-func harvest(amount: int) -> int:
+func harvest(amount: int, source_faction_id := -1) -> int:
 	var mined := mini(amount, stone_amount)
 	stone_amount -= mined
-	_sync_lod_amount()
+	_sync_lod_amount(source_faction_id)
 	if stone_amount <= 0:
 		queue_free()
 	return mined
 
 
-func _sync_lod_amount():
+func _sync_lod_amount(source_faction_id := -1):
 	if lod_record_id <= 0:
 		return
 	var manager := get_tree().get_first_node_in_group("simulation_lod_manager")
 	if is_instance_valid(manager) and manager.has_method("update_resource_amount"):
-		manager.update_resource_amount(lod_record_id, stone_amount)
+		manager.update_resource_amount(lod_record_id, stone_amount, source_faction_id)
 
 
 func is_depleted() -> bool:

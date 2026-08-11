@@ -359,7 +359,7 @@ func clear_resource_data():
 	_next_resource_id = 1
 
 
-func update_resource_amount(record_id: int, amount: int):
+func update_resource_amount(record_id: int, amount: int, source_faction_id := -1):
 	var record: Dictionary = _resource_records_by_id.get(record_id, {})
 	if not record.is_empty():
 		record["amount"] = maxi(amount, 0)
@@ -374,7 +374,15 @@ func update_resource_amount(record_id: int, amount: int):
 				record["node"] = null
 		var network_manager := get_node_or_null("/root/NetworkManager")
 		if is_instance_valid(network_manager):
-			network_manager.replicate_resource_amount(record_id, int(record["amount"]))
+			network_manager.replicate_resource_amount(record_id, int(record["amount"]), source_faction_id)
+
+
+func get_network_resource_states() -> Array:
+	var result: Array = []
+	for record in _resource_records_by_id.values():
+		_sync_resource_record(record)
+		result.append({"record_id": int(record.get("id", 0)), "amount": int(record.get("amount", 0))})
+	return result
 
 
 func get_resource_save_data() -> Array:
@@ -478,7 +486,9 @@ func get_nearby_units(point: Vector2) -> Array:
 	var center := _point_to_chunk(point, UNIT_CHUNK_SIZE)
 	for x in range(center.x - 1, center.x + 2):
 		for y in range(center.y - 1, center.y + 2):
-			result.append_array(_unit_chunks.get(Vector2i(x, y), []))
+			for unit in _unit_chunks.get(Vector2i(x, y), []):
+				if is_instance_valid(unit) and unit is Unit:
+					result.append(unit)
 	return result
 
 
