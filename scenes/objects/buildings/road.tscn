@@ -4,7 +4,7 @@
 [ext_resource type="Texture2D" uid="uid://ddb830faej0lu" path="res://assets/objects/buildings/road.png" id="2_road"]
 
 [sub_resource type="RectangleShape2D" id="RectangleShape2D_road"]
-size = Vector2(64, 34.285717)
+size = Vector2(68, 36.57143)
 
 [node name="road" type="Area2D" unique_id=1920712489]
 scale = Vector2(1, 0.875)
@@ -16,10 +16,9 @@ stone_required = 1
 build_time = 1.5
 
 [node name="Sprite2D" type="Sprite2D" parent="." unique_id=2016977352]
-position = Vector2(0, -1.9073486e-06)
-scale = Vector2(3.0476189, 4.285714)
+position = Vector2(0, -1.1368684e-13)
+scale = Vector2(1.6, 2.25)
 texture = ExtResource("2_road")
 
 [node name="CollisionShape2D" type="CollisionShape2D" parent="." unique_id=352245143]
-position = Vector2(0, 5.449568e-07)
 shape = SubResource("RectangleShape2D_road")
