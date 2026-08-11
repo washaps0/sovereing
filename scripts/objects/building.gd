@@ -128,6 +128,15 @@ func _exit_tree():
 	occupants.clear()
 
 
+func dismantle():
+	if placement_preview or is_queued_for_deletion():
+		return
+	for unit in get_tree().get_nodes_in_group("units"):
+		if unit is Unit:
+			unit.on_building_dismantled(self)
+	queue_free()
+
+
 func _process(_delta: float):
 	_cleanup_workers()
 	_cleanup_builders()

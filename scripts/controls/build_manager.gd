@@ -10,6 +10,7 @@ const GOVERNMENT_SCENE := preload("res://scenes/objects/buildings/government.tsc
 const ROAD_SCENE := preload("res://scenes/objects/buildings/road.tscn")
 const ROAD_PREVIEW_VALID_COLOR := Color(0.95, 0.8, 0.2, 0.8)
 const ROAD_PREVIEW_INVALID_COLOR := Color(1.0, 0.25, 0.25, 0.9)
+const DISMANTLE_CONFIRMATION_TIME_MS := 4000
 const PARALLEL_ROAD_ALIGNMENT := 0.985
 const STREET_NAMES: Array[String] = [
 	"Садовая", "Лесная", "Полевая", "Речная", "Озёрная",
@@ -68,6 +69,9 @@ var quota_value_labels := {}
 var recipe_picker: OptionButton
 var factory_recipe_key := ""
 var release_occupants_button: Button
+var dismantle_button: Button
+var dismantle_confirmation_id := 0
+var dismantle_confirmation_deadline := 0
 var updating_building_controls := false
 var residents_list_key := ""
 var building_rotation_offset := 0.0
@@ -275,6 +279,11 @@ func _create_building_panel():
 	release_occupants_button.text = "Выпустить всех юнитов"
 	release_occupants_button.pressed.connect(_release_selected_building_occupants)
 	box.add_child(release_occupants_button)
+	dismantle_button = Button.new()
+	dismantle_button.text = "Разобрать постройку"
+	dismantle_button.tooltip_text = "Удалить выбранную постройку"
+	dismantle_button.pressed.connect(_on_dismantle_selected_building)
+	box.add_child(dismantle_button)
 
 
 func _add_build_button(box: VBoxContainer, text: String, scene: PackedScene):
@@ -423,6 +432,8 @@ func _update_hud():
 func _update_building_panel():
 	var building := Building.selected_building
 	if not is_instance_valid(building):
+		dismantle_confirmation_id = 0
+		dismantle_confirmation_deadline = 0
 		building_panel.visible = false
 		return
 	building_panel.visible = true
@@ -439,6 +450,7 @@ func _update_building_panel():
 	residents_settings.visible = building.is_residence() and building.is_completed()
 	release_occupants_button.visible = building.is_completed() and (building.is_factory() or building.is_residence())
 	release_occupants_button.disabled = building.occupants.is_empty() or not editable
+	_update_dismantle_button(building, editable)
 	if road_settings.visible:
 		var road := building as RoadSegment
 		building_status.text = "Строится" if road.under_construction else "Готово"
@@ -577,6 +589,8 @@ func _open_building_menu(building: Building):
 
 func _close_building_menu():
 	Building.selected_building = null
+	dismantle_confirmation_id = 0
+	dismantle_confirmation_deadline = 0
 	building_panel.visible = false
 
 
@@ -652,6 +666,39 @@ func _release_selected_building_occupants():
 	for unit in building.occupants.duplicate():
 		if is_instance_valid(unit):
 			unit.force_exit_building(building)
+
+
+func _update_dismantle_button(building: Building, editable: bool):
+	var now := Time.get_ticks_msec()
+	var building_id := building.get_instance_id()
+	if dismantle_confirmation_id != 0 and (dismantle_confirmation_id != building_id or now > dismantle_confirmation_deadline):
+		dismantle_confirmation_id = 0
+		dismantle_confirmation_deadline = 0
+	var awaiting_confirmation := dismantle_confirmation_id == building_id
+	dismantle_button.disabled = not editable
+	dismantle_button.tooltip_text = "Содержимое и материалы постройки не возвращаются"
+	if awaiting_confirmation:
+		dismantle_button.text = "Подтвердить разбор"
+	else:
+		dismantle_button.text = "Разобрать сегмент дороги" if building is RoadSegment else "Разобрать постройку"
+
+
+func _on_dismantle_selected_building():
+	var building := Building.selected_building
+	if not is_instance_valid(building) or not building.can_be_edited_locally():
+		return
+	var now := Time.get_ticks_msec()
+	var building_id := building.get_instance_id()
+	if dismantle_confirmation_id != building_id or now > dismantle_confirmation_deadline:
+		dismantle_confirmation_id = building_id
+		dismantle_confirmation_deadline = now + DISMANTLE_CONFIRMATION_TIME_MS
+		_update_dismantle_button(building, true)
+		return
+	dismantle_confirmation_id = 0
+	dismantle_confirmation_deadline = 0
+	Building.selected_building = null
+	building_panel.visible = false
+	building.dismantle()
 
 
 func _input(event: InputEvent):
