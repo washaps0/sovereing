@@ -4,6 +4,8 @@ const RESIDENCE_SCENE := preload("res://scenes/objects/buildings/residence.tscn"
 const WAREHOUSE_SCENE := preload("res://scenes/objects/buildings/warehouse.tscn")
 const FACTORY_SCENE := preload("res://scenes/objects/buildings/fabric.tscn")
 const FOOD_FACTORY_SCENE := preload("res://scenes/objects/buildings/food_fabric.tscn")
+const MINE_SCENE := preload("res://scenes/objects/buildings/mine.tscn")
+const POWER_PLANT_SCENE := preload("res://scenes/objects/buildings/power_plant.tscn")
 const GOVERNMENT_SCENE := preload("res://scenes/objects/buildings/government.tscn")
 const ROAD_SCENE := preload("res://scenes/objects/buildings/road.tscn")
 const ROAD_PREVIEW_VALID_COLOR := Color(0.95, 0.8, 0.2, 0.8)
@@ -139,6 +141,8 @@ func _create_interface():
 	_add_build_button(build_box, "Склад — 15 дерева", WAREHOUSE_SCENE)
 	_add_build_button(build_box, "Завод — 25 дерева, 10 камня", FACTORY_SCENE)
 	_add_build_button(build_box, "Пищевой завод — 20 дерева, 5 камня", FOOD_FACTORY_SCENE)
+	_add_build_button(build_box, "Шахта — 20 дерева, 10 камня", MINE_SCENE)
+	_add_build_button(build_box, "Электростанция — 30 дерева, 15 камня", POWER_PLANT_SCENE)
 	_add_build_button(build_box, "Правительство — 30 дерева, 20 камня", GOVERNMENT_SCENE)
 	var road_button := Button.new()
 	road_button.text = "Построить дорогу линией"
@@ -214,7 +218,7 @@ func _create_building_panel():
 	factory_settings = VBoxContainer.new()
 	box.add_child(factory_settings)
 	var worker_target_label := Label.new()
-	worker_target_label.text = "Работников на этом заводе:"
+	worker_target_label.text = "Работников в этом здании:"
 	factory_settings.add_child(worker_target_label)
 	factory_worker_target_input = SpinBox.new()
 	factory_worker_target_input.min_value = 0
@@ -377,9 +381,12 @@ func _update_hud():
 		unit_status.text = "Юнит не выбран"
 	var wood := 0
 	var stone := 0
+	var coal := 0
 	var planks := 0
 	var tools := 0
 	var food := 0
+	var electricity := 0
+	var electricity_capacity := 0
 	var total_capacity := 0
 	var workers := 0
 	var factory_workers := 0
@@ -397,6 +404,7 @@ func _update_hud():
 		if building is Building and building.faction_id == local_faction_id and building.is_warehouse() and building.is_completed():
 			wood += building.stored_wood
 			stone += building.stored_stone
+			coal += building.get_stored_resource(&"coal")
 			planks += building.get_stored_resource(&"planks")
 			tools += building.get_stored_resource(&"tools")
 			food += building.get_stored_resource(&"food")
@@ -404,8 +412,11 @@ func _update_hud():
 			workers += building.assigned_workers.size()
 		elif building is Building and building.faction_id == local_faction_id and building.is_factory() and building.is_completed():
 			factory_workers += building.occupants.size()
+			if building.is_power_plant():
+				electricity += building.stored_electricity
+				electricity_capacity += building.electricity_capacity
 	var food_per_minute := ceili(float(population) * 60.0 / Unit.FOOD_CONSUMPTION_INTERVAL)
-	resource_status.text = "%s\nРесурсы: %d/%d\nДерево %d | Камень %d\nДоски %d | Инструменты %d\nЕда %d | Расход %d/мин\nНаселение %d/%d | Дома %d\nДобыча %d | Заводы %d" % [_get_local_faction_name(), wood + stone + planks + tools + food, total_capacity, wood, stone, planks, tools, food, food_per_minute, population, housing_capacity, residence_count, workers, factory_workers]
+	resource_status.text = "%s\nРесурсы: %d/%d\nДерево %d | Камень %d | Уголь %d\nДоски %d | Инструменты %d\nЕда %d | Расход %d/мин\nЭлектричество %d/%d\nНаселение %d/%d | Дома %d\nДобыча %d | Производство %d" % [_get_local_faction_name(), wood + stone + coal + planks + tools + food, total_capacity, wood, stone, coal, planks, tools, food, food_per_minute, electricity, electricity_capacity, population, housing_capacity, residence_count, workers, factory_workers]
 	_update_building_panel()
 
 
@@ -526,7 +537,11 @@ func _sync_factory_recipe_controls(building: Building):
 		for resource_type in recipe["inputs"]:
 			input_parts.append("%d %s" % [int(recipe["inputs"][resource_type]), str(Building.RESOURCE_NAMES[resource_type]).to_lower()])
 		var inputs_text := "без сырья" if input_parts.is_empty() else " + ".join(input_parts)
-		hint_lines.append("%s: %s" % [recipe["name"], inputs_text])
+		var output_parts := PackedStringArray()
+		var outputs: Dictionary = recipe.get("outputs", {recipe.get("output", &"planks"): int(recipe.get("amount", 1))})
+		for resource_type in outputs:
+			output_parts.append("%d %s" % [int(outputs[resource_type]), str(Building.RESOURCE_NAMES[resource_type]).to_lower()])
+		hint_lines.append("%s: %s → %s за %.1f с" % [recipe["name"], inputs_text, " + ".join(output_parts), float(recipe["time"])])
 	recipe_hint.text = "\n".join(hint_lines)
 
 
@@ -545,7 +560,7 @@ func _try_open_building_menu(point: Vector2) -> bool:
 	query.collide_with_bodies = false
 	query.collision_mask = 1
 	for hit in world.get_world_2d().direct_space_state.intersect_point(query, 32):
-		if hit.collider is Building and hit.collider.building_kind in ["warehouse", "residence", "factory", "food_factory", "government", "road"]:
+		if hit.collider is Building and hit.collider.building_kind in ["warehouse", "residence", "factory", "food_factory", "mine", "power_plant", "government", "road"]:
 			_open_building_menu(hit.collider)
 			return true
 	return false

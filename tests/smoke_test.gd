@@ -11,14 +11,21 @@ func _run():
 	var warehouse := preload("res://scenes/objects/buildings/warehouse.tscn").instantiate() as Building
 	var factory := preload("res://scenes/objects/buildings/fabric.tscn").instantiate() as Building
 	var food_factory := preload("res://scenes/objects/buildings/food_fabric.tscn").instantiate() as Building
+	var mine := preload("res://scenes/objects/buildings/mine.tscn").instantiate() as Building
+	var power_plant := preload("res://scenes/objects/buildings/power_plant.tscn").instantiate() as Building
 	var residence := preload("res://scenes/objects/buildings/residence.tscn").instantiate() as Building
 	test_root.add_child(warehouse)
 	test_root.add_child(factory)
 	test_root.add_child(food_factory)
+	test_root.add_child(mine)
+	test_root.add_child(power_plant)
 	test_root.add_child(residence)
 	assert(residence.max_occupants == 8)
 	assert(factory.max_workers == 5)
 	assert(food_factory.max_workers == 5)
+	assert(mine.max_workers == 5)
+	assert(power_plant.max_workers == 2)
+	assert(power_plant.electricity_capacity == 20)
 	assert(warehouse.storage_capacity == 300)
 	assert(warehouse.get_total_stored() == 0)
 	assert(warehouse.store_resource(&"wood", 10) == 10)
@@ -36,6 +43,29 @@ func _run():
 	assert(food_factory.selected_recipe == &"food")
 	assert(food_factory.produce_selected_recipe())
 	assert(warehouse.get_stored_resource(&"food") == 1)
+	assert(mine.is_mine())
+	assert(mine.selected_recipe == &"mine_stone")
+	assert(is_equal_approx(mine.get_production_time(), 3.0))
+	assert(mine.produce_selected_recipe())
+	mine.set_recipe(&"mine_coal")
+	assert(mine.produce_selected_recipe())
+	mine.set_recipe(&"mine_both")
+	assert(is_equal_approx(mine.get_production_time(), 6.0))
+	assert(mine.produce_selected_recipe())
+	assert(warehouse.get_stored_resource(&"stone") == 10)
+	assert(warehouse.get_stored_resource(&"coal") == 2)
+	assert(warehouse.store_resource(&"coal", 8) == 8)
+	assert(power_plant.is_power_plant())
+	assert(power_plant.selected_recipe == &"electricity")
+	assert(power_plant.produce_selected_recipe())
+	assert(power_plant.stored_electricity == 4)
+	assert(warehouse.get_stored_resource(&"coal") == 9)
+	for production_cycle in range(4):
+		assert(power_plant.produce_selected_recipe())
+	assert(power_plant.stored_electricity == power_plant.electricity_capacity)
+	assert(not power_plant.can_produce_selected_recipe())
+	assert(power_plant.take_electricity(6) == 6)
+	assert(power_plant.stored_electricity == 14)
 	var label_worker := preload("res://scenes/objects/unit.tscn").instantiate() as Unit
 	test_root.add_child(label_worker)
 	assert(factory.try_enter(label_worker))
@@ -170,7 +200,7 @@ func _run():
 	rotation_world.add_child(rotation_roads)
 	var build_manager = preload("res://scripts/controls/build_manager.gd").new()
 	rotation_world.add_child(build_manager)
-	assert(build_manager.build_buttons.size() == 6)
+	assert(build_manager.build_buttons.size() == 8)
 	for build_button in build_manager.build_buttons:
 		assert(build_button.icon != null)
 		assert(build_button.alignment == HORIZONTAL_ALIGNMENT_LEFT)
@@ -288,6 +318,7 @@ func _run():
 	save_world.get_node("buildings").add_child(saved_warehouse)
 	saved_warehouse.store_resource(&"wood", 25)
 	saved_warehouse.store_resource(&"food", 8)
+	saved_warehouse.store_resource(&"coal", 6)
 	var saved_government := preload("res://scenes/objects/buildings/government.tscn").instantiate() as GovernmentBuilding
 	saved_government.position = Vector2(220, 240)
 	saved_government.migration_target = 12
@@ -296,6 +327,15 @@ func _run():
 	saved_factory.position = Vector2(320, 240)
 	save_world.get_node("buildings").add_child(saved_factory)
 	saved_factory.set_worker_target(2)
+	var saved_mine := preload("res://scenes/objects/buildings/mine.tscn").instantiate() as Building
+	saved_mine.position = Vector2(420, 240)
+	save_world.get_node("buildings").add_child(saved_mine)
+	saved_mine.set_recipe(&"mine_both")
+	var saved_power_plant := preload("res://scenes/objects/buildings/power_plant.tscn").instantiate() as Building
+	saved_power_plant.position = Vector2(520, 240)
+	save_world.get_node("buildings").add_child(saved_power_plant)
+	saved_power_plant.stored_electricity = 12
+	saved_power_plant.set_worker_target(1)
 	var saved_unit := preload("res://scenes/objects/unit.tscn").instantiate() as Unit
 	saved_unit.unit_name = "Тестовый житель"
 	saved_unit.position = Vector2(300, 320)
@@ -322,16 +362,17 @@ func _run():
 			break
 	assert(not saved_entry.is_empty())
 	var saved_file: Dictionary = save_manager._read_save(str(saved_entry.path))
-	assert(saved_file.world.buildings.size() == 3)
+	assert(saved_file.world.buildings.size() == 5)
 	assert(saved_file.world.units.size() == 1)
 	assert(saved_file.world.resources.size() == 1)
 	assert(saved_file.world.session_slots.size() == 2)
 	assert(str(saved_file.world.session_slots[0].owner_id) == network_manager.local_player_id)
 	assert(saved_file.world.buildings[0].stored.food == 8)
+	assert(saved_file.world.buildings[0].stored.coal == 6)
 	assert(is_equal_approx(float(saved_file.world.units[0].food_timer), 12.5))
 	var restored_world := _make_minimal_world()
 	restored_world.apply_save_data(saved_file.world)
-	assert(restored_world.get_node("buildings").get_child_count() == 3)
+	assert(restored_world.get_node("buildings").get_child_count() == 5)
 	assert(restored_world.get_node("trees").get_child_count() == 1)
 	var restored_units := restored_world.get_tree().get_nodes_in_group("units").filter(func(candidate): return restored_world.is_ancestor_of(candidate) and candidate.unit_name == "Тестовый житель")
 	assert(restored_units.size() == 1)
@@ -339,12 +380,20 @@ func _run():
 	assert(restored_units[0].missed_meals == 1)
 	var restored_warehouse := restored_world.get_node("buildings").get_child(0) as Building
 	assert(restored_warehouse.get_stored_resource(&"food") == 8)
+	assert(restored_warehouse.get_stored_resource(&"coal") == 6)
 	var restored_governments := restored_world.get_node("buildings").get_children().filter(func(candidate): return candidate is GovernmentBuilding)
 	assert(restored_governments.size() == 1)
 	assert(restored_governments[0].migration_target == 12)
-	var restored_factories := restored_world.get_node("buildings").get_children().filter(func(candidate): return candidate is Building and candidate.is_factory())
+	var restored_factories := restored_world.get_node("buildings").get_children().filter(func(candidate): return candidate is Building and candidate.building_kind == "factory")
 	assert(restored_factories.size() == 1)
 	assert(restored_factories[0].get_worker_target() == 2)
+	var restored_mines := restored_world.get_node("buildings").get_children().filter(func(candidate): return candidate is Building and candidate.is_mine())
+	assert(restored_mines.size() == 1)
+	assert(restored_mines[0].selected_recipe == &"mine_both")
+	var restored_power_plants := restored_world.get_node("buildings").get_children().filter(func(candidate): return candidate is Building and candidate.is_power_plant())
+	assert(restored_power_plants.size() == 1)
+	assert(restored_power_plants[0].stored_electricity == 12)
+	assert(restored_power_plants[0].get_worker_target() == 1)
 	var full_saved_slots: Array = [
 		network_manager._make_slot(0, 0, "ИИ 1", true, ""),
 		network_manager._make_slot(1, 0, "Борис (ИИ)", true, "owner-b"),

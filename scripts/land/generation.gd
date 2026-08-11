@@ -11,6 +11,8 @@ const RESIDENCE_SCENE := preload("res://scenes/objects/buildings/residence.tscn"
 const WAREHOUSE_SCENE := preload("res://scenes/objects/buildings/warehouse.tscn")
 const FACTORY_SCENE := preload("res://scenes/objects/buildings/fabric.tscn")
 const FOOD_FACTORY_SCENE := preload("res://scenes/objects/buildings/food_fabric.tscn")
+const MINE_SCENE := preload("res://scenes/objects/buildings/mine.tscn")
+const POWER_PLANT_SCENE := preload("res://scenes/objects/buildings/power_plant.tscn")
 const GOVERNMENT_SCENE := preload("res://scenes/objects/buildings/government.tscn")
 const ROAD_SCENE := preload("res://scenes/objects/buildings/road.tscn")
 const SPAWN_MARGIN := 320.0
@@ -212,6 +214,7 @@ func _serialize_building(building: Building) -> Dictionary:
 		"stored": {
 			"wood": building.stored_wood,
 			"stone": building.stored_stone,
+			"coal": building.get_stored_resource(&"coal"),
 			"planks": building.get_stored_resource(&"planks"),
 			"tools": building.get_stored_resource(&"tools"),
 			"food": building.get_stored_resource(&"food"),
@@ -219,6 +222,7 @@ func _serialize_building(building: Building) -> Dictionary:
 		"limits": limits,
 		"recipe": str(building.selected_recipe),
 		"desired_workers": building.get_worker_target() if building.is_factory() else 0,
+		"stored_electricity": building.stored_electricity,
 	}
 	if building is RoadSegment:
 		result["street_name"] = building.street_name
@@ -289,6 +293,8 @@ func _restore_building(data: Dictionary):
 		"warehouse": scene = WAREHOUSE_SCENE
 		"factory": scene = FACTORY_SCENE
 		"food_factory": scene = FOOD_FACTORY_SCENE
+		"mine": scene = MINE_SCENE
+		"power_plant": scene = POWER_PLANT_SCENE
 		"government": scene = GOVERNMENT_SCENE
 		"road": scene = ROAD_SCENE
 		_: scene = RESIDENCE_SCENE
@@ -315,9 +321,11 @@ func _restore_building(data: Dictionary):
 	var stored: Dictionary = data.get("stored", {})
 	building.stored_wood = int(stored.get("wood", 0))
 	building.stored_stone = int(stored.get("stone", 0))
+	building.stored_products[&"coal"] = int(stored.get("coal", 0))
 	building.stored_products[&"planks"] = int(stored.get("planks", 0))
 	building.stored_products[&"tools"] = int(stored.get("tools", 0))
 	building.stored_products[&"food"] = int(stored.get("food", 0))
+	building.stored_electricity = clampi(int(data.get("stored_electricity", 0)), 0, building.electricity_capacity)
 	var limits: Dictionary = data.get("limits", {})
 	_restore_storage_limits(building, limits)
 	building.set_recipe(StringName(data.get("recipe", "planks")))
@@ -369,12 +377,14 @@ func _restore_storage_limits(building: Building, limits: Dictionary):
 		return
 	for resource_type in Building.RESOURCE_TYPES:
 		building.storage_limits[resource_type] = int(limits.get(str(resource_type), 0))
-	# В сохранениях до появления еды сумма четырёх квот уже занимала весь склад.
-	# Выделяем еде место за счёт свободной части старых квот, не удаляя ресурсы.
+	# Новые ресурсы получают квоты и в старых сохранениях. Место выделяется за
+	# счёт незанятой части прежних квот, уже сохранённые ресурсы не удаляются.
 	if not limits.has("food"):
 		building.storage_limits[&"food"] = 40
+	if not limits.has("coal"):
+		building.storage_limits[&"coal"] = 40
 	var overflow := maxi(building.get_total_storage_limits() - building.storage_capacity, 0)
-	for resource_type in [&"stone", &"wood", &"planks", &"tools", &"food"]:
+	for resource_type in [&"stone", &"wood", &"planks", &"tools", &"food", &"coal"]:
 		if overflow <= 0:
 			break
 		var current_limit := building.get_storage_limit(resource_type)
@@ -491,6 +501,8 @@ func _ensure_ai_starting_plan(faction_id: int, faction_name: String):
 	_spawn_ai_building(RESIDENCE_SCENE, base + Vector2(150.0 * inward_x, 125.0 * inward_y), rotation_angle, faction_id, faction_name, faction_id * 1000 + 103, street_name, 2)
 	_spawn_ai_building(FACTORY_SCENE, base + Vector2(110.0 * inward_x, 185.0 * inward_y), rotation_angle, faction_id, faction_name, faction_id * 1000 + 104, street_name, 3)
 	_spawn_ai_building(FOOD_FACTORY_SCENE, base + Vector2(195.0 * inward_x, 185.0 * inward_y), rotation_angle, faction_id, faction_name, faction_id * 1000 + 105, street_name, 4)
+	_spawn_ai_building(MINE_SCENE, base + Vector2(110.0 * inward_x, 245.0 * inward_y), rotation_angle, faction_id, faction_name, faction_id * 1000 + 106, street_name, 5)
+	_spawn_ai_building(POWER_PLANT_SCENE, base + Vector2(205.0 * inward_x, 245.0 * inward_y), rotation_angle, faction_id, faction_name, faction_id * 1000 + 107, street_name, 6)
 
 
 func _spawn_ai_building(scene: PackedScene, position: Vector2, rotation_angle: float, faction_id: int, faction_name: String, entity_id: int, street_name: String, house_number: int):

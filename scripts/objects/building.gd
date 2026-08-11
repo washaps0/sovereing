@@ -1,13 +1,15 @@
 class_name Building
 extends Area2D
 
-const RESOURCE_TYPES: Array[StringName] = [&"wood", &"stone", &"planks", &"tools", &"food"]
+const RESOURCE_TYPES: Array[StringName] = [&"wood", &"stone", &"coal", &"planks", &"tools", &"food"]
 const RESOURCE_NAMES := {
 	&"wood": "Дерево",
 	&"stone": "Камень",
+	&"coal": "Уголь",
 	&"planks": "Доски",
 	&"tools": "Инструменты",
 	&"food": "Еда",
+	&"electricity": "Электричество",
 }
 const FACTORY_RECIPES := {
 	&"planks": {
@@ -31,9 +33,35 @@ const FACTORY_RECIPES := {
 		"amount": 1,
 		"time": 4.0,
 	},
+	&"mine_stone": {
+		"name": "Камень",
+		"inputs": {},
+		"outputs": {&"stone": 1},
+		"time": 3.0,
+	},
+	&"mine_coal": {
+		"name": "Уголь",
+		"inputs": {},
+		"outputs": {&"coal": 1},
+		"time": 3.0,
+	},
+	&"mine_both": {
+		"name": "Камень и уголь (медленнее ×2)",
+		"inputs": {},
+		"outputs": {&"stone": 1, &"coal": 1},
+		"time": 6.0,
+	},
+	&"electricity": {
+		"name": "Электричество",
+		"inputs": {&"coal": 1},
+		"outputs": {&"electricity": 4},
+		"time": 4.0,
+	},
 }
 const INDUSTRIAL_RECIPES: Array[StringName] = [&"planks", &"tools"]
 const FOOD_RECIPES: Array[StringName] = [&"food"]
+const MINE_RECIPES: Array[StringName] = [&"mine_stone", &"mine_coal", &"mine_both"]
+const POWER_PLANT_RECIPES: Array[StringName] = [&"electricity"]
 
 @export var display_name := "Здание"
 @export var building_kind := "residence"
@@ -41,6 +69,7 @@ const FOOD_RECIPES: Array[StringName] = [&"food"]
 @export var stone_required := 0
 @export var build_time := 5.0
 @export var storage_capacity := 0
+@export var electricity_capacity := 0
 @export var max_workers := 0
 @export var desired_workers := 5
 @export var max_occupants := 8
@@ -56,7 +85,8 @@ var delivered_stone := 0
 var build_progress := 0.0
 var stored_wood := 0
 var stored_stone := 0
-var stored_products := {&"planks": 0, &"tools": 0, &"food": 0}
+var stored_products := {&"coal": 0, &"planks": 0, &"tools": 0, &"food": 0}
+var stored_electricity := 0
 var storage_limits := {}
 var under_construction := false
 var assigned_workers: Array[Unit] = []
@@ -78,7 +108,7 @@ func _ready():
 	add_to_group("buildings")
 	if is_warehouse():
 		storage_capacity = 300
-		storage_limits = {&"wood": 40, &"stone": 160, &"planks": 40, &"tools": 20, &"food": 40}
+		storage_limits = {&"wood": 40, &"stone": 120, &"coal": 40, &"planks": 40, &"tools": 20, &"food": 40}
 	var available_recipes := get_available_recipe_types()
 	if is_factory() and selected_recipe not in available_recipes:
 		selected_recipe = available_recipes[0]
@@ -330,11 +360,19 @@ func is_warehouse() -> bool:
 
 
 func is_factory() -> bool:
-	return building_kind in ["factory", "food_factory"]
+	return building_kind in ["factory", "food_factory", "mine", "power_plant"]
 
 
 func is_food_factory() -> bool:
 	return building_kind == "food_factory"
+
+
+func is_mine() -> bool:
+	return building_kind == "mine"
+
+
+func is_power_plant() -> bool:
+	return building_kind == "power_plant"
 
 
 func is_residence() -> bool:
@@ -503,7 +541,13 @@ func get_recipe() -> Dictionary:
 
 
 func get_available_recipe_types() -> Array[StringName]:
-	return FOOD_RECIPES if is_food_factory() else INDUSTRIAL_RECIPES
+	if is_food_factory():
+		return FOOD_RECIPES
+	if is_mine():
+		return MINE_RECIPES
+	if is_power_plant():
+		return POWER_PLANT_RECIPES
+	return INDUSTRIAL_RECIPES
 
 
 func get_recipe_name(recipe_type: StringName) -> String:
@@ -531,10 +575,9 @@ func can_produce_selected_recipe() -> bool:
 	if not is_factory() or not is_completed():
 		return false
 	var recipe := get_recipe()
-	var output: StringName = recipe["output"]
-	var output_amount: int = recipe["amount"]
-	if _get_network_space(output) < output_amount:
-		return false
+	for output in _get_recipe_outputs(recipe):
+		if _get_output_space(output) < int(_get_recipe_outputs(recipe)[output]):
+			return false
 	var inputs: Dictionary = recipe["inputs"]
 	for resource_type in inputs:
 		if _get_network_amount(resource_type) < int(inputs[resource_type]):
@@ -548,21 +591,25 @@ func get_factory_status_text() -> String:
 	if not is_completed():
 		return "Производство начнётся после завершения строительства."
 	if get_worker_target() == 0:
-		return "Остановлен: для этого завода задано 0 работников."
+		return "Остановлено: для этого здания задано 0 работников."
 	var recipe := get_recipe()
-	var output: StringName = recipe["output"]
-	var output_amount: int = recipe["amount"]
-	if _get_network_space(output) < output_amount:
-		return "Остановлен: на складах нет места по квоте «%s»." % RESOURCE_NAMES.get(output, str(output))
+	var outputs := _get_recipe_outputs(recipe)
+	for output in outputs:
+		if _get_output_space(output) < int(outputs[output]):
+			if output == &"electricity":
+				return "Остановлено: запас электричества заполнен (%d/%d)." % [stored_electricity, electricity_capacity]
+			return "Остановлено: на складах нет места по квоте «%s»." % RESOURCE_NAMES.get(output, str(output))
 	var inputs: Dictionary = recipe["inputs"]
 	for resource_type in inputs:
 		var required := int(inputs[resource_type])
 		var available := _get_network_amount(resource_type)
 		if available < required:
-			return "Остановлен: не хватает ресурса «%s» (%d/%d)." % [RESOURCE_NAMES.get(resource_type, str(resource_type)), available, required]
+			return "Остановлено: не хватает ресурса «%s» (%d/%d)." % [RESOURCE_NAMES.get(resource_type, str(resource_type)), available, required]
 	if occupants.is_empty():
-		return "Ожидает рабочих: сырьё и место на складе доступны."
-	return "Производство работает: сырьё и место на складе доступны."
+		return "Ожидает рабочих: сырьё и место для продукции доступны."
+	if is_power_plant():
+		return "Электростанция работает. Запас: %d/%d." % [stored_electricity, electricity_capacity]
+	return "Производство работает: сырьё и место для продукции доступны."
 
 
 func produce_selected_recipe() -> bool:
@@ -572,13 +619,39 @@ func produce_selected_recipe() -> bool:
 	var inputs: Dictionary = recipe["inputs"]
 	for resource_type in inputs:
 		_take_from_network(resource_type, int(inputs[resource_type]))
-	var remaining: int = recipe["amount"]
-	var output: StringName = recipe["output"]
-	for warehouse in _get_warehouses():
-		remaining -= warehouse.store_resource(output, remaining)
-		if remaining <= 0:
-			break
-	return remaining <= 0
+	var produced_everything := true
+	var outputs := _get_recipe_outputs(recipe)
+	for output in outputs:
+		var remaining := int(outputs[output])
+		if output == &"electricity" and is_power_plant():
+			var accepted := mini(remaining, maxi(electricity_capacity - stored_electricity, 0))
+			stored_electricity += accepted
+			remaining -= accepted
+		else:
+			for warehouse in _get_warehouses():
+				remaining -= warehouse.store_resource(output, remaining)
+				if remaining <= 0:
+					break
+		produced_everything = produced_everything and remaining <= 0
+	return produced_everything
+
+
+func _get_recipe_outputs(recipe: Dictionary) -> Dictionary:
+	if recipe.has("outputs"):
+		return recipe["outputs"]
+	return {StringName(recipe.get("output", &"planks")): int(recipe.get("amount", 1))}
+
+
+func _get_output_space(resource_type: StringName) -> int:
+	if resource_type == &"electricity" and is_power_plant():
+		return maxi(electricity_capacity - stored_electricity, 0)
+	return _get_network_space(resource_type)
+
+
+func take_electricity(amount: int) -> int:
+	var taken := mini(maxi(amount, 0), stored_electricity)
+	stored_electricity -= taken
+	return taken
 
 
 func _get_warehouses() -> Array[Building]:
