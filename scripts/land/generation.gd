@@ -1166,23 +1166,23 @@ func _ensure_ai_starting_plan(faction_id: int, faction_name: String):
 		_spawn_ai_road_segment(block_center + Vector2(x_index * RoadSegment.SEGMENT_LENGTH, 0.0), 0.0, faction_id, faction_name, next_entity_id, main_street)
 		next_entity_id += 1
 	for y_index in range(-2, 3):
-		_spawn_ai_road_segment(block_center + Vector2(224.0 * inward_x, y_index * RoadSegment.SEGMENT_LENGTH), PI * 0.5, faction_id, faction_name, next_entity_id, cross_street)
+		_spawn_ai_road_segment(block_center + Vector2(3.0 * RoadSegment.SEGMENT_LENGTH * inward_x, y_index * RoadSegment.SEGMENT_LENGTH), PI * 0.5, faction_id, faction_name, next_entity_id, cross_street)
 		next_entity_id += 1
 
 	# Здания стоят двумя рядами вдоль главной улицы. Интервалы рассчитаны по
 	# реальным коллизиям самых широких зданий.
 	var building_id := faction_id * 1000 + 201
-	_spawn_ai_building(WAREHOUSE_SCENE, block_center + Vector2(-120.0, -62.0), PI, faction_id, faction_name, building_id, main_street, 1)
+	_spawn_ai_building(WAREHOUSE_SCENE, block_center + Vector2(-120.0, -62.0), 0.0, faction_id, faction_name, building_id, main_street, 1)
 	building_id += 1
-	_spawn_ai_building(RESIDENCE_SCENE, block_center + Vector2(0.0, -62.0), PI, faction_id, faction_name, building_id, main_street, 2)
+	_spawn_ai_building(RESIDENCE_SCENE, block_center + Vector2(0.0, -62.0), 0.0, faction_id, faction_name, building_id, main_street, 2)
 	building_id += 1
-	_spawn_ai_building(FACTORY_SCENE, block_center + Vector2(120.0, -62.0), PI, faction_id, faction_name, building_id, main_street, 3)
+	_spawn_ai_building(FACTORY_SCENE, block_center + Vector2(120.0, -62.0), 0.0, faction_id, faction_name, building_id, main_street, 3)
 	building_id += 1
-	_spawn_ai_building(FOOD_FACTORY_SCENE, block_center + Vector2(-120.0, 62.0), 0.0, faction_id, faction_name, building_id, main_street, 4)
+	_spawn_ai_building(FOOD_FACTORY_SCENE, block_center + Vector2(-120.0, 62.0), PI, faction_id, faction_name, building_id, main_street, 4)
 	building_id += 1
-	_spawn_ai_building(MINE_SCENE, block_center + Vector2(0.0, 62.0), 0.0, faction_id, faction_name, building_id, main_street, 5)
+	_spawn_ai_building(MINE_SCENE, block_center + Vector2(0.0, 62.0), PI, faction_id, faction_name, building_id, main_street, 5)
 	building_id += 1
-	_spawn_ai_building(POWER_PLANT_SCENE, block_center + Vector2(120.0, 62.0), 0.0, faction_id, faction_name, building_id, main_street, 6)
+	_spawn_ai_building(POWER_PLANT_SCENE, block_center + Vector2(120.0, 62.0), PI, faction_id, faction_name, building_id, main_street, 6)
 
 
 func _plan_ai_expansion(faction_id: int, faction_name: String):
@@ -1192,9 +1192,10 @@ func _plan_ai_expansion(faction_id: int, faction_name: String):
 	var inward_x := 1.0 if faction_id in [0, 2] else -1.0
 	var inward_y := 1.0 if faction_id in [0, 1] else -1.0
 	var starting_center := base + Vector2(220.0 * inward_x, 190.0 * inward_y)
-	var last_developed_center := starting_center + _get_ai_district_offset(requested_stage - 1, inward_x, inward_y)
 	for expansion_stage in range(requested_stage, requested_stage + AI_DISTRICT_SEARCH_ATTEMPTS):
-		var plan := _make_ai_district_plan(expansion_stage, last_developed_center, starting_center, inward_x, inward_y, faction_id)
+		var district_center := _get_ai_district_center(expansion_stage, starting_center, inward_x, inward_y)
+		var connection_start := _find_ai_road_connection_position(faction_id, district_center, starting_center)
+		var plan := _make_ai_district_plan(expansion_stage, connection_start, starting_center, inward_x, inward_y, faction_id)
 		var road_specs: Array[Dictionary] = plan.road_specs
 		var building_specs: Array[Dictionary] = plan.building_specs
 		if not _is_ai_district_plan_free(road_specs, building_specs, faction_id, faction_name):
@@ -1212,9 +1213,7 @@ func _plan_ai_expansion(faction_id: int, faction_name: String):
 
 
 func _make_ai_district_plan(expansion_stage: int, connection_start: Vector2, starting_center: Vector2, inward_x: float, inward_y: float, faction_id: int) -> Dictionary:
-	var district_center := starting_center + _get_ai_district_offset(expansion_stage, inward_x, inward_y)
-	var world_limit := Vector2(MAP_WIDTH * TILE_SIZE, MAP_HEIGHT * TILE_SIZE) - Vector2.ONE * SPAWN_MARGIN
-	district_center = district_center.clamp(Vector2.ONE * SPAWN_MARGIN, world_limit)
+	var district_center := _get_ai_district_center(expansion_stage, starting_center, inward_x, inward_y)
 	var street_name := "Квартал ИИ %d-%d" % [faction_id + 1, expansion_stage]
 	var connector_name := "Поперечная ИИ %d-%d" % [faction_id + 1, expansion_stage]
 	var road_specs: Array[Dictionary] = []
@@ -1243,10 +1242,11 @@ func _make_ai_district_plan(expansion_stage: int, connection_start: Vector2, sta
 	for scene_index in range(planned_scenes.size()):
 		var upper_row := scene_index < AI_DISTRICT_BUILDING_X_SLOTS.size()
 		var slot_index := scene_index if upper_row else scene_index - AI_DISTRICT_BUILDING_X_SLOTS.size()
+		var building_position := district_center + Vector2(AI_DISTRICT_BUILDING_X_SLOTS[slot_index], -AI_DISTRICT_BUILDING_ROW_OFFSET if upper_row else AI_DISTRICT_BUILDING_ROW_OFFSET)
 		building_specs.append({
 			"scene": planned_scenes[scene_index],
-			"position": district_center + Vector2(AI_DISTRICT_BUILDING_X_SLOTS[slot_index], -AI_DISTRICT_BUILDING_ROW_OFFSET if upper_row else AI_DISTRICT_BUILDING_ROW_OFFSET),
-			"rotation": PI if upper_row else 0.0,
+			"position": building_position,
+			"rotation": _get_ai_building_rotation(building_position, district_center, 0.0),
 			"house_number": scene_index + 1,
 		})
 	return {
@@ -1273,6 +1273,67 @@ func _get_ai_district_offset(stage: int, inward_x: float, inward_y: float) -> Ve
 	var index_in_row := zero_based_stage % AI_DISTRICT_COLUMNS
 	var column := index_in_row + 1 if row % 2 == 0 else AI_DISTRICT_COLUMNS - index_in_row
 	return Vector2(column * AI_DISTRICT_COLUMN_STEP * inward_x, row * AI_DISTRICT_ROW_STEP * inward_y)
+
+
+func _get_ai_district_center(stage: int, starting_center: Vector2, inward_x: float, inward_y: float) -> Vector2:
+	var desired_center := starting_center + _get_ai_district_offset(stage, inward_x, inward_y)
+	var minimum := Vector2.ONE * SPAWN_MARGIN
+	var maximum := Vector2(MAP_WIDTH * TILE_SIZE, MAP_HEIGHT * TILE_SIZE) - minimum
+	var minimum_grid_step := Vector2i(
+		ceili((minimum.x - starting_center.x) / RoadSegment.SEGMENT_LENGTH),
+		ceili((minimum.y - starting_center.y) / RoadSegment.SEGMENT_LENGTH)
+	)
+	var maximum_grid_step := Vector2i(
+		floori((maximum.x - starting_center.x) / RoadSegment.SEGMENT_LENGTH),
+		floori((maximum.y - starting_center.y) / RoadSegment.SEGMENT_LENGTH)
+	)
+	var desired_grid_step := Vector2i(
+		roundi((desired_center.x - starting_center.x) / RoadSegment.SEGMENT_LENGTH),
+		roundi((desired_center.y - starting_center.y) / RoadSegment.SEGMENT_LENGTH)
+	)
+	desired_grid_step.x = clampi(desired_grid_step.x, minimum_grid_step.x, maximum_grid_step.x)
+	desired_grid_step.y = clampi(desired_grid_step.y, minimum_grid_step.y, maximum_grid_step.y)
+	return starting_center + Vector2(desired_grid_step.x, desired_grid_step.y) * RoadSegment.SEGMENT_LENGTH
+
+
+func _find_ai_road_connection_position(faction_id: int, target_position: Vector2, grid_origin: Vector2) -> Vector2:
+	var nearest_position: Vector2 = grid_origin
+	var nearest_distance: float = INF
+	for candidate in get_tree().get_nodes_in_group("roads"):
+		if not is_instance_valid(candidate) or candidate is not RoadSegment or candidate.faction_id != faction_id:
+			continue
+		var road := candidate as RoadSegment
+		var grid_offset: Vector2 = (road.position - grid_origin) / RoadSegment.SEGMENT_LENGTH
+		if absf(grid_offset.x - roundf(grid_offset.x)) > 0.01 or absf(grid_offset.y - roundf(grid_offset.y)) > 0.01:
+			continue
+		var distance: float = road.position.distance_squared_to(target_position)
+		if distance < nearest_distance:
+			nearest_position = road.position
+			nearest_distance = distance
+	return nearest_position
+
+
+func _find_nearest_ai_road(faction_id: int, target_position: Vector2) -> RoadSegment:
+	var nearest: RoadSegment
+	var nearest_distance: float = INF
+	for candidate in get_tree().get_nodes_in_group("roads"):
+		if not is_instance_valid(candidate) or candidate is not RoadSegment or candidate.faction_id != faction_id:
+			continue
+		var road := candidate as RoadSegment
+		var distance: float = road.position.distance_squared_to(target_position)
+		if distance < nearest_distance:
+			nearest = road
+			nearest_distance = distance
+	return nearest
+
+
+func _get_ai_building_rotation(building_position: Vector2, road_position: Vector2, road_rotation: float) -> float:
+	var road_direction := Vector2.RIGHT.rotated(road_rotation)
+	var road_perpendicular := Vector2(-road_direction.y, road_direction.x)
+	var side := signf((building_position - road_position).dot(road_perpendicular))
+	if side == 0.0:
+		side = 1.0
+	return wrapf(road_rotation + (PI if side > 0.0 else 0.0), -PI, PI)
 
 
 func _is_ai_district_plan_free(road_specs: Array[Dictionary], building_specs: Array[Dictionary], faction_id: int, faction_name: String) -> bool:
@@ -1347,6 +1408,9 @@ func _spawn_ai_building(scene: PackedScene, position: Vector2, rotation_angle: f
 	building.network_id = entity_id
 	building.name = "Building_%d" % entity_id
 	building.position = position
+	var nearest_road := _find_nearest_ai_road(faction_id, position)
+	if is_instance_valid(nearest_road):
+		rotation_angle = _get_ai_building_rotation(position, nearest_road.position, nearest_road.rotation)
 	building.rotation = rotation_angle
 	if not _is_ai_building_position_free(building):
 		building.free()

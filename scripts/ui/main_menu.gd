@@ -40,9 +40,15 @@ var faction_choice_picker: OptionButton
 var updating_faction_choice := false
 var saves: Array[Dictionary] = []
 var current_ui_scale := -1.0
+@onready var lobby_music: AudioStreamPlayer = $LobbyMusic
 
 
 func _ready():
+	if is_instance_valid(lobby_music):
+		var mp3_stream := lobby_music.stream as AudioStreamMP3
+		if mp3_stream != null:
+			mp3_stream.loop = true
+		lobby_music.play()
 	current_ui_scale = SovereignUITheme.get_scale(get_viewport().get_visible_rect().size)
 	theme = SovereignUITheme.create_theme(current_ui_scale)
 	_create_interface()
