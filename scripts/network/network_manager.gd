@@ -12,13 +12,17 @@ const MAIN_MENU_SCENE := "res://scenes/main_menu.tscn"
 const PROFILE_PATH := "user://player.cfg"
 
 var local_nickname := "Игрок"
+var local_player_id := ""
 var lobby_players := {}
 var pending_peers := {}
 var lobby_settings := {
 	"seed": 12345,
 	"requested_ai_count": 0,
 	"port": DEFAULT_PORT,
+	"loaded_game": false,
+	"saved_slots": [],
 }
+var loaded_world_data: Dictionary = {}
 var session_slots: Array[Dictionary] = []
 var lobby_active := false
 var session_configured := false
@@ -45,7 +49,7 @@ func set_local_nickname(value: String):
 	_save_profile()
 
 
-func host_lobby(nickname: String, seed_value: int, requested_ai_count: int, port: int = DEFAULT_PORT) -> String:
+func host_lobby(nickname: String, seed_value: int, requested_ai_count: int, port: int = DEFAULT_PORT, saved_game: Dictionary = {}) -> String:
 	shutdown_network()
 	set_local_nickname(nickname)
 	var safe_port := clampi(port, 1024, 65535)
@@ -62,17 +66,28 @@ func host_lobby(nickname: String, seed_value: int, requested_ai_count: int, port
 	connection_pending = false
 	match_starting = false
 	join_order_counter = 1
+	var loading_save := saved_game.has("world") and saved_game.has("meta")
+	loaded_world_data = saved_game.world.duplicate(true) if loading_save else {}
+	var saved_slots: Array = _infer_saved_slots(loaded_world_data, _normalize_saved_slots(loaded_world_data.get("session_slots", []))) if loading_save else []
 	lobby_settings = {
 		"seed": seed_value,
 		"requested_ai_count": clampi(requested_ai_count, 0, MAX_FACTIONS),
 		"port": safe_port,
+		"loaded_game": loading_save,
+		"save_name": str(saved_game.get("meta", {}).get("name", "Без названия")) if loading_save else "",
+		"saved_slots": saved_slots,
 	}
 	lobby_players[1] = {
 		"peer_id": 1,
 		"nickname": _make_unique_nickname(local_nickname, 1),
+		"player_id": local_player_id,
 		"ready": false,
 		"join_order": 0,
+		"requested_faction_id": -1,
+		"selected_faction_id": -1,
+		"requires_faction_choice": false,
 	}
+	_reconcile_loaded_lobby_assignments()
 	connection_state_changed.emit("Лобби создано. Ожидание игроков…")
 	_emit_lobby_state()
 	return ""
@@ -96,7 +111,7 @@ func join_lobby(nickname: String, address: String, port: int = DEFAULT_PORT) -> 
 	lobby_active = true
 	connection_pending = true
 	match_starting = false
-	lobby_settings = {"seed": 0, "requested_ai_count": 0, "port": safe_port}
+	lobby_settings = {"seed": 0, "requested_ai_count": 0, "port": safe_port, "loaded_game": false, "saved_slots": []}
 	connection_state_changed.emit("Подключение к %s:%d…" % [clean_address, safe_port])
 	return ""
 
@@ -117,7 +132,7 @@ func prepare_singleplayer(seed_value: int, ai_count := 3):
 	lobby_active = false
 	hosting = true
 	session_slots.clear()
-	session_slots.append(_make_slot(0, 1, local_nickname, false))
+	session_slots.append(_make_slot(0, 1, local_nickname, false, local_player_id))
 	var bot_count := mini(clampi(ai_count, 0, MAX_FACTIONS), MAX_FACTIONS - 1)
 	for index in range(bot_count):
 		session_slots.append(_make_slot(index + 1, 0, "ИИ %d" % (index + 1), true))
@@ -131,17 +146,20 @@ func prepare_loaded_game(saved_slots: Array):
 	hosting = true
 	session_slots.clear()
 	if saved_slots.is_empty():
-		session_slots.append(_make_slot(0, 1, local_nickname, false))
+		session_slots.append(_make_slot(0, 1, local_nickname, false, local_player_id))
 		return
-	for raw_slot in saved_slots:
-		if raw_slot is not Dictionary or session_slots.size() >= MAX_FACTIONS:
-			continue
-		var faction_id := clampi(int(raw_slot.get("faction_id", session_slots.size())), 0, MAX_FACTIONS - 1)
-		var is_local := faction_id == 0
+	var normalized := _normalize_saved_slots(saved_slots)
+	var local_faction := _find_owned_faction_in_slots(normalized, local_player_id, local_nickname)
+	if local_faction < 0 and not normalized.is_empty():
+		local_faction = int(normalized[0].get("faction_id", 0))
+	for raw_slot in normalized:
+		var faction_id := int(raw_slot.get("faction_id", 0))
+		var is_local := faction_id == local_faction
 		var nickname := local_nickname if is_local else str(raw_slot.get("nickname", "ИИ %d" % faction_id))
-		session_slots.append(_make_slot(faction_id, 1 if is_local else 0, nickname, not is_local))
+		var owner_id := local_player_id if is_local else str(raw_slot.get("owner_id", ""))
+		session_slots.append(_make_slot(faction_id, 1 if is_local else 0, nickname, not is_local, owner_id))
 	if session_slots.is_empty():
-		session_slots.append(_make_slot(0, 1, local_nickname, false))
+		session_slots.append(_make_slot(0, 1, local_nickname, false, local_player_id))
 
 
 func shutdown_network():
@@ -163,6 +181,42 @@ func get_session_slots() -> Array[Dictionary]:
 
 func get_lobby_players() -> Array:
 	return _lobby_players_to_array()
+
+
+func get_local_lobby_player() -> Dictionary:
+	var peer_id := multiplayer.get_unique_id()
+	return lobby_players.get(peer_id, {}).duplicate(true)
+
+
+func get_available_loaded_faction_choices() -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	if not bool(lobby_settings.get("loaded_game", false)):
+		return result
+	var local_peer_id := multiplayer.get_unique_id()
+	var claimed := {}
+	for player in lobby_players.values():
+		if int(player.get("peer_id", 0)) == local_peer_id:
+			continue
+		var faction_id := int(player.get("selected_faction_id", -1))
+		if faction_id >= 0:
+			claimed[faction_id] = true
+	for slot in lobby_settings.get("saved_slots", []):
+		if slot is not Dictionary:
+			continue
+		var faction_id := int(slot.get("faction_id", -1))
+		if faction_id < 0 or claimed.has(faction_id):
+			continue
+		result.append({"faction_id": faction_id, "nickname": _ai_display_name(str(slot.get("nickname", "ИИ")))})
+	return result
+
+
+func choose_loaded_faction(faction_id: int):
+	if not lobby_active or not bool(lobby_settings.get("loaded_game", false)):
+		return
+	if multiplayer.is_server():
+		_set_loaded_faction_choice(1, faction_id)
+	else:
+		_server_choose_loaded_faction.rpc_id(1, faction_id)
 
 
 func get_local_faction_id() -> int:
@@ -218,7 +272,7 @@ func consume_menu_notice() -> String:
 
 
 @rpc("any_peer", "call_remote", "reliable")
-func _server_register_player(nickname: String):
+func _server_register_player(nickname: String, player_id: String):
 	if not multiplayer.is_server() or not lobby_active or match_starting:
 		return
 	var sender := multiplayer.get_remote_sender_id()
@@ -233,10 +287,15 @@ func _server_register_player(nickname: String):
 	lobby_players[sender] = {
 		"peer_id": sender,
 		"nickname": clean_nickname,
+		"player_id": player_id.strip_edges().left(64),
 		"ready": false,
 		"join_order": order,
+		"requested_faction_id": -1,
+		"selected_faction_id": -1,
+		"requires_faction_choice": false,
 	}
 	pending_peers.erase(sender)
+	_reconcile_loaded_lobby_assignments()
 	_broadcast_lobby_state()
 
 
@@ -245,6 +304,13 @@ func _server_set_ready(value: bool):
 	if not multiplayer.is_server() or not lobby_active or match_starting:
 		return
 	_set_player_ready(multiplayer.get_remote_sender_id(), value)
+
+
+@rpc("any_peer", "call_remote", "reliable")
+func _server_choose_loaded_faction(faction_id: int):
+	if not multiplayer.is_server() or not lobby_active or match_starting:
+		return
+	_set_loaded_faction_choice(multiplayer.get_remote_sender_id(), faction_id)
 
 
 @rpc("authority", "call_local", "reliable")
@@ -264,7 +330,7 @@ func _receive_lobby_state(players: Array, settings: Dictionary):
 
 
 @rpc("authority", "call_local", "reliable")
-func _receive_start_session(raw_slots: Array, settings: Dictionary):
+func _receive_start_session(raw_slots: Array, settings: Dictionary, saved_world: Dictionary):
 	if session_configured:
 		return
 	session_slots.clear()
@@ -277,7 +343,11 @@ func _receive_start_session(raw_slots: Array, settings: Dictionary):
 	match_starting = true
 	session_configured = true
 	lan_session = true
-	_set_world_seed(int(lobby_settings.get("seed", 12345)))
+	var loading_save := bool(lobby_settings.get("loaded_game", false)) and not saved_world.is_empty()
+	var save_manager := get_node_or_null("/root/SaveManager")
+	if is_instance_valid(save_manager) and loading_save:
+		save_manager.pending_save_data = saved_world.duplicate(true)
+	_set_world_seed(int(lobby_settings.get("seed", 12345)), not loading_save)
 	connection_state_changed.emit("Все готовы. Запуск мира…")
 	get_tree().call_deferred("change_scene_to_file", WORLD_SCENE)
 
@@ -294,6 +364,8 @@ func _receive_session_slots(raw_slots: Array):
 func _set_player_ready(peer_id: int, value: bool):
 	if not lobby_players.has(peer_id):
 		return
+	if value and bool(lobby_players[peer_id].get("requires_faction_choice", false)):
+		return
 	lobby_players[peer_id]["ready"] = value
 	_broadcast_lobby_state()
 	_try_start_match()
@@ -309,11 +381,18 @@ func _try_start_match():
 	match_starting = true
 	var ordered_players: Array = lobby_players.values()
 	ordered_players.sort_custom(func(a: Dictionary, b: Dictionary): return int(a.get("join_order", 0)) < int(b.get("join_order", 0)))
+	if bool(lobby_settings.get("loaded_game", false)):
+		var loaded_slots := _build_loaded_match_slots(ordered_players)
+		var loaded_peer := multiplayer.multiplayer_peer
+		if loaded_peer != null:
+			loaded_peer.refuse_new_connections = true
+		_receive_start_session.rpc(_slots_to_array(loaded_slots), lobby_settings.duplicate(true), loaded_world_data.duplicate(true))
+		return
 	var slots: Array[Dictionary] = []
 	for player in ordered_players:
 		if slots.size() >= MAX_FACTIONS:
 			break
-		slots.append(_make_slot(slots.size(), int(player.get("peer_id", 0)), str(player.get("nickname", "Игрок")), false))
+		slots.append(_make_slot(slots.size(), int(player.get("peer_id", 0)), str(player.get("nickname", "Игрок")), false, str(player.get("player_id", ""))))
 	var free_slots := MAX_FACTIONS - slots.size()
 	var bot_count := mini(int(lobby_settings.get("requested_ai_count", 0)), free_slots)
 	for index in range(bot_count):
@@ -321,7 +400,7 @@ func _try_start_match():
 	var current_peer := multiplayer.multiplayer_peer
 	if current_peer != null:
 		current_peer.refuse_new_connections = true
-	_receive_start_session.rpc(_slots_to_array(slots), lobby_settings.duplicate(true))
+	_receive_start_session.rpc(_slots_to_array(slots), lobby_settings.duplicate(true), {})
 
 
 func _on_peer_connected(peer_id: int):
@@ -340,6 +419,7 @@ func _on_peer_disconnected(peer_id: int):
 	pending_peers.erase(peer_id)
 	if lobby_active and not session_configured:
 		if lobby_players.erase(peer_id):
+			_reconcile_loaded_lobby_assignments()
 			_broadcast_lobby_state()
 		_try_start_match()
 		return
@@ -360,7 +440,7 @@ func _on_peer_disconnected(peer_id: int):
 func _on_connected_to_server():
 	connection_pending = true
 	connection_state_changed.emit("Соединение установлено. Регистрация в лобби…")
-	_server_register_player.rpc_id(1, local_nickname)
+	_server_register_player.rpc_id(1, local_nickname, local_player_id)
 
 
 func _on_connection_failed():
@@ -407,12 +487,184 @@ func _slots_to_array(slots: Array[Dictionary]) -> Array:
 	return result
 
 
-func _make_slot(faction_id: int, controller_peer_id: int, nickname: String, is_ai: bool) -> Dictionary:
+func _set_loaded_faction_choice(peer_id: int, faction_id: int):
+	if not lobby_players.has(peer_id) or not bool(lobby_settings.get("loaded_game", false)):
+		return
+	var valid_choice := false
+	for slot in lobby_settings.get("saved_slots", []):
+		if slot is Dictionary and int(slot.get("faction_id", -1)) == faction_id:
+			valid_choice = true
+			break
+	if not valid_choice:
+		return
+	lobby_players[peer_id]["requested_faction_id"] = faction_id
+	lobby_players[peer_id]["ready"] = false
+	_reconcile_loaded_lobby_assignments()
+	_broadcast_lobby_state()
+
+
+func _reconcile_loaded_lobby_assignments():
+	if not bool(lobby_settings.get("loaded_game", false)):
+		return
+	var saved_slots: Array = lobby_settings.get("saved_slots", [])
+	var players: Array = lobby_players.values()
+	players.sort_custom(func(a: Dictionary, b: Dictionary): return int(a.get("join_order", 0)) < int(b.get("join_order", 0)))
+	var previous := {}
+	for player in players:
+		var peer_id := int(player.get("peer_id", 0))
+		previous[peer_id] = int(player.get("selected_faction_id", -1))
+		player["selected_faction_id"] = -1
+		player["requires_faction_choice"] = false
+		player["owns_saved_faction"] = false
+	var claimed := {}
+	# Сначала безусловно возвращаем прежним владельцам их государства.
+	for player in players:
+		var owned_faction := _find_owned_faction_in_slots(saved_slots, str(player.get("player_id", "")), str(player.get("nickname", "Игрок")))
+		if owned_faction < 0 or claimed.has(owned_faction):
+			continue
+		player["selected_faction_id"] = owned_faction
+		player["owns_saved_faction"] = true
+		claimed[owned_faction] = true
+		for slot in saved_slots:
+			if slot is Dictionary and int(slot.get("faction_id", -1)) == owned_faction and str(slot.get("owner_id", "")).is_empty():
+				slot["owner_id"] = str(player.get("player_id", ""))
+	# Затем сохраняем свободные ручные выборы игроков без прежней фракции.
+	for player in players:
+		if int(player.get("selected_faction_id", -1)) >= 0:
+			continue
+		var requested := int(player.get("requested_faction_id", -1))
+		if requested >= 0 and not claimed.has(requested) and _slots_have_faction(saved_slots, requested):
+			player["selected_faction_id"] = requested
+			claimed[requested] = true
+	# Несуществующие в сохранении фракции являются настоящими свободными местами.
+	for player in players:
+		if int(player.get("selected_faction_id", -1)) >= 0:
+			continue
+		for faction_id in range(MAX_FACTIONS):
+			if claimed.has(faction_id) or _slots_have_faction(saved_slots, faction_id):
+				continue
+			player["selected_faction_id"] = faction_id
+			claimed[faction_id] = true
+			break
+	for player in players:
+		var peer_id := int(player.get("peer_id", 0))
+		var selected := int(player.get("selected_faction_id", -1))
+		player["requires_faction_choice"] = selected < 0
+		if int(previous.get(peer_id, -1)) != selected:
+			player["ready"] = false
+	lobby_settings["saved_slots"] = saved_slots
+
+
+func _build_loaded_match_slots(players: Array) -> Array[Dictionary]:
+	var result := _normalize_saved_slots(lobby_settings.get("saved_slots", []))
+	for index in range(result.size()):
+		result[index]["controller_peer_id"] = 0
+		result[index]["is_ai"] = true
+		result[index]["nickname"] = _ai_display_name(str(result[index].get("nickname", "ИИ")))
+	for player in players:
+		var faction_id := int(player.get("selected_faction_id", -1))
+		if faction_id < 0:
+			continue
+		var player_slot := _make_slot(faction_id, int(player.get("peer_id", 0)), str(player.get("nickname", "Игрок")), false, str(player.get("player_id", "")))
+		var replaced := false
+		for index in range(result.size()):
+			if int(result[index].get("faction_id", -1)) == faction_id:
+				result[index] = player_slot
+				replaced = true
+				break
+		if not replaced:
+			result.append(player_slot)
+	result.sort_custom(func(a: Dictionary, b: Dictionary): return int(a.get("faction_id", 0)) < int(b.get("faction_id", 0)))
+	return result
+
+
+func _normalize_saved_slots(raw_slots: Array) -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	var used_factions := {}
+	for raw_slot in raw_slots:
+		if raw_slot is not Dictionary or result.size() >= MAX_FACTIONS:
+			continue
+		var faction_id := clampi(int(raw_slot.get("faction_id", result.size())), 0, MAX_FACTIONS - 1)
+		if used_factions.has(faction_id):
+			continue
+		used_factions[faction_id] = true
+		result.append(_make_slot(
+			faction_id,
+			int(raw_slot.get("controller_peer_id", 0)),
+			str(raw_slot.get("nickname", "ИИ %d" % (faction_id + 1))),
+			bool(raw_slot.get("is_ai", true)),
+			str(raw_slot.get("owner_id", ""))
+		))
+	result.sort_custom(func(a: Dictionary, b: Dictionary): return int(a.get("faction_id", 0)) < int(b.get("faction_id", 0)))
+	return result
+
+
+func _infer_saved_slots(world_data: Dictionary, known_slots: Array) -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	for slot in known_slots:
+		result.append(slot.duplicate(true))
+	var inferred_names := {}
+	for unit_data in world_data.get("units", []):
+		if unit_data is Dictionary:
+			var faction_id := clampi(int(unit_data.get("faction_id", 0)), 0, MAX_FACTIONS - 1)
+			inferred_names[faction_id] = str(unit_data.get("faction_name", "ИИ %d" % (faction_id + 1)))
+	for building_data in world_data.get("buildings", []):
+		if building_data is Dictionary:
+			var faction_id := clampi(int(building_data.get("faction_id", 0)), 0, MAX_FACTIONS - 1)
+			if not inferred_names.has(faction_id):
+				inferred_names[faction_id] = "ИИ %d" % (faction_id + 1)
+	for faction_id in inferred_names:
+		if _slots_have_faction(result, int(faction_id)):
+			continue
+		var nickname := str(inferred_names[faction_id])
+		var looked_human := not nickname.begins_with("ИИ ")
+		result.append(_make_slot(int(faction_id), 0, nickname, not looked_human, ""))
+	result.sort_custom(func(a: Dictionary, b: Dictionary): return int(a.get("faction_id", 0)) < int(b.get("faction_id", 0)))
+	return result
+
+
+func _find_owned_faction_in_slots(slots: Array, player_id: String, nickname: String) -> int:
+	if not player_id.is_empty():
+		for slot in slots:
+			if slot is Dictionary and str(slot.get("owner_id", "")) == player_id:
+				return int(slot.get("faction_id", -1))
+	var clean_nickname := _base_owner_nickname(nickname).to_lower()
+	for slot in slots:
+		if slot is not Dictionary or not str(slot.get("owner_id", "")).is_empty():
+			continue
+		var saved_nickname := str(slot.get("nickname", ""))
+		var was_human := not bool(slot.get("is_ai", true)) or saved_nickname.ends_with(" (ИИ)")
+		if was_human and _base_owner_nickname(saved_nickname).to_lower() == clean_nickname:
+			return int(slot.get("faction_id", -1))
+	return -1
+
+
+func _slots_have_faction(slots: Array, faction_id: int) -> bool:
+	for slot in slots:
+		if slot is Dictionary and int(slot.get("faction_id", -1)) == faction_id:
+			return true
+	return false
+
+
+func _base_owner_nickname(value: String) -> String:
+	var result := value.strip_edges()
+	while result.ends_with(" (ИИ)"):
+		result = result.trim_suffix(" (ИИ)").strip_edges()
+	return result
+
+
+func _ai_display_name(value: String) -> String:
+	var base := _base_owner_nickname(value)
+	return base if base.begins_with("ИИ ") else "%s (ИИ)" % base
+
+
+func _make_slot(faction_id: int, controller_peer_id: int, nickname: String, is_ai: bool, owner_id := "") -> Dictionary:
 	return {
 		"faction_id": faction_id,
 		"controller_peer_id": controller_peer_id,
 		"nickname": nickname,
 		"is_ai": is_ai,
+		"owner_id": owner_id,
 	}
 
 
@@ -453,18 +705,20 @@ func _sanitize_nickname(value: String) -> String:
 	return result.left(24)
 
 
-func _set_world_seed(seed_value: int):
+func _set_world_seed(seed_value: int, clear_pending_save := true):
 	var save_manager := get_node_or_null("/root/SaveManager")
 	if is_instance_valid(save_manager):
 		save_manager.current_seed = seed_value
-		save_manager.pending_save_data.clear()
+		if clear_pending_save:
+			save_manager.pending_save_data.clear()
 	get_tree().paused = false
 
 
 func _reset_runtime_state():
 	lobby_players.clear()
 	pending_peers.clear()
-	lobby_settings = {"seed": 12345, "requested_ai_count": 0, "port": DEFAULT_PORT}
+	lobby_settings = {"seed": 12345, "requested_ai_count": 0, "port": DEFAULT_PORT, "loaded_game": false, "saved_slots": []}
+	loaded_world_data.clear()
 	session_slots.clear()
 	lobby_active = false
 	session_configured = false
@@ -479,9 +733,14 @@ func _load_profile():
 	var config := ConfigFile.new()
 	if config.load(PROFILE_PATH) == OK:
 		local_nickname = _sanitize_nickname(str(config.get_value("player", "nickname", "Игрок")))
+		local_player_id = str(config.get_value("player", "id", ""))
+	if local_player_id.is_empty():
+		local_player_id = Crypto.new().generate_random_bytes(16).hex_encode()
+		_save_profile()
 
 
 func _save_profile():
 	var config := ConfigFile.new()
 	config.set_value("player", "nickname", local_nickname)
+	config.set_value("player", "id", local_player_id)
 	config.save(PROFILE_PATH)

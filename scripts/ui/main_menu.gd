@@ -12,6 +12,7 @@ var host_setup_page: VBoxContainer
 var join_setup_page: VBoxContainer
 var lobby_page: VBoxContainer
 var seed_input: LineEdit
+var singleplayer_ai_count: SpinBox
 var saves_list: ItemList
 var load_button: Button
 var delete_button: Button
@@ -19,6 +20,8 @@ var message_label: Label
 var nickname_input: LineEdit
 var host_seed_input: LineEdit
 var host_ai_count: SpinBox
+var host_save_picker: OptionButton
+var host_saves: Array[Dictionary] = []
 var host_port_input: SpinBox
 var join_address_input: LineEdit
 var join_port_input: SpinBox
@@ -26,6 +29,9 @@ var lobby_settings_label: Label
 var lobby_address_label: Label
 var lobby_players_list: ItemList
 var ready_button: Button
+var faction_choice_box: VBoxContainer
+var faction_choice_picker: OptionButton
+var updating_faction_choice := false
 var saves: Array[Dictionary] = []
 
 
@@ -124,6 +130,15 @@ func _create_new_game_page():
 	seed_input.placeholder_text = "Пусто — случайный сид"
 	seed_input.text_submitted.connect(func(_value): _start_new_game())
 	new_game_page.add_child(seed_input)
+	var ai_label := Label.new()
+	ai_label.text = "Количество ИИ:"
+	new_game_page.add_child(ai_label)
+	singleplayer_ai_count = SpinBox.new()
+	singleplayer_ai_count.min_value = 0
+	singleplayer_ai_count.max_value = NetworkManager.MAX_FACTIONS - 1
+	singleplayer_ai_count.step = 1
+	singleplayer_ai_count.value = 3
+	new_game_page.add_child(singleplayer_ai_count)
 	_add_button(new_game_page, "Начать новую игру", _start_new_game)
 	_add_button(new_game_page, "Назад", func(): _show_page(main_page))
 
@@ -171,6 +186,12 @@ func _create_multiplayer_page():
 func _create_host_setup_page():
 	host_setup_page = _new_page()
 	_add_page_title(host_setup_page, "Настройки хоста")
+	var world_label := Label.new()
+	world_label.text = "Мир:"
+	host_setup_page.add_child(world_label)
+	host_save_picker = OptionButton.new()
+	host_save_picker.item_selected.connect(_on_host_world_selected)
+	host_setup_page.add_child(host_save_picker)
 	var seed_label := Label.new()
 	seed_label.text = "Сид мира:"
 	host_setup_page.add_child(seed_label)
@@ -183,7 +204,7 @@ func _create_host_setup_page():
 	host_setup_page.add_child(ai_label)
 	host_ai_count = SpinBox.new()
 	host_ai_count.min_value = 0
-	host_ai_count.max_value = 4
+	host_ai_count.max_value = NetworkManager.MAX_FACTIONS - 1
 	host_ai_count.step = 1
 	host_ai_count.value = 3
 	host_setup_page.add_child(host_ai_count)
@@ -231,6 +252,16 @@ func _create_lobby_page():
 	lobby_players_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	lobby_players_list.select_mode = ItemList.SELECT_SINGLE
 	lobby_page.add_child(lobby_players_list)
+	faction_choice_box = VBoxContainer.new()
+	faction_choice_box.visible = false
+	lobby_page.add_child(faction_choice_box)
+	var faction_choice_label := Label.new()
+	faction_choice_label.text = "Все государства заняты. Выберите ИИ, которого вы замените:"
+	faction_choice_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	faction_choice_box.add_child(faction_choice_label)
+	faction_choice_picker = OptionButton.new()
+	faction_choice_picker.item_selected.connect(_on_faction_choice_selected)
+	faction_choice_box.add_child(faction_choice_picker)
 	var ready_hint := Label.new()
 	ready_hint.text = "Игра запустится, когда все подключённые игроки нажмут «Готов». Хосту лучше нажимать последним."
 	ready_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -310,8 +341,9 @@ func _show_multiplayer_page():
 func _show_host_setup():
 	NetworkManager.set_local_nickname(nickname_input.text)
 	nickname_input.text = NetworkManager.local_nickname
+	_refresh_host_worlds()
 	_show_page(host_setup_page)
-	host_seed_input.grab_focus()
+	host_save_picker.grab_focus()
 
 
 func _show_join_setup():
@@ -323,17 +355,40 @@ func _show_join_setup():
 
 func _start_new_game():
 	var seed_value := SaveManager.seed_from_text(seed_input.text)
-	SaveManager.start_new_game(seed_value)
+	SaveManager.start_new_game(seed_value, int(singleplayer_ai_count.value))
 
 
 func _create_lobby():
 	var seed_value := SaveManager.seed_from_text(host_seed_input.text)
-	var error := NetworkManager.host_lobby(NetworkManager.local_nickname, seed_value, int(host_ai_count.value), int(host_port_input.value))
+	var saved_game := {}
+	if host_save_picker.selected > 0 and host_save_picker.selected - 1 < host_saves.size():
+		saved_game = SaveManager.get_save_data_for_multiplayer(str(host_saves[host_save_picker.selected - 1].path))
+		if saved_game.is_empty():
+			message_label.text = "Не удалось прочитать выбранное сохранение."
+			return
+		seed_value = int(saved_game.meta.get("seed", seed_value))
+	var error := NetworkManager.host_lobby(NetworkManager.local_nickname, seed_value, int(host_ai_count.value), int(host_port_input.value), saved_game)
 	if not error.is_empty():
 		message_label.text = error
 		return
 	_show_page(lobby_page, false)
 	_refresh_lobby()
+
+
+func _refresh_host_worlds():
+	host_saves = SaveManager.list_saves()
+	host_save_picker.clear()
+	host_save_picker.add_item("Новый мир")
+	for save in host_saves:
+		host_save_picker.add_item("Загрузить: %s" % str(save.get("name", "Без названия")))
+	host_save_picker.select(0)
+	_on_host_world_selected(0)
+
+
+func _on_host_world_selected(index: int):
+	var loading_save := index > 0
+	host_seed_input.editable = not loading_save
+	host_ai_count.editable = not loading_save
 
 
 func _join_lobby():
@@ -367,13 +422,21 @@ func _on_lobby_state_changed(_players: Array, _settings: Dictionary):
 func _refresh_lobby():
 	lobby_players_list.clear()
 	var players := NetworkManager.get_lobby_players()
+	var loaded_game := bool(NetworkManager.lobby_settings.get("loaded_game", false))
 	for player in players:
 		var ready_text := "ГОТОВ" if bool(player.get("ready", false)) else "НЕ ГОТОВ"
 		var host_text := " • ХОСТ" if int(player.get("peer_id", 0)) == 1 else ""
-		lobby_players_list.add_item("%s  [%s]%s" % [player.get("nickname", "Игрок"), ready_text, host_text])
-	var requested_ai := int(NetworkManager.lobby_settings.get("requested_ai_count", 0))
-	var actual_ai := mini(requested_ai, maxi(NetworkManager.MAX_FACTIONS - players.size(), 0))
-	lobby_settings_label.text = "Сид: %d  •  Игроки: %d/%d  •  ИИ: %d из %d" % [int(NetworkManager.lobby_settings.get("seed", 0)), players.size(), NetworkManager.MAX_FACTIONS, actual_ai, requested_ai]
+		var faction_text := ""
+		if loaded_game:
+			faction_text = " • государство %d" % (int(player.get("selected_faction_id", -1)) + 1) if int(player.get("selected_faction_id", -1)) >= 0 else " • выбор государства"
+		lobby_players_list.add_item("%s  [%s]%s%s" % [player.get("nickname", "Игрок"), ready_text, host_text, faction_text])
+	if loaded_game:
+		lobby_settings_label.text = "Сохранение: %s  •  Игроки: %d/%d" % [str(NetworkManager.lobby_settings.get("save_name", "Без названия")), players.size(), NetworkManager.MAX_FACTIONS]
+	else:
+		var requested_ai := int(NetworkManager.lobby_settings.get("requested_ai_count", 0))
+		var actual_ai := mini(requested_ai, maxi(NetworkManager.MAX_FACTIONS - players.size(), 0))
+		lobby_settings_label.text = "Сид: %d  •  Игроки: %d/%d  •  ИИ: %d из %d" % [int(NetworkManager.lobby_settings.get("seed", 0)), players.size(), NetworkManager.MAX_FACTIONS, actual_ai, requested_ai]
+	_refresh_faction_choice()
 	if NetworkManager.is_host():
 		var addresses := NetworkManager.get_local_addresses()
 		lobby_address_label.text = "Адрес для подключения: %s  •  порт %d" % [", ".join(addresses) if not addresses.is_empty() else "локальный IP не найден", int(NetworkManager.lobby_settings.get("port", NetworkManager.DEFAULT_PORT))]
@@ -382,7 +445,35 @@ func _refresh_lobby():
 	var local_ready := NetworkManager.is_local_ready()
 	ready_button.set_pressed_no_signal(local_ready)
 	ready_button.text = "Готов: ДА" if local_ready else "Готов"
-	ready_button.disabled = NetworkManager.connection_pending or players.is_empty() or NetworkManager.match_starting
+	var local_player := NetworkManager.get_local_lobby_player()
+	ready_button.disabled = NetworkManager.connection_pending or players.is_empty() or NetworkManager.match_starting or bool(local_player.get("requires_faction_choice", false))
+
+
+func _refresh_faction_choice():
+	var local_player := NetworkManager.get_local_lobby_player()
+	var needs_choice := bool(local_player.get("requires_faction_choice", false))
+	faction_choice_box.visible = needs_choice
+	if not needs_choice:
+		return
+	updating_faction_choice = true
+	faction_choice_picker.clear()
+	var choices := NetworkManager.get_available_loaded_faction_choices()
+	for choice in choices:
+		var faction_id := int(choice.get("faction_id", -1))
+		faction_choice_picker.add_item("Государство %d — %s" % [faction_id + 1, str(choice.get("nickname", "ИИ"))])
+		faction_choice_picker.set_item_metadata(faction_choice_picker.item_count - 1, faction_id)
+	var selected_faction := int(local_player.get("selected_faction_id", -1))
+	for index in range(faction_choice_picker.item_count):
+		if int(faction_choice_picker.get_item_metadata(index)) == selected_faction:
+			faction_choice_picker.select(index)
+			break
+	updating_faction_choice = false
+
+
+func _on_faction_choice_selected(index: int):
+	if updating_faction_choice or index < 0 or index >= faction_choice_picker.item_count:
+		return
+	NetworkManager.choose_loaded_faction(int(faction_choice_picker.get_item_metadata(index)))
 
 
 func _on_connection_state_changed(value: String):

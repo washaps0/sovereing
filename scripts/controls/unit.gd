@@ -27,11 +27,15 @@ const UNIT_NAMES: Array[String] = [
 ]
 const FOOD_CONSUMPTION_INTERVAL := 45.0
 const STARVATION_DAMAGE := 10
+const AUTO_WORK_DELAY_AFTER_MANUAL_ORDER := 5.0
+const ROAD_SPEED_MULTIPLIER := 1.5
+const ROAD_PATH_WEIGHT := 1.0 / ROAD_SPEED_MULTIPLIER
+const ROAD_SPEED_CHECK_INTERVAL := 0.12
+const ROAD_PATH_MARGIN := 8.0
 
 static var selected_unit: Unit
 static var selected_units: Array[Unit] = []
 static var continuous_harvest_mode := false
-static var auto_work_enabled := true
 static var next_name_index := 0
 
 var target_position := Vector2.ZERO
@@ -66,6 +70,9 @@ var lod_pending_level := SimulationLOD.FULL
 var lod_pending_time := 0.0
 var lod_last_simulation_time := 0.0
 var lod_manager: Node
+var is_on_road := false
+var road_speed_check_timer := 0.0
+var road_segments_by_cell := {}
 
 const PATH_CELL_SIZE := 32.0
 const PATH_MAP_SIZE := Vector2i(400, 400)
@@ -136,10 +143,11 @@ func _physics_process(delta: float):
 	_process_food_needs(delta)
 	if health <= 0:
 		return
+	_update_road_movement_state(delta)
 	match task:
 		Task.MOVE:
 			if _follow_path():
-				task = Task.IDLE
+				_finish_manual_move()
 		Task.HARVEST:
 			_process_harvest(delta)
 		Task.BUILD:
@@ -194,6 +202,7 @@ func simulate_lod(delta: float):
 	_process_food_needs(delta)
 	if health <= 0:
 		return
+	_update_road_movement_state(delta)
 	match task:
 		Task.MOVE:
 			_lod_process_move(delta)
@@ -280,8 +289,45 @@ func _move_toward(destination: Vector2, stop_distance := 3.0) -> bool:
 	direction = (direction + _get_separation_force(direction) * 0.75).normalized()
 	if direction.is_zero_approx():
 		direction = global_position.direction_to(destination)
-	velocity = direction * speed
+	velocity = direction * _get_current_movement_speed()
 	move_and_slide()
+	return false
+
+
+func _get_current_movement_speed() -> float:
+	return speed * ROAD_SPEED_MULTIPLIER if is_on_road else speed
+
+
+func _update_road_movement_state(delta: float):
+	if is_instance_valid(inside_building):
+		is_on_road = false
+		road_speed_check_timer = 0.0
+		return
+	road_speed_check_timer -= delta
+	if road_speed_check_timer > 0.0:
+		return
+	road_speed_check_timer = ROAD_SPEED_CHECK_INTERVAL
+	is_on_road = _is_on_completed_road()
+
+
+func _is_on_completed_road() -> bool:
+	if not is_inside_tree():
+		return false
+	# У дорог вне области отрисовки физическая форма отключена системой LOD.
+	# Кэш клеток маршрута позволяет всё равно корректно учитывать такую дорогу.
+	var nearby_roads: Array = road_segments_by_cell.get(_world_to_cell(global_position), [])
+	for road in nearby_roads:
+		if is_instance_valid(road) and road is RoadSegment and not road.under_construction and road.contains_world_point(global_position, ROAD_PATH_MARGIN):
+			return true
+	var query := PhysicsPointQueryParameters2D.new()
+	query.position = global_position
+	query.collide_with_areas = true
+	query.collide_with_bodies = false
+	query.collision_mask = 1
+	for hit in get_world_2d().direct_space_state.intersect_point(query, 16):
+		var collider = hit.collider
+		if collider is RoadSegment and not collider.under_construction:
+			return true
 	return false
 
 
@@ -325,8 +371,13 @@ func _navigate_toward(destination: Vector2, stop_distance := 3.0) -> bool:
 func _lod_process_move(delta: float):
 	_lod_navigate_toward(target_position, delta, 3.0)
 	if global_position.distance_to(target_position) <= 3.0:
-		velocity = Vector2.ZERO
-		task = Task.IDLE
+		_finish_manual_move()
+
+
+func _finish_manual_move():
+	velocity = Vector2.ZERO
+	idle_check_timer = AUTO_WORK_DELAY_AFTER_MANUAL_ORDER
+	task = Task.IDLE
 
 
 func _lod_navigate_toward(destination: Vector2, delta: float, stop_distance := 3.0) -> float:
@@ -354,12 +405,17 @@ func _lod_move_direct(destination: Vector2, delta: float, stop_distance: float) 
 		velocity = Vector2.ZERO
 		return delta
 	var direction := global_position.direction_to(destination)
-	var travel_distance := minf(speed * delta, distance - stop_distance)
+	if simulation_lod != SimulationLOD.FULL:
+		# Крупный LOD-шаг может пройти несколько точек маршрута, поэтому статус
+		# дороги обновляется у каждой точки, а не только один раз за весь тик.
+		is_on_road = _is_on_completed_road()
+	var movement_speed := _get_current_movement_speed()
+	var travel_distance := minf(movement_speed * delta, distance - stop_distance)
 	global_position += direction * travel_distance
-	velocity = direction * speed if travel_distance > 0.0 else Vector2.ZERO
+	velocity = direction * movement_speed if travel_distance > 0.0 else Vector2.ZERO
 	if travel_distance + stop_distance >= distance - 0.001:
 		velocity = Vector2.ZERO
-		return maxf(delta - travel_distance / maxf(speed, 0.001), 0.0)
+		return maxf(delta - travel_distance / maxf(movement_speed, 0.001), 0.0)
 	return 0.0
 
 
@@ -396,6 +452,7 @@ func _calculate_path(destination: Vector2):
 	grid.offset = Vector2.ONE * PATH_CELL_SIZE * 0.5
 	grid.diagonal_mode = AStarGrid2D.DIAGONAL_MODE_ONLY_IF_NO_OBSTACLES
 	grid.update()
+	_apply_road_path_weights(grid)
 
 	for building in get_tree().get_nodes_in_group("buildings"):
 		if building is not Building or building.building_kind == "road":
@@ -427,6 +484,39 @@ func _calculate_path(destination: Vector2):
 	grid.set_point_weight_scale(finish, 1.0)
 	path_points = grid.get_point_path(start, finish)
 	path_index = 0
+
+
+func _apply_road_path_weights(grid: AStarGrid2D):
+	road_segments_by_cell.clear()
+	for road in get_tree().get_nodes_in_group("roads"):
+		if road is not RoadSegment or road.under_construction:
+			continue
+		var collision := road.get_node_or_null("CollisionShape2D") as CollisionShape2D
+		if collision == null or collision.shape is not RectangleShape2D:
+			continue
+		var rectangle := collision.shape as RectangleShape2D
+		var half_size := rectangle.size * 0.5
+		var world_minimum := Vector2(INF, INF)
+		var world_maximum := Vector2(-INF, -INF)
+		for corner in [Vector2(-half_size.x, -half_size.y), Vector2(half_size.x, -half_size.y), Vector2(half_size.x, half_size.y), Vector2(-half_size.x, half_size.y)]:
+			var world_corner: Vector2 = collision.global_transform * corner
+			world_minimum = world_minimum.min(world_corner)
+			world_maximum = world_maximum.max(world_corner)
+		var minimum := _world_to_cell(world_minimum - Vector2.ONE * ROAD_PATH_MARGIN)
+		var maximum := _world_to_cell(world_maximum + Vector2.ONE * ROAD_PATH_MARGIN)
+		var inverse_transform := collision.global_transform.affine_inverse()
+		for x in range(minimum.x, maximum.x + 1):
+			for y in range(minimum.y, maximum.y + 1):
+				var cell := Vector2i(x, y)
+				if not grid.region.has_point(cell):
+					continue
+				var cell_center := (Vector2(cell) + Vector2.ONE * 0.5) * PATH_CELL_SIZE
+				var local_point := inverse_transform * cell_center
+				if absf(local_point.x) <= half_size.x + ROAD_PATH_MARGIN and absf(local_point.y) <= half_size.y + ROAD_PATH_MARGIN:
+					grid.set_point_weight_scale(cell, ROAD_PATH_WEIGHT)
+					if not road_segments_by_cell.has(cell):
+						road_segments_by_cell[cell] = []
+					road_segments_by_cell[cell].append(road)
 
 
 func _world_to_cell(point: Vector2) -> Vector2i:
@@ -659,8 +749,6 @@ func _lod_process_warehouse_fetch(delta: float):
 
 func _process_idle(delta: float):
 	velocity = Vector2.ZERO
-	if not auto_work_enabled and not ai_controlled:
-		return
 	idle_check_timer -= delta
 	if idle_check_timer > 0.0:
 		return
@@ -731,7 +819,7 @@ func _find_available_factory() -> Building:
 	for building in get_tree().get_nodes_in_group("buildings"):
 		if building is not Building or building.faction_id != faction_id or not building.is_factory() or not building.is_completed():
 			continue
-		if building.occupants.size() >= building.max_workers or not building.can_produce_selected_recipe():
+		if building.occupants.size() + _get_reserved_entry_count(building) >= building.get_worker_target() or not building.can_produce_selected_recipe():
 			continue
 		var distance := global_position.distance_squared_to(building.global_position)
 		if distance < nearest_distance:
@@ -746,13 +834,23 @@ func _find_available_residence() -> Building:
 	for building in get_tree().get_nodes_in_group("buildings"):
 		if building is not Building or building.faction_id != faction_id or not building.is_residence() or not building.is_completed():
 			continue
-		if building.occupants.size() >= building.max_occupants:
+		if building.occupants.size() + _get_reserved_entry_count(building) >= building.max_occupants:
 			continue
 		var distance := global_position.distance_squared_to(building.global_position)
 		if distance < nearest_distance:
 			nearest_distance = distance
 			nearest = building
 	return nearest
+
+
+func _get_reserved_entry_count(building: Building) -> int:
+	var reserved := 0
+	for unit in get_tree().get_nodes_in_group("units"):
+		if unit == self or unit is not Unit or unit.faction_id != faction_id:
+			continue
+		if unit.task == Task.ENTER_BUILDING and unit.target_building == building and not is_instance_valid(unit.inside_building):
+			reserved += 1
+	return reserved
 
 
 func _process_enter_building():
@@ -814,9 +912,9 @@ func _process_factory_work(delta: float):
 	var production_events := 0
 	while production_timer <= 0.0 and production_events < 64:
 		if not inside_building.can_produce_selected_recipe():
-			if production_timer <= -2.0:
-				_exit_current_building()
-				task = Task.IDLE
+			# Закреплённый рабочий ждёт сырьё или место на складе внутри завода.
+			# Он покинет рабочее место только по прямому приказу игрока.
+			production_timer = 1.0
 			return
 		if inside_building.produce_selected_recipe():
 			produced_items += 1
@@ -829,8 +927,6 @@ func _process_rest(delta: float):
 	if not is_instance_valid(inside_building) or not inside_building.is_residence():
 		_exit_current_building()
 		task = Task.IDLE
-		return
-	if not auto_work_enabled and not ai_controlled:
 		return
 	idle_check_timer -= delta
 	if idle_check_timer > 0.0:
@@ -896,6 +992,7 @@ func force_exit_building(building: Building):
 		return
 	_exit_current_building()
 	target_building = null
+	idle_check_timer = AUTO_WORK_DELAY_AFTER_MANUAL_ORDER
 	task = Task.IDLE
 
 

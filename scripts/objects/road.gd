@@ -24,13 +24,20 @@ func _ready():
 
 
 func setup(new_name: String, angle: float):
-	street_name = new_name
+	set_street_name(new_name)
 	rotation = angle
 	if is_instance_valid(hover_label):
-		hover_label.text = street_name
 		hover_label.rotation = -rotation
 
 
+func set_street_name(new_name: String):
+	street_name = new_name.strip_edges()
+	if street_name.is_empty():
+		street_name = "Улица"
+	if is_instance_valid(hover_label):
+		hover_label.text = street_name
+
+
 func get_endpoints() -> Array[Vector2]:
-	var half_direction := Vector2.RIGHT.rotated(rotation) * SEGMENT_LENGTH * 0.5
+	var half_direction := Vector2.RIGHT.rotated(global_rotation) * SEGMENT_LENGTH * 0.5
 	return [global_position - half_direction, global_position + half_direction]

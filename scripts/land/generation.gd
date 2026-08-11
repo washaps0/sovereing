@@ -131,9 +131,11 @@ func _ready():
 		generate_rock_deposits()
 	var saved_state: Dictionary = save_manager.consume_pending_save() if is_instance_valid(save_manager) else {}
 	if not saved_state.is_empty():
-		if is_instance_valid(network_manager):
+		if is_instance_valid(network_manager) and not network_manager.is_lan_session():
 			network_manager.prepare_loaded_game(saved_state.get("session_slots", []))
 		apply_save_data(saved_state)
+		if is_instance_valid(network_manager) and network_manager.has_session():
+			_spawn_missing_loaded_factions(network_manager.get_session_slots())
 	elif generate_world_on_ready:
 		Unit.next_name_index = 0
 		var slots: Array = network_manager.get_session_slots() if is_instance_valid(network_manager) and network_manager.has_session() else _get_default_session_slots()
@@ -146,7 +148,6 @@ func get_save_data() -> Dictionary:
 		"resources": [],
 		"units": [],
 		"session_slots": [],
-		"auto_work": Unit.auto_work_enabled,
 		"continuous_harvest": Unit.continuous_harvest_mode,
 	}
 	var network_manager := get_node_or_null("/root/NetworkManager")
@@ -217,6 +218,7 @@ func _serialize_building(building: Building) -> Dictionary:
 		},
 		"limits": limits,
 		"recipe": str(building.selected_recipe),
+		"desired_workers": building.get_worker_target() if building.is_factory() else 0,
 	}
 	if building is RoadSegment:
 		result["street_name"] = building.street_name
@@ -246,7 +248,6 @@ func apply_save_data(data: Dictionary):
 		_restore_building(building_data)
 	for unit_data in data.get("units", []):
 		_restore_unit(unit_data)
-	Unit.auto_work_enabled = bool(data.get("auto_work", true))
 	Unit.continuous_harvest_mode = bool(data.get("continuous_harvest", false))
 	var camera_data: Dictionary = data.get("camera", {})
 	var camera := get_node_or_null("Camera2D") as Camera2D
@@ -320,6 +321,8 @@ func _restore_building(data: Dictionary):
 	var limits: Dictionary = data.get("limits", {})
 	_restore_storage_limits(building, limits)
 	building.set_recipe(StringName(data.get("recipe", "planks")))
+	if building.is_factory():
+		building.set_worker_target(int(data.get("desired_workers", building.max_workers)))
 	if building is GovernmentBuilding:
 		building.migration_target = int(data.get("migration_target", 0))
 		building.migration_timer = float(data.get("migration_timer", building.migration_interval))
@@ -412,6 +415,30 @@ func spawn_session_units(raw_slots: Array):
 	for ai_slot in ai_slots:
 		_ensure_ai_starting_plan(int(ai_slot.get("faction_id", 0)), str(ai_slot.get("nickname", "ИИ")))
 	_position_camera_for_local_faction()
+
+
+func _spawn_missing_loaded_factions(raw_slots: Array):
+	var missing_slots: Array = []
+	for raw_slot in raw_slots:
+		if raw_slot is not Dictionary:
+			continue
+		var faction_id := int(raw_slot.get("faction_id", -1))
+		var has_state := false
+		for unit in get_tree().get_nodes_in_group("units"):
+			if unit is Unit and is_ancestor_of(unit) and unit.faction_id == faction_id:
+				has_state = true
+				break
+		if not has_state:
+			for building in get_tree().get_nodes_in_group("buildings"):
+				if building is Building and is_ancestor_of(building) and building.faction_id == faction_id:
+					has_state = true
+					break
+		if not has_state:
+			missing_slots.append(raw_slot)
+	if not missing_slots.is_empty():
+		spawn_session_units(missing_slots)
+	else:
+		_position_camera_for_local_faction()
 
 
 func get_faction_spawn_position(faction_id: int) -> Vector2:

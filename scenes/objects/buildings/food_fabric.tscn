@@ -4,7 +4,7 @@
 [ext_resource type="Texture2D" uid="uid://dx1tslmqb4gy" path="res://assets/objects/buildings/foodfabric.png" id="2_food"]
 
 [sub_resource type="RectangleShape2D" id="RectangleShape2D_food"]
-size = Vector2(66.66667, 32)
+size = Vector2(66.66667, 29.333334)
 
 [node name="food_fabric" type="Area2D" unique_id=1692946167]
 scale = Vector2(1.5, 1.5)
@@ -14,7 +14,7 @@ building_kind = "food_factory"
 wood_required = 20
 stone_required = 5
 build_time = 9.0
-max_workers = 3
+max_workers = 5
 max_occupants = 0
 
 [node name="Sprite2D" type="Sprite2D" parent="." unique_id=2093379844]
@@ -22,5 +22,5 @@ scale = Vector2(1.5, 1.5)
 texture = ExtResource("2_food")
 
 [node name="CollisionShape2D" type="CollisionShape2D" parent="." unique_id=1979066494]
-position = Vector2(1.9073486e-06, -4.7683716e-07)
+position = Vector2(1.9073486e-06, -1.3333335)
 shape = SubResource("RectangleShape2D_food")

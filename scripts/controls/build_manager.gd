@@ -30,11 +30,10 @@ var snapped_road: RoadSegment
 var unit_status: Label
 var resource_status: Label
 var mode_button: Button
-var auto_work_button: Button
-var street_input: LineEdit
 var road_mode := false
 var road_start: Variant = null
 var road_start_segment: RoadSegment
+var road_start_direction := Vector2.ZERO
 var road_preview: Line2D
 var street_counter := 1
 var used_street_names := {}
@@ -54,6 +53,9 @@ var warehouse_settings: VBoxContainer
 var factory_settings: VBoxContainer
 var factory_diagnostic: Label
 var recipe_hint: Label
+var factory_worker_target_input: SpinBox
+var road_settings: VBoxContainer
+var road_name_input: LineEdit
 var government_settings: VBoxContainer
 var government_statistics: Label
 var migration_target_input: SpinBox
@@ -68,6 +70,7 @@ var updating_building_controls := false
 var residents_list_key := ""
 var building_rotation_offset := 0.0
 var interface_theme: Theme
+var build_buttons: Array[Button] = []
 
 @onready var world: Node2D = get_parent()
 @onready var buildings: Node2D = world.get_node("buildings")
@@ -121,10 +124,6 @@ func _create_interface():
 	mode_button.pressed.connect(_toggle_harvest_mode)
 	resource_box.add_child(mode_button)
 	_update_mode_button()
-	auto_work_button = Button.new()
-	auto_work_button.pressed.connect(_toggle_auto_work)
-	resource_box.add_child(auto_work_button)
-	_update_auto_work_button()
 
 	menu = PanelContainer.new()
 	menu.theme = interface_theme
@@ -141,13 +140,12 @@ func _create_interface():
 	_add_build_button(build_box, "Завод — 25 дерева, 10 камня", FACTORY_SCENE)
 	_add_build_button(build_box, "Пищевой завод — 20 дерева, 5 камня", FOOD_FACTORY_SCENE)
 	_add_build_button(build_box, "Правительство — 30 дерева, 20 камня", GOVERNMENT_SCENE)
-	street_input = LineEdit.new()
-	street_input.placeholder_text = "Название улицы (пусто = автоматически)"
-	build_box.add_child(street_input)
 	var road_button := Button.new()
 	road_button.text = "Построить дорогу линией"
 	road_button.pressed.connect(_begin_road_mode)
+	_configure_build_button(road_button, ROAD_SCENE)
 	build_box.add_child(road_button)
+	build_buttons.append(road_button)
 	_create_building_panel()
 
 
@@ -215,6 +213,16 @@ func _create_building_panel():
 
 	factory_settings = VBoxContainer.new()
 	box.add_child(factory_settings)
+	var worker_target_label := Label.new()
+	worker_target_label.text = "Работников на этом заводе:"
+	factory_settings.add_child(worker_target_label)
+	factory_worker_target_input = SpinBox.new()
+	factory_worker_target_input.min_value = 0
+	factory_worker_target_input.max_value = 5
+	factory_worker_target_input.step = 1
+	factory_worker_target_input.update_on_text_changed = true
+	factory_worker_target_input.value_changed.connect(_on_factory_worker_target_changed)
+	factory_settings.add_child(factory_worker_target_input)
 	var recipe_label := Label.new()
 	recipe_label.text = "Производить:"
 	factory_settings.add_child(recipe_label)
@@ -227,6 +235,19 @@ func _create_building_panel():
 	factory_diagnostic.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	factory_diagnostic.custom_minimum_size.x = 270
 	factory_settings.add_child(factory_diagnostic)
+	road_settings = VBoxContainer.new()
+	box.add_child(road_settings)
+	var road_name_label := Label.new()
+	road_name_label.text = "Название улицы:"
+	road_settings.add_child(road_name_label)
+	road_name_input = LineEdit.new()
+	road_name_input.placeholder_text = "Введите новое название"
+	road_name_input.text_submitted.connect(func(_new_text: String): _on_road_rename_requested())
+	road_settings.add_child(road_name_input)
+	var rename_road_button := Button.new()
+	rename_road_button.text = "Переименовать улицу"
+	rename_road_button.pressed.connect(_on_road_rename_requested)
+	road_settings.add_child(rename_road_button)
 	government_settings = VBoxContainer.new()
 	box.add_child(government_settings)
 	var migration_label := Label.new()
@@ -256,7 +277,19 @@ func _add_build_button(box: VBoxContainer, text: String, scene: PackedScene):
 	var button := Button.new()
 	button.text = text
 	button.pressed.connect(_begin_building_placement.bind(scene))
+	_configure_build_button(button, scene)
 	box.add_child(button)
+	build_buttons.append(button)
+
+
+func _configure_build_button(button: Button, scene: PackedScene):
+	var preview := scene.instantiate() as Building
+	var sprite := preview.get_node_or_null("Sprite2D") as Sprite2D
+	if is_instance_valid(sprite):
+		button.icon = sprite.texture
+	button.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	button.custom_minimum_size.y = 34
+	preview.free()
 
 
 func _process(_delta: float):
@@ -264,7 +297,7 @@ func _process(_delta: float):
 		_snap_building_to_road(world.get_global_mouse_position())
 		_update_placement_validity()
 	if road_mode and road_start != null and is_instance_valid(road_preview):
-		var road_end := _snap_road_axis(road_start, world.get_global_mouse_position())
+		var road_end := _snap_road_end(road_start, world.get_global_mouse_position())
 		road_preview.points = PackedVector2Array([road_start, road_end])
 		road_preview.default_color = ROAD_PREVIEW_INVALID_COLOR if _road_line_has_parallel_conflict(road_start, road_end) else ROAD_PREVIEW_VALID_COLOR
 	if selecting:
@@ -383,18 +416,25 @@ func _update_building_panel():
 		return
 	building_panel.visible = true
 	var editable := building.can_be_edited_locally()
-	building_title.text = building.address if not building.address.is_empty() else building.display_name
+	building_title.text = "Улица «%s»" % (building as RoadSegment).street_name if building is RoadSegment else (building.address if not building.address.is_empty() else building.display_name)
 	if building.under_construction:
 		building_status.text = "Строится: дерево %d/%d, камень %d/%d" % [building.delivered_wood, building.wood_required, building.delivered_stone, building.stone_required]
 	else:
 		building_status.text = "Готово"
 	warehouse_settings.visible = building.is_warehouse() and building.is_completed()
 	factory_settings.visible = building.is_factory() and building.is_completed()
+	road_settings.visible = building is RoadSegment
 	government_settings.visible = building.is_government() and building.is_completed()
 	residents_settings.visible = building.is_residence() and building.is_completed()
 	release_occupants_button.visible = building.is_completed() and (building.is_factory() or building.is_residence())
 	release_occupants_button.disabled = building.occupants.is_empty() or not editable
-	if warehouse_settings.visible:
+	if road_settings.visible:
+		var road := building as RoadSegment
+		building_status.text = "Строится" if road.under_construction else "Готово"
+		road_name_input.editable = editable
+		if not road_name_input.has_focus():
+			road_name_input.text = road.street_name
+	elif warehouse_settings.visible:
 		var allocated := building.get_total_storage_limits()
 		building_status.text = "Занято %d/%d  •  Квоты %d/%d  •  Свободно %d" % [building.get_total_stored(), building.storage_capacity, allocated, building.storage_capacity, maxi(building.storage_capacity - allocated, 0)]
 		updating_building_controls = true
@@ -410,11 +450,14 @@ func _update_building_panel():
 			value_label.text = "квота %d  •  есть %d" % [current_limit, stored_amount]
 		updating_building_controls = false
 	elif factory_settings.visible:
-		building_status.text = "Работают %d/%d | рецепт: %s" % [building.occupants.size(), building.max_workers, building.get_recipe_name(building.selected_recipe)]
+		building_status.text = "Работают %d/%d (вместимость %d) | рецепт: %s" % [building.occupants.size(), building.get_worker_target(), building.max_workers, building.get_recipe_name(building.selected_recipe)]
 		factory_diagnostic.text = building.get_factory_status_text()
 		_sync_factory_recipe_controls(building)
 		updating_building_controls = true
 		recipe_picker.disabled = not editable
+		factory_worker_target_input.editable = editable
+		factory_worker_target_input.max_value = building.max_workers
+		factory_worker_target_input.value = building.get_worker_target()
 		for index in range(recipe_picker.item_count):
 			if StringName(recipe_picker.get_item_metadata(index)) == building.selected_recipe:
 				recipe_picker.select(index)
@@ -502,7 +545,7 @@ func _try_open_building_menu(point: Vector2) -> bool:
 	query.collide_with_bodies = false
 	query.collision_mask = 1
 	for hit in world.get_world_2d().direct_space_state.intersect_point(query, 32):
-		if hit.collider is Building and hit.collider.building_kind in ["warehouse", "residence", "factory", "food_factory", "government"]:
+		if hit.collider is Building and hit.collider.building_kind in ["warehouse", "residence", "factory", "food_factory", "government", "road"]:
 			_open_building_menu(hit.collider)
 			return true
 	return false
@@ -542,6 +585,41 @@ func _on_recipe_selected(index: int):
 	var building := Building.selected_building
 	if is_instance_valid(building) and building.is_factory() and building.can_be_edited_locally():
 		building.set_recipe(StringName(recipe_picker.get_item_metadata(index)))
+
+
+func _on_factory_worker_target_changed(value: float):
+	if updating_building_controls:
+		return
+	var building := Building.selected_building
+	if is_instance_valid(building) and building.is_factory() and building.can_be_edited_locally():
+		building.set_worker_target(int(value))
+
+
+func _on_road_rename_requested():
+	var selected := Building.selected_building
+	if selected is not RoadSegment or not selected.can_be_edited_locally():
+		return
+	var selected_road := selected as RoadSegment
+	var requested := road_name_input.text.strip_edges()
+	if requested.is_empty():
+		road_name_input.text = selected_road.street_name
+		return
+	var old_name: String = selected_road.street_name
+	var new_name := _make_unique_street_name(requested, old_name)
+	for road in get_tree().get_nodes_in_group("roads"):
+		if road is RoadSegment and road.faction_id == selected_road.faction_id and road.street_name == old_name:
+			road.set_street_name(new_name)
+	for building in get_tree().get_nodes_in_group("buildings"):
+		if building is Building and building is not RoadSegment and building.faction_id == selected_road.faction_id:
+			building.rename_address_street(old_name, new_name)
+	var last_number := int(house_numbers.get(old_name, 0))
+	if last_number > 0:
+		house_numbers[new_name] = maxi(int(house_numbers.get(new_name, 0)), last_number)
+		house_numbers.erase(old_name)
+	used_street_names.erase(old_name)
+	used_street_names[new_name] = true
+	road_name_input.text = new_name
+	building_title.text = "Улица «%s»" % new_name
 
 
 func _on_migration_target_changed(value: float):
@@ -722,22 +800,7 @@ func _toggle_harvest_mode():
 
 
 func _update_mode_button():
-	mode_button.text = "Добыча ИИ: ВКЛ (R)" if Unit.continuous_harvest_mode else "Добыча ИИ: ВЫКЛ (R)"
-
-
-func _toggle_auto_work():
-	Unit.auto_work_enabled = not Unit.auto_work_enabled
-	if not Unit.auto_work_enabled:
-		for building in get_tree().get_nodes_in_group("buildings"):
-			if building is Building and building.faction_id == _get_local_faction_id() and building.is_residence():
-				for unit in building.occupants.duplicate():
-					if is_instance_valid(unit):
-						unit.force_exit_building(building)
-	_update_auto_work_button()
-
-
-func _update_auto_work_button():
-	auto_work_button.text = "Авторабота: ВКЛ" if Unit.auto_work_enabled else "Авторабота: ВЫКЛ"
+	mode_button.text = "Сбор ресурсов: ВКЛ (R)" if Unit.continuous_harvest_mode else "Сбор ресурсов: ВЫКЛ (R)"
 
 
 func _begin_building_placement(scene: PackedScene):
@@ -839,13 +902,16 @@ func _handle_road_click():
 		if not snap.is_empty():
 			road_start = snap.position
 			road_start_segment = snap.road
+			road_start_direction = snap.outward_direction
 		else:
 			road_start = point
 			road_start_segment = null
+			road_start_direction = Vector2.ZERO
 		return
-	_create_road_line(road_start, _snap_road_axis(road_start, point))
+	_create_road_line(road_start, _snap_road_end(road_start, point))
 	road_start = null
 	road_start_segment = null
+	road_start_direction = Vector2.ZERO
 	road_preview.clear_points()
 
 
@@ -855,8 +921,8 @@ func _create_road_line(start: Vector2, end: Vector2):
 		return
 	if _road_line_has_parallel_conflict(start, end):
 		return
-	var street := _road_name_for_start(start)
 	var direction := delta.normalized()
+	var street := _road_name_for_start(direction)
 	var angle := direction.angle()
 	var count := maxi(1, int(ceil(delta.length() / RoadSegment.SEGMENT_LENGTH)))
 	var segments: Array[Building] = []
@@ -918,26 +984,43 @@ func _road_segment_overlaps_existing(local_position: Vector2, local_angle: float
 	return false
 
 
-func _road_name_for_start(start: Vector2) -> String:
-	var typed := street_input.text.strip_edges()
-	if typed.is_empty() and is_instance_valid(road_start_segment):
-		return road_start_segment.street_name
-	if typed.is_empty():
-		typed = _generate_street_name()
-	var base := typed
+func _road_name_for_start(direction: Vector2) -> String:
+	if is_instance_valid(road_start_segment):
+		var source_direction := Vector2.RIGHT.rotated(road_start_segment.global_rotation)
+		if absf(direction.dot(source_direction)) >= PARALLEL_ROAD_ALIGNMENT:
+			return road_start_segment.street_name
+	var generated := _make_unique_street_name(_generate_street_name())
+	used_street_names[generated] = true
+	return generated
+
+
+func _make_unique_street_name(requested: String, except_name := "") -> String:
+	var base := requested.strip_edges()
+	if base.is_empty():
+		base = _generate_street_name()
+	var candidate := base
 	var suffix := 2
-	while used_street_names.has(typed):
-		typed = "%s %d" % [base, suffix]
+	while _street_name_is_used(candidate, except_name):
+		candidate = "%s %d" % [base, suffix]
 		suffix += 1
-	used_street_names[typed] = true
-	street_input.text = ""
-	return typed
+	return candidate
+
+
+func _street_name_is_used(street_name: String, except_name := "") -> bool:
+	if street_name == except_name:
+		return false
+	if used_street_names.has(street_name):
+		return true
+	for road in get_tree().get_nodes_in_group("roads"):
+		if road is RoadSegment and road.street_name == street_name and road.street_name != except_name:
+			return true
+	return false
 
 
 func _generate_street_name() -> String:
 	var available: Array[String] = []
 	for street_name in STREET_NAMES:
-		if not used_street_names.has(street_name):
+		if not _street_name_is_used(street_name):
 			available.append(street_name)
 	if not available.is_empty():
 		return available[naming_rng.randi_range(0, available.size() - 1)]
@@ -950,7 +1033,7 @@ func _generate_street_name() -> String:
 			var first := STREET_NAMES[(first_index + first_offset) % STREET_NAMES.size()]
 			var second := STREET_NAMES[(second_index + second_offset) % STREET_NAMES.size()]
 			var combined := "%s-%s" % [first, second]
-			if not used_street_names.has(combined):
+			if not _street_name_is_used(combined):
 				return combined
 
 	# Практически недостижимый резерв после исчерпания всех комбинаций.
@@ -979,16 +1062,32 @@ func _nearest_road_endpoint(point: Vector2, max_distance: float) -> Dictionary:
 	var result := {}
 	var best := max_distance * max_distance
 	for road in get_tree().get_nodes_in_group("roads"):
-		if road.faction_id != _get_local_faction_id() or road.under_construction:
+		if road is not RoadSegment or road.faction_id != _get_local_faction_id():
 			continue
-		var direction: Vector2 = Vector2.RIGHT.rotated(road.rotation)
-		var along: float = clampf((point - road.global_position).dot(direction), -RoadSegment.SEGMENT_LENGTH * 0.5, RoadSegment.SEGMENT_LENGTH * 0.5)
-		var connection: Vector2 = road.global_position + direction * along
-		var distance := point.distance_squared_to(connection)
-		if distance <= best:
-			best = distance
-			result = {"position": connection, "road": road}
+		var direction := Vector2.RIGHT.rotated(road.global_rotation)
+		var endpoints: Array[Vector2] = road.get_endpoints()
+		for endpoint_index in range(endpoints.size()):
+			var connection: Vector2 = endpoints[endpoint_index]
+			var distance := point.distance_squared_to(connection)
+			if distance <= best:
+				best = distance
+				var outward_direction := direction if endpoint_index == 1 else -direction
+				result = {
+					"position": connection,
+					"road": road,
+					"outward_direction": outward_direction,
+				}
 	return result
+
+
+func _snap_road_end(start: Vector2, point: Vector2) -> Vector2:
+	var delta := point - start
+	if is_instance_valid(road_start_segment) and not road_start_direction.is_zero_approx() and not delta.is_zero_approx():
+		# Возле продолжения существующей улицы удерживаем линию на её оси.
+		# Другие направления по-прежнему доступны для перекрёстков и ответвлений.
+		if delta.normalized().dot(road_start_direction) >= 0.75:
+			return start + road_start_direction * maxf(delta.dot(road_start_direction), 0.0)
+	return _snap_road_axis(start, point)
 
 
 func _snap_road_axis(start: Vector2, point: Vector2) -> Vector2:
@@ -1027,6 +1126,7 @@ func _cancel_road_mode():
 	road_mode = false
 	road_start = null
 	road_start_segment = null
+	road_start_direction = Vector2.ZERO
 	if is_instance_valid(road_preview):
 		road_preview.queue_free()
 	road_preview = null

@@ -4,18 +4,17 @@
 [ext_resource type="Script" uid="uid://dygb2sujx2rvw" path="res://scripts/objects/building.gd" id="2_building"]
 
 [sub_resource type="RectangleShape2D" id="RectangleShape2D_qu7ja"]
-size = Vector2(65.33334, 31.333332)
+size = Vector2(65.33334, 29.333334)
 
 [node name="residence" type="Area2D" unique_id=732566616]
 scale = Vector2(1.5, 1.5)
 script = ExtResource("2_building")
 display_name = "Жилой дом"
-max_occupants = 8
 
 [node name="Sprite2D" type="Sprite2D" parent="." unique_id=1570788124]
 scale = Vector2(1.5, 1.5)
 texture = ExtResource("1_5fchd")
 
 [node name="CollisionShape2D" type="CollisionShape2D" parent="." unique_id=1407389209]
-position = Vector2(0, -0.33333367)
+position = Vector2(0, -1.3333328)
 shape = SubResource("RectangleShape2D_qu7ja")

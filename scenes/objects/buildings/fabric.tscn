@@ -1,10 +1,10 @@
 [gd_scene format=3 uid="uid://cnaqcc6acctk5"]
 
 [ext_resource type="Script" uid="uid://dygb2sujx2rvw" path="res://scripts/objects/building.gd" id="1_dp3xv"]
-[ext_resource type="Texture2D" uid="uid://cf1lyt3rinyto" path="res://assets/objects/buildings/fabric.png" id="2_dp3xv"]
+[ext_resource type="Texture2D" uid="uid://bs1pfwd2o4g1p" path="res://assets/objects/buildings/fabric.png" id="2_dp3xv"]
 
 [sub_resource type="RectangleShape2D" id="RectangleShape2D_qu7ja"]
-size = Vector2(65.333336, 32)
+size = Vector2(65.333336, 29.333334)
 
 [node name="fabric" type="Area2D" unique_id=732566616]
 scale = Vector2(1.5, 1.5)
@@ -14,7 +14,7 @@ building_kind = "factory"
 wood_required = 25
 stone_required = 10
 build_time = 10.0
-max_workers = 3
+max_workers = 5
 max_occupants = 0
 
 [node name="Sprite2D" type="Sprite2D" parent="." unique_id=1570788124]
@@ -22,5 +22,5 @@ scale = Vector2(1.5, 1.5)
 texture = ExtResource("2_dp3xv")
 
 [node name="CollisionShape2D" type="CollisionShape2D" parent="." unique_id=1407389209]
-position = Vector2(1.2715658e-06, 1.5894572e-07)
+position = Vector2(1.2715658e-06, -1.3333329)
 shape = SubResource("RectangleShape2D_qu7ja")

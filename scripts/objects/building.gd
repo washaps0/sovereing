@@ -42,6 +42,7 @@ const FOOD_RECIPES: Array[StringName] = [&"food"]
 @export var build_time := 5.0
 @export var storage_capacity := 0
 @export var max_workers := 0
+@export var desired_workers := 5
 @export var max_occupants := 8
 @export var max_builders := 3
 @export var faction_id := 0
@@ -81,6 +82,8 @@ func _ready():
 	var available_recipes := get_available_recipe_types()
 	if is_factory() and selected_recipe not in available_recipes:
 		selected_recipe = available_recipes[0]
+	if is_factory():
+		desired_workers = clampi(desired_workers, 0, max_workers)
 	_create_progress_bar()
 	_create_address_label()
 	_create_status_label()
@@ -102,9 +105,9 @@ func _process(_delta: float):
 	_update_overlay_orientation()
 	if status_label == null:
 		return
-	if is_factory() and is_completed():
-		status_label.text = "%s: %d/%d" % [get_recipe_name(selected_recipe), occupants.size(), max_workers]
-		status_label.visible = not occupants.is_empty()
+	if is_factory():
+		status_label.text = ""
+		status_label.visible = false
 	elif is_residence() and is_completed():
 		status_label.text = "Жильцы: %d/%d" % [occupants.size(), max_occupants]
 		status_label.visible = mouse_is_over
@@ -173,6 +176,15 @@ func _create_status_label():
 func set_address(street_name: String, house_number: int):
 	address = "%s — %s, %d" % [display_name, street_name, house_number]
 	address_label.text = address
+
+
+func rename_address_street(old_name: String, new_name: String):
+	var prefix := "%s — %s, " % [display_name, old_name]
+	if not address.begins_with(prefix):
+		return
+	address = "%s — %s, %s" % [display_name, new_name, address.substr(prefix.length())]
+	if is_instance_valid(address_label):
+		address_label.text = address
 
 
 func _create_progress_bar():
@@ -457,7 +469,7 @@ func try_enter(unit: Unit) -> bool:
 		return false
 	if unit in occupants:
 		return true
-	var capacity := max_workers if is_factory() else max_occupants
+	var capacity := get_worker_target() if is_factory() else max_occupants
 	if occupants.size() >= capacity:
 		return false
 	occupants.append(unit)
@@ -466,6 +478,22 @@ func try_enter(unit: Unit) -> bool:
 
 func leave(unit: Unit):
 	occupants.erase(unit)
+
+
+func get_worker_target() -> int:
+	return clampi(desired_workers, 0, max_workers) if is_factory() else 0
+
+
+func set_worker_target(value: int):
+	if not is_factory():
+		return
+	desired_workers = clampi(value, 0, max_workers)
+	while occupants.size() > desired_workers:
+		var unit: Unit = occupants.back()
+		if is_instance_valid(unit):
+			unit.force_exit_building(self)
+		else:
+			occupants.pop_back()
 
 
 func get_recipe() -> Dictionary:
@@ -519,6 +547,8 @@ func get_factory_status_text() -> String:
 		return ""
 	if not is_completed():
 		return "Производство начнётся после завершения строительства."
+	if get_worker_target() == 0:
+		return "Остановлен: для этого завода задано 0 работников."
 	var recipe := get_recipe()
 	var output: StringName = recipe["output"]
 	var output_amount: int = recipe["amount"]

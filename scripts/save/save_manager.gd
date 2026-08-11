@@ -3,7 +3,7 @@ extends Node
 const SAVE_DIRECTORY := "user://saves"
 const WORLD_SCENE := "res://scenes/world.tscn"
 const MAIN_MENU_SCENE := "res://scenes/main_menu.tscn"
-const SAVE_VERSION := 4
+const SAVE_VERSION := 5
 
 var current_seed := 12345
 var pending_save_data: Dictionary = {}
@@ -22,10 +22,10 @@ func seed_from_text(value: String) -> int:
 	return absi(cleaned.hash()) & 0x7fffffff
 
 
-func start_new_game(seed_value: int):
+func start_new_game(seed_value: int, ai_count := 3):
 	var network_manager := get_node_or_null("/root/NetworkManager")
 	if is_instance_valid(network_manager):
-		network_manager.prepare_singleplayer(seed_value, 3)
+		network_manager.prepare_singleplayer(seed_value, ai_count)
 	current_seed = seed_value
 	pending_save_data.clear()
 	get_tree().paused = false
@@ -33,7 +33,7 @@ func start_new_game(seed_value: int):
 
 
 func request_load(save_path: String) -> String:
-	var data := _read_save(save_path)
+	var data := get_save_data_for_multiplayer(save_path)
 	if data.is_empty():
 		return "Не удалось прочитать сохранение."
 	if not data.has("world") or not data.has("meta"):
@@ -46,6 +46,13 @@ func request_load(save_path: String) -> String:
 	get_tree().paused = false
 	get_tree().change_scene_to_file(WORLD_SCENE)
 	return ""
+
+
+func get_save_data_for_multiplayer(save_path: String) -> Dictionary:
+	var data := _read_save(save_path)
+	if data.is_empty() or not data.has("world") or not data.has("meta"):
+		return {}
+	return data
 
 
 func consume_pending_save() -> Dictionary:
