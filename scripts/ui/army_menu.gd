@@ -184,7 +184,9 @@ func _select_current_squad(focus_camera := false):
 func _organize_army():
 	var government := _find_local_government()
 	if is_instance_valid(government) and government.can_be_edited_locally():
-		government.organize_army()
+		var network_manager := get_node_or_null("/root/NetworkManager")
+		if is_instance_valid(network_manager):
+			network_manager.request_building_action(government, &"organize_army")
 		squad_list_key = ""
 		_refresh_army()
 
@@ -192,7 +194,8 @@ func _organize_army():
 func _issue_order(order: StringName):
 	var members: Array = _group_soldiers_by_squad(_get_local_soldiers()).get(selected_squad_id, [])
 	var commander := _find_squad_commander(members)
-	if is_instance_valid(commander) and commander.issue_squad_order(order):
+	if is_instance_valid(commander):
+		commander.request_squad_order(order)
 		squad_list_key = ""
 		_refresh_army()
 

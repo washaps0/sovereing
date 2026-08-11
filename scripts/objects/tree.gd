@@ -37,7 +37,7 @@ func _input_event(_viewport: Node, event: InputEvent, _shape_idx: int):
 	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
 		var unit := Unit.get_selected_unit()
 		if is_instance_valid(unit):
-			unit.command_harvest(self)
+			unit.request_harvest(self)
 			get_viewport().set_input_as_handled()
 
 

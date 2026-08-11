@@ -17,6 +17,7 @@ const ROCK_SCENE := preload("res://scenes/objects/rock.tscn")
 @export var reduced_tick_interval := 0.12
 @export var strategic_tick_interval := 0.75
 @export var background_tick_interval := 4.0
+@export_range(1, 64, 1) var object_load_budget_per_frame := 24
 
 var camera: Camera2D
 var _clock := 0.0
@@ -28,6 +29,11 @@ var _resource_records_by_id := {}
 var _active_resource_chunks := {}
 var _unit_chunks := {}
 var _next_resource_id := 1
+var _current_render_rect := Rect2()
+var _pending_object_loads: Array[Dictionary] = []
+var _pending_object_load_index := 0
+var _progressively_visible_units := {}
+var _progressively_active_buildings := {}
 
 
 func _ready():
@@ -54,6 +60,7 @@ func _physics_process(delta: float):
 		var refresh_delta := _refresh_accumulator
 		_refresh_accumulator = fmod(_refresh_accumulator, refresh_interval)
 		_refresh_lods(false, refresh_delta)
+	_process_pending_object_loads()
 
 	_tick_lod_bucket(Unit.SimulationLOD.REDUCED, reduced_tick_interval, delta)
 	_tick_lod_bucket(Unit.SimulationLOD.STRATEGIC, strategic_tick_interval, delta)
@@ -85,14 +92,23 @@ func _refresh_lods(initial: bool, elapsed: float):
 	var strategic_rect := visible_rect.grow(strategic_margin)
 	var local_faction_id := _get_local_faction_id()
 	var new_buckets: Array = [[], [], [], []]
+	var load_candidates: Array[Dictionary] = []
+	_current_render_rect = render_rect
 	_unit_chunks.clear()
 
 	for candidate in get_tree().get_nodes_in_group("units"):
 		if candidate is not Unit or not get_parent().is_ancestor_of(candidate):
 			continue
 		var unit := candidate as Unit
+		var unit_id := unit.get_instance_id()
+		var wants_render := render_rect.has_point(unit.global_position)
+		if not wants_render:
+			_progressively_visible_units.erase(unit_id)
+		elif not _progressively_visible_units.has(unit_id):
+			load_candidates.append(_make_load_candidate(&"unit", unit.global_position, unit))
+		var render_enabled := wants_render and _progressively_visible_units.has(unit_id)
 		var desired_lod := _get_desired_lod(unit, render_rect, reduced_rect, strategic_rect, local_faction_id)
-		_update_unit_lod(unit, desired_lod, render_rect.has_point(unit.global_position), initial, elapsed)
+		_update_unit_lod(unit, desired_lod, render_enabled, initial, elapsed)
 		new_buckets[unit.simulation_lod].append(unit)
 		# Добыча и принятие решений ИИ не должны зависеть только от очереди
 		# LOD-бакета. Если тик был пропущен при смене уровня или перестроении
@@ -108,11 +124,75 @@ func _refresh_lods(initial: bool, elapsed: float):
 		_unit_chunks[unit_chunk].append(unit)
 	_lod_buckets = new_buckets
 
-	_update_resource_chunks(render_rect)
-	_update_buildings(render_rect)
+	_update_resource_chunks(render_rect, load_candidates)
+	_update_buildings(render_rect, load_candidates)
+	_replace_pending_object_loads(load_candidates)
+
+
+func _replace_pending_object_loads(load_candidates: Array[Dictionary]):
+	load_candidates.sort_custom(func(a: Dictionary, b: Dictionary): return float(a.get("distance", INF)) < float(b.get("distance", INF)))
+	_pending_object_loads = load_candidates
+	_pending_object_load_index = 0
+
+
+func _make_load_candidate(kind: StringName, position: Vector2, payload: Variant) -> Dictionary:
+	return {
+		"kind": kind,
+		"position": position,
+		"distance": camera.global_position.distance_squared_to(position),
+		"payload": payload,
+	}
+
+
+func _process_pending_object_loads():
+	# Камера может быстро уйти из области между двумя обновлениями LOD. Проверяем
+	# актуальный кадр здесь, чтобы очередь не тратила бюджет на уже невидимую зону.
+	_current_render_rect = _get_camera_rect().grow(render_margin)
+	var loaded := 0
+	while _pending_object_load_index < _pending_object_loads.size() and loaded < object_load_budget_per_frame:
+		var item := _pending_object_loads[_pending_object_load_index]
+		_pending_object_load_index += 1
+		var position: Vector2 = item.get("position", Vector2.ZERO)
+		if not _current_render_rect.has_point(position):
+			continue
+		match StringName(item.get("kind", &"")):
+			&"unit":
+				var unit = item.get("payload") as Unit
+				if not is_instance_valid(unit):
+					continue
+				_progressively_visible_units[unit.get_instance_id()] = true
+				unit.set_lod_render_enabled(true)
+				loaded += 1
+			&"building":
+				var building = item.get("payload") as Building
+				if not is_instance_valid(building):
+					continue
+				_progressively_active_buildings[building.get_instance_id()] = true
+				building.set_lod_active(true)
+				loaded += 1
+			&"resource":
+				var record: Dictionary = item.get("payload", {})
+				if record.is_empty() or int(record.get("amount", 0)) <= 0:
+					continue
+				var chunk := _point_to_chunk(record.get("position", Vector2.ZERO), RESOURCE_CHUNK_SIZE)
+				if not _active_resource_chunks.has(chunk):
+					continue
+				var resource = record.get("node")
+				if not is_instance_valid(resource):
+					resource = _materialize_resource(record)
+				if resource.has_method("set_lod_active"):
+					resource.set_lod_active(true)
+				loaded += 1
+	if _pending_object_load_index >= _pending_object_loads.size():
+		_pending_object_loads.clear()
+		_pending_object_load_index = 0
 
 
 func _get_desired_lod(unit: Unit, render_rect: Rect2, reduced_rect: Rect2, strategic_rect: Rect2, local_faction_id: int) -> int:
+	# Рабочие циклы добычи и строительства намеренно исключены из LOD.
+	# Отрисовка за камерой всё равно отключается отдельно через render_enabled.
+	if unit.is_lod_exempt_worker():
+		return Unit.SimulationLOD.FULL
 	if render_rect.has_point(unit.global_position):
 		return Unit.SimulationLOD.FULL
 	var desired_lod := Unit.SimulationLOD.BACKGROUND
@@ -181,6 +261,10 @@ func _get_local_faction_id() -> int:
 
 
 func rebuild_spatial_index():
+	_pending_object_loads.clear()
+	_pending_object_load_index = 0
+	_progressively_visible_units.clear()
+	_progressively_active_buildings.clear()
 	_active_resource_chunks.clear()
 	for candidate in get_tree().get_nodes_in_group("resources"):
 		if not is_instance_valid(candidate) or candidate is not Node2D or not get_parent().is_ancestor_of(candidate):
@@ -193,7 +277,10 @@ func rebuild_spatial_index():
 		if candidate.has_method("set_lod_active"):
 			candidate.set_lod_active(false)
 	if is_instance_valid(camera):
-		_update_resource_chunks(_get_camera_rect().grow(render_margin))
+		_current_render_rect = _get_camera_rect().grow(render_margin)
+		var load_candidates: Array[Dictionary] = []
+		_update_resource_chunks(_current_render_rect, load_candidates)
+		_replace_pending_object_loads(load_candidates)
 
 
 func register_resource_data(resource_kind: String, position: Vector2, variant: int, amount: int, existing_node: Node2D = null) -> int:
@@ -260,6 +347,8 @@ func _is_rock_position_available(position: Vector2) -> bool:
 
 
 func clear_resource_data():
+	_pending_object_loads.clear()
+	_pending_object_load_index = 0
 	for record in _resource_records_by_id.values():
 		var resource = record.get("node")
 		if is_instance_valid(resource):
@@ -274,6 +363,18 @@ func update_resource_amount(record_id: int, amount: int):
 	var record: Dictionary = _resource_records_by_id.get(record_id, {})
 	if not record.is_empty():
 		record["amount"] = maxi(amount, 0)
+		var resource = record.get("node")
+		if is_instance_valid(resource):
+			if record.get("kind", "tree") == "tree":
+				resource.wood_amount = int(record["amount"])
+			else:
+				resource.stone_amount = int(record["amount"])
+			if int(record["amount"]) <= 0:
+				resource.queue_free()
+				record["node"] = null
+		var network_manager := get_node_or_null("/root/NetworkManager")
+		if is_instance_valid(network_manager):
+			network_manager.replicate_resource_amount(record_id, int(record["amount"]))
 
 
 func get_resource_save_data() -> Array:
@@ -297,22 +398,23 @@ func remove_resources_in_radius(center: Vector2, radius: float):
 		for record in _resource_chunks.get(chunk, []):
 			if int(record.get("amount", 0)) <= 0 or center.distance_to(record.position) > radius:
 				continue
-			record["amount"] = 0
-			var resource = record.get("node")
-			if is_instance_valid(resource):
-				resource.queue_free()
-			record["node"] = null
+			update_resource_amount(int(record.get("id", 0)), 0)
 
 
-func _update_resource_chunks(active_rect: Rect2):
+func _update_resource_chunks(active_rect: Rect2, load_candidates: Array[Dictionary]):
 	var desired_chunks := _get_chunks_in_rect(active_rect, RESOURCE_CHUNK_SIZE)
 	for chunk in _active_resource_chunks.keys():
 		if not desired_chunks.has(chunk):
 			_set_resource_chunk_active(chunk, false)
-	for chunk in desired_chunks:
-		if not _active_resource_chunks.has(chunk):
-			_set_resource_chunk_active(chunk, true)
 	_active_resource_chunks = desired_chunks
+	for chunk in desired_chunks:
+		for record in _resource_chunks.get(chunk, []):
+			if int(record.get("amount", 0)) <= 0:
+				continue
+			var resource = record.get("node")
+			var already_active := is_instance_valid(resource) and bool(resource.get("lod_active"))
+			if not already_active:
+				load_candidates.append(_make_load_candidate(&"resource", record.get("position", Vector2.ZERO), record))
 
 
 func _set_resource_chunk_active(chunk: Vector2i, active: bool):
@@ -357,10 +459,18 @@ func _sync_resource_record(record: Dictionary):
 	record["amount"] = resource.wood_amount if record.get("kind", "tree") == "tree" else resource.stone_amount
 
 
-func _update_buildings(active_rect: Rect2):
+func _update_buildings(active_rect: Rect2, load_candidates: Array[Dictionary]):
 	for candidate in get_tree().get_nodes_in_group("buildings"):
-		if candidate is Building and get_parent().is_ancestor_of(candidate):
-			candidate.set_lod_active(active_rect.has_point(candidate.global_position))
+		if candidate is not Building or not get_parent().is_ancestor_of(candidate):
+			continue
+		var building := candidate as Building
+		var building_id := building.get_instance_id()
+		if not active_rect.has_point(building.global_position):
+			_progressively_active_buildings.erase(building_id)
+			building.set_lod_active(false)
+		elif not _progressively_active_buildings.has(building_id):
+			building.set_lod_active(false)
+			load_candidates.append(_make_load_candidate(&"building", building.global_position, building))
 
 
 func get_nearby_units(point: Vector2) -> Array:

@@ -1,6 +1,7 @@
 class_name Building
 extends Area2D
 
+const CONSTRUCTION_SOUND := preload("res://assets/sounds/construction.mp3")
 const RESOURCE_TYPES: Array[StringName] = [&"wood", &"stone", &"iron", &"coal", &"planks", &"tools", &"food", &"armor", &"rifles"]
 const RESOURCE_NAMES := {
 	&"wood": "Дерево",
@@ -100,6 +101,12 @@ const FACTORY_ELECTRICITY_PER_CYCLE := 1
 @export var faction_id := 0
 @export var faction_name := "Игрок"
 @export var network_id := 0
+@export_range(100.0, 1200.0, 10.0) var construction_sound_max_distance := 520.0
+@export_range(-30.0, 6.0, 0.5) var construction_sound_volume_db := -8.0
+@export_range(0.5, 1.5, 0.01) var construction_pitch_min := 0.9
+@export_range(0.5, 1.5, 0.01) var construction_pitch_max := 1.1
+@export_range(0.1, 3.0, 0.05) var construction_sound_interval_min := 0.75
+@export_range(0.1, 3.0, 0.05) var construction_sound_interval_max := 1.15
 
 static var selected_building: Building
 
@@ -123,6 +130,9 @@ var selected_recipe: StringName = &"planks"
 var mouse_is_over := false
 var placement_preview := false
 var lod_active := true
+var construction_sound_players: Array[AudioStreamPlayer2D] = []
+var next_construction_sound_player := 0
+var next_construction_sound_time_msec := 0
 
 @onready var building_sprite: Sprite2D = $Sprite2D
 
@@ -161,6 +171,10 @@ func dismantle():
 
 
 func _process(_delta: float):
+	# На сетевом клиенте завершение может прийти прямым обновлением состояния,
+	# минуя add_build_progress(). В этом случае звук тоже нужно освободить.
+	if not under_construction and not construction_sound_players.is_empty():
+		_release_construction_sound_players()
 	_cleanup_workers()
 	_cleanup_builders()
 	_cleanup_occupants()
@@ -181,6 +195,8 @@ func set_lod_active(active: bool):
 	if lod_active == active:
 		return
 	lod_active = active
+	if not active:
+		_release_construction_sound_players()
 	visible = active
 	input_pickable = active
 	monitoring = active
@@ -266,6 +282,7 @@ func begin_construction():
 	delivered_wood = 0
 	delivered_stone = 0
 	build_progress = 0.0
+	next_construction_sound_time_msec = 0
 	progress_bar.visible = true
 	_update_visuals()
 
@@ -279,12 +296,13 @@ func _input_event(_viewport: Node, event: InputEvent, _shape_idx: int):
 		get_viewport().set_input_as_handled()
 	elif event.button_index == MOUSE_BUTTON_RIGHT:
 		var units := Unit.get_selected_units()
+		var network_manager := get_node_or_null("/root/NetworkManager")
 		if under_construction:
-			for unit in units:
-				unit.command_build(self)
+			if is_instance_valid(network_manager):
+				network_manager.request_unit_command(units, &"build", {"building_id": network_id})
 		elif is_completed() and (is_factory() or is_residence() or is_barracks()):
-			for unit in units:
-				unit.command_enter_building(self)
+			if is_instance_valid(network_manager):
+				network_manager.request_unit_command(units, &"enter_building", {"building_id": network_id})
 		get_viewport().set_input_as_handled()
 
 
@@ -321,12 +339,58 @@ func get_remaining_resource(resource_type: StringName) -> int:
 func add_build_progress(delta: float):
 	if not under_construction or needs_materials():
 		return
+	if delta > 0.0:
+		_try_play_construction_sound()
 	build_progress = minf(build_progress + delta, build_time)
 	_update_visuals()
 	if build_progress >= build_time:
 		under_construction = false
 		building_sprite.modulate.a = 1.0
 		progress_bar.visible = false
+		_release_construction_sound_players()
+
+
+func _try_play_construction_sound():
+	if not lod_active:
+		return
+	var now_msec := Time.get_ticks_msec()
+	if now_msec < next_construction_sound_time_msec:
+		return
+	_ensure_construction_sound_players()
+	if construction_sound_players.is_empty():
+		return
+	var player := construction_sound_players[next_construction_sound_player]
+	next_construction_sound_player = (next_construction_sound_player + 1) % construction_sound_players.size()
+	var minimum_pitch := minf(construction_pitch_min, construction_pitch_max)
+	var maximum_pitch := maxf(construction_pitch_min, construction_pitch_max)
+	player.pitch_scale = randf_range(minimum_pitch, maximum_pitch)
+	player.volume_db = construction_sound_volume_db + randf_range(-1.5, 1.0)
+	player.play()
+	var minimum_interval := minf(construction_sound_interval_min, construction_sound_interval_max)
+	var maximum_interval := maxf(construction_sound_interval_min, construction_sound_interval_max)
+	next_construction_sound_time_msec = now_msec + int(randf_range(minimum_interval, maximum_interval) * 1000.0)
+
+
+func _ensure_construction_sound_players():
+	if not construction_sound_players.is_empty():
+		return
+	for player_index in range(2):
+		var player := AudioStreamPlayer2D.new()
+		player.name = "ConstructionSound%d" % (player_index + 1)
+		player.stream = CONSTRUCTION_SOUND
+		player.max_distance = construction_sound_max_distance
+		player.attenuation = 2.0
+		add_child(player)
+		construction_sound_players.append(player)
+
+
+func _release_construction_sound_players():
+	for player in construction_sound_players:
+		if is_instance_valid(player):
+			player.stop()
+			player.queue_free()
+	construction_sound_players.clear()
+	next_construction_sound_player = 0
 
 
 func is_completed() -> bool:

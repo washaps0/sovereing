@@ -739,14 +739,9 @@ func _on_storage_quota_changed(value: float, resource_type: StringName):
 		return
 	var building := Building.selected_building
 	if is_instance_valid(building) and building.is_warehouse() and building.can_be_edited_locally():
-		building.set_storage_limit(resource_type, int(value))
-		updating_building_controls = true
-		for changed_type in Building.RESOURCE_TYPES:
-			var slider: HSlider = quota_sliders[changed_type]
-			slider.value = building.get_storage_limit(changed_type)
-			var value_label: Label = quota_value_labels[changed_type]
-			value_label.text = "квота %d  •  есть %d" % [building.get_storage_limit(changed_type), building.get_stored_resource(changed_type)]
-		updating_building_controls = false
+		var network_manager := get_node_or_null("/root/NetworkManager")
+		if is_instance_valid(network_manager):
+			network_manager.request_building_action(building, &"storage_limit", {"resource_type": resource_type, "amount": int(value)})
 
 
 func _on_recipe_selected(index: int):
@@ -754,7 +749,9 @@ func _on_recipe_selected(index: int):
 		return
 	var building := Building.selected_building
 	if is_instance_valid(building) and building.is_factory() and building.can_be_edited_locally():
-		building.set_recipe(StringName(recipe_picker.get_item_metadata(index)))
+		var network_manager := get_node_or_null("/root/NetworkManager")
+		if is_instance_valid(network_manager):
+			network_manager.request_building_action(building, &"recipe", {"recipe": StringName(recipe_picker.get_item_metadata(index))})
 
 
 func _on_factory_worker_target_changed(value: float):
@@ -762,7 +759,9 @@ func _on_factory_worker_target_changed(value: float):
 		return
 	var building := Building.selected_building
 	if is_instance_valid(building) and building.is_factory() and building.can_be_edited_locally():
-		building.set_worker_target(int(value))
+		var network_manager := get_node_or_null("/root/NetworkManager")
+		if is_instance_valid(network_manager):
+			network_manager.request_building_action(building, &"worker_target", {"amount": int(value)})
 
 
 func _on_road_rename_requested():
@@ -776,12 +775,9 @@ func _on_road_rename_requested():
 		return
 	var old_name: String = selected_road.street_name
 	var new_name := _make_unique_street_name(requested, old_name)
-	for road in get_tree().get_nodes_in_group("roads"):
-		if road is RoadSegment and road.faction_id == selected_road.faction_id and road.street_name == old_name:
-			road.set_street_name(new_name)
-	for building in get_tree().get_nodes_in_group("buildings"):
-		if building is Building and building is not RoadSegment and building.faction_id == selected_road.faction_id:
-			building.rename_address_street(old_name, new_name)
+	var network_manager := get_node_or_null("/root/NetworkManager")
+	if is_instance_valid(network_manager):
+		network_manager.request_building_action(selected_road, &"rename_road", {"name": new_name})
 	var last_number := int(house_numbers.get(old_name, 0))
 	if last_number > 0:
 		house_numbers[new_name] = maxi(int(house_numbers.get(new_name, 0)), last_number)
@@ -797,7 +793,9 @@ func _on_migration_target_changed(value: float):
 		return
 	var building := Building.selected_building
 	if building is GovernmentBuilding and building.can_be_edited_locally():
-		building.set_migration_target(int(value))
+		var network_manager := get_node_or_null("/root/NetworkManager")
+		if is_instance_valid(network_manager):
+			network_manager.request_building_action(building, &"migration_target", {"amount": int(value)})
 
 
 func _on_mobilization_target_changed(value: float):
@@ -805,22 +803,26 @@ func _on_mobilization_target_changed(value: float):
 		return
 	var building := Building.selected_building
 	if building is GovernmentBuilding and building.can_be_edited_locally():
-		building.set_mobilization_target(int(value))
+		var network_manager := get_node_or_null("/root/NetworkManager")
+		if is_instance_valid(network_manager):
+			network_manager.request_building_action(building, &"mobilization_target", {"amount": int(value)})
 
 
 func _on_organize_army_requested():
 	var building := Building.selected_building
 	if building is GovernmentBuilding and building.can_be_edited_locally():
-		building.organize_army()
+		var network_manager := get_node_or_null("/root/NetworkManager")
+		if is_instance_valid(network_manager):
+			network_manager.request_building_action(building, &"organize_army")
 
 
 func _release_selected_building_occupants():
 	var building := Building.selected_building
 	if not is_instance_valid(building) or not building.can_be_edited_locally():
 		return
-	for unit in building.occupants.duplicate():
-		if is_instance_valid(unit):
-			unit.force_exit_building(building)
+	var network_manager := get_node_or_null("/root/NetworkManager")
+	if is_instance_valid(network_manager):
+		network_manager.request_building_action(building, &"release_occupants")
 
 
 func _update_dismantle_button(building: Building, editable: bool):
@@ -853,7 +855,9 @@ func _on_dismantle_selected_building():
 	dismantle_confirmation_deadline = 0
 	Building.selected_building = null
 	building_panel.visible = false
-	building.dismantle()
+	var network_manager := get_node_or_null("/root/NetworkManager")
+	if is_instance_valid(network_manager):
+		network_manager.request_building_action(building, &"dismantle")
 
 
 func _input(event: InputEvent):
@@ -946,8 +950,12 @@ func _handle_tactical_release(event: InputEventMouseButton):
 			pass
 		else:
 			var units := Unit.get_selected_units()
+			var destinations: Array[Vector2] = []
 			for index in range(mini(units.size(), points.size())):
-				units[index].command_move(points[index])
+				destinations.append(points[index])
+			var network_manager := get_node_or_null("/root/NetworkManager")
+			if is_instance_valid(network_manager):
+				network_manager.request_unit_command(units, &"move", {"destinations": destinations})
 		get_viewport().set_input_as_handled()
 
 
@@ -1004,13 +1012,15 @@ func _issue_group_context_command(point: Vector2) -> bool:
 	var hits := world.get_world_2d().direct_space_state.intersect_point(query, 32)
 	for hit in hits:
 		if hit.collider is Building and hit.collider.under_construction:
-			for unit in Unit.get_selected_units():
-				unit.command_build(hit.collider)
+			var network_manager := get_node_or_null("/root/NetworkManager")
+			if is_instance_valid(network_manager):
+				network_manager.request_unit_command(Unit.get_selected_units(), &"build", {"building_id": hit.collider.network_id})
 			return true
 	for hit in hits:
 		if hit.collider is Building and hit.collider.is_completed() and (hit.collider.is_factory() or hit.collider.is_residence() or hit.collider.is_barracks()):
-			for unit in Unit.get_selected_units():
-				unit.command_enter_building(hit.collider)
+			var network_manager := get_node_or_null("/root/NetworkManager")
+			if is_instance_valid(network_manager):
+				network_manager.request_unit_command(Unit.get_selected_units(), &"enter_building", {"building_id": hit.collider.network_id})
 			return true
 	if Unit.continuous_harvest_mode:
 		var selected_resource: Node2D
@@ -1022,8 +1032,13 @@ func _issue_group_context_command(point: Vector2) -> bool:
 					nearest_distance = distance
 					selected_resource = hit.collider
 		if is_instance_valid(selected_resource):
-			for unit in Unit.get_selected_units():
-				unit.command_harvest(selected_resource)
+			var network_manager := get_node_or_null("/root/NetworkManager")
+			if is_instance_valid(network_manager):
+				network_manager.request_unit_command(Unit.get_selected_units(), &"harvest", {
+					"resource_id": int(selected_resource.get("lod_record_id")),
+					"resource_type": selected_resource.get_resource_type(),
+					"position": selected_resource.global_position,
+				})
 			return true
 	return false
 
@@ -1099,23 +1114,22 @@ func _update_placement_validity():
 func _place_building():
 	if not placement_valid or not is_instance_valid(snapped_road):
 		return
-	ghost.modulate = Color.WHITE
-	ghost.placement_preview = false
-	ghost.collision_layer = 1
-	ghost.collision_mask = 1
-	ghost.monitoring = true
-	ghost.monitorable = true
 	var street := snapped_road.street_name
 	var number: int = house_numbers.get(street, 0) + 1
 	house_numbers[street] = number
-	ghost.set_address(street, number)
-	_clear_resources_for_shape(ghost.get_node("CollisionShape2D"))
-	ghost.begin_construction()
+	var specification := {
+		"kind": ghost.building_kind,
+		"position": ghost.global_position,
+		"rotation": ghost.global_rotation,
+		"street_name": street,
+		"address": "%s, %d" % [street, number],
+	}
 	var builder := Unit.get_selected_unit()
-	if is_instance_valid(builder):
-		builder.command_build(ghost)
-	ghost = null
-	selected_scene = null
+	var builders: Array = [builder] if is_instance_valid(builder) else []
+	_cancel_building_placement()
+	var network_manager := get_node_or_null("/root/NetworkManager")
+	if is_instance_valid(network_manager):
+		network_manager.request_spawn_buildings([specification], builders)
 
 
 func _begin_road_mode():
@@ -1159,25 +1173,23 @@ func _create_road_line(start: Vector2, end: Vector2):
 	var street := _road_name_for_start(direction)
 	var angle := direction.angle()
 	var count := maxi(1, int(ceil(delta.length() / RoadSegment.SEGMENT_LENGTH)))
-	var segments: Array[Building] = []
+	var specifications: Array = []
 	for i in range(count):
 		var position := start + direction * (RoadSegment.SEGMENT_LENGTH * (i + 0.5))
-		var segment := ROAD_SCENE.instantiate() as RoadSegment
-		segment.faction_id = _get_local_faction_id()
-		segment.faction_name = _get_local_faction_name()
-		segment.position = position
 		if _road_segment_overlaps_existing(position, angle):
-			segment.free()
 			continue
-		roads.add_child(segment)
-		segment.setup(street, angle)
-		_clear_resources_for_shape(segment.get_node("CollisionShape2D"))
-		segment.begin_construction()
-		segments.append(segment)
-	if segments.is_empty():
+		specifications.append({
+			"kind": "road",
+			"position": position,
+			"rotation": angle,
+			"street_name": street,
+			"address": street,
+		})
+	if specifications.is_empty():
 		return
-	for builder in Unit.get_selected_units():
-		builder.command_build_line(segments)
+	var network_manager := get_node_or_null("/root/NetworkManager")
+	if is_instance_valid(network_manager):
+		network_manager.request_spawn_buildings(specifications, Unit.get_selected_units())
 
 
 func _road_line_has_parallel_conflict(start: Vector2, end: Vector2) -> bool:

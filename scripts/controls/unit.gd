@@ -114,6 +114,9 @@ var road_speed_check_timer := 0.0
 var road_segments_by_cell := {}
 var harvest_sound_players: Array[AudioStreamPlayer2D] = []
 var next_harvest_sound_player := 0
+var network_position_target := Vector2.ZERO
+var network_velocity_target := Vector2.ZERO
+var network_motion_initialized := false
 
 const PATH_CELL_SIZE := 32.0
 const PATH_MAP_SIZE := Vector2i(400, 400)
@@ -238,6 +241,9 @@ func _exit_tree():
 
 
 func _physics_process(delta: float):
+	if _is_remote_network_client():
+		_update_network_motion(delta)
+		return
 	if simulation_lod != SimulationLOD.FULL:
 		return
 	_process_food_needs(delta)
@@ -301,7 +307,7 @@ func simulate_lod(delta: float):
 	# Низкие LOD вызываются общим менеджером редко и крупными порциями времени.
 	# Узел юнита не уничтожается: здоровье, груз, приказ и ссылки на цели остаются
 	# теми же, поэтому возврат камеры не пересоздаёт и не разбрасывает людей.
-	if delta <= 0.0 or simulation_lod == SimulationLOD.FULL:
+	if _is_remote_network_client() or delta <= 0.0 or simulation_lod == SimulationLOD.FULL:
 		return
 	_process_food_needs(delta)
 	if health <= 0:
@@ -333,6 +339,29 @@ func simulate_lod(delta: float):
 			_process_idle(delta)
 	last_motion_position = global_position
 	stuck_timer = 0.0
+
+
+func apply_network_motion(server_position: Vector2, server_velocity: Vector2):
+	network_position_target = server_position
+	network_velocity_target = server_velocity
+	if not network_motion_initialized or global_position.distance_to(server_position) > 160.0:
+		global_position = server_position
+	network_motion_initialized = true
+
+
+func _update_network_motion(delta: float):
+	if not network_motion_initialized or is_instance_valid(inside_building):
+		return
+	var predicted_position := network_position_target + network_velocity_target * 0.05
+	global_position = global_position.lerp(predicted_position, clampf(delta * 14.0, 0.0, 1.0))
+	velocity = network_velocity_target
+	if not network_velocity_target.is_zero_approx():
+		_set_facing_direction(network_velocity_target)
+
+
+func _is_remote_network_client() -> bool:
+	var network_manager := get_node_or_null("/root/NetworkManager")
+	return is_instance_valid(network_manager) and network_manager.is_remote_client()
 
 
 func _process_food_needs(delta: float):
@@ -388,6 +417,17 @@ func has_lod_focus_in(rect: Rect2) -> bool:
 	if is_instance_valid(target_warehouse) and rect.has_point(target_warehouse.global_position):
 		return true
 	return task == Task.MOVE and rect.has_point(target_position)
+
+
+func is_lod_exempt_worker() -> bool:
+	# Добытчики и активные строители всегда используют полную симуляцию.
+	# Проверяются все промежуточные задачи рабочего цикла: путь к ресурсу,
+	# доставка на склад, получение материалов и непосредственно строительство.
+	if continuous_harvest:
+		return true
+	if task in [Task.HARVEST, Task.DELIVER_TO_WAREHOUSE, Task.FETCH_FROM_WAREHOUSE, Task.BUILD]:
+		return true
+	return is_instance_valid(target_building) and target_building.under_construction
 
 
 func needs_frequent_offscreen_simulation() -> bool:
@@ -1721,6 +1761,70 @@ func _release_warehouse():
 	target_warehouse = null
 
 
+func request_move(destination: Vector2):
+	var network_manager := get_node_or_null("/root/NetworkManager")
+	if is_instance_valid(network_manager):
+		network_manager.request_unit_command([self], &"move", {"destinations": [destination]})
+	else:
+		command_move(destination)
+
+
+func request_harvest(resource: Node2D):
+	if not is_instance_valid(resource):
+		return
+	var network_manager := get_node_or_null("/root/NetworkManager")
+	if is_instance_valid(network_manager):
+		network_manager.request_unit_command([self], &"harvest", {
+			"resource_id": int(resource.get("lod_record_id")),
+			"resource_type": resource.get_resource_type(),
+			"position": resource.global_position,
+		})
+	else:
+		command_harvest(resource)
+
+
+func request_build(building: Building):
+	if not is_instance_valid(building):
+		return
+	var network_manager := get_node_or_null("/root/NetworkManager")
+	if is_instance_valid(network_manager):
+		network_manager.request_unit_command([self], &"build", {"building_id": building.network_id})
+	else:
+		command_build(building)
+
+
+func request_build_line(segments: Array[Building]):
+	var building_ids: Array[int] = []
+	for segment in segments:
+		if is_instance_valid(segment) and segment.network_id > 0:
+			building_ids.append(segment.network_id)
+	if building_ids.is_empty():
+		return
+	var network_manager := get_node_or_null("/root/NetworkManager")
+	if is_instance_valid(network_manager):
+		network_manager.request_unit_command([self], &"build_line", {"building_ids": building_ids})
+	else:
+		command_build_line(segments)
+
+
+func request_enter_building(building: Building):
+	if not is_instance_valid(building):
+		return
+	var network_manager := get_node_or_null("/root/NetworkManager")
+	if is_instance_valid(network_manager):
+		network_manager.request_unit_command([self], &"enter_building", {"building_id": building.network_id})
+	else:
+		command_enter_building(building)
+
+
+func request_squad_order(order: StringName):
+	var network_manager := get_node_or_null("/root/NetworkManager")
+	if is_instance_valid(network_manager):
+		network_manager.request_unit_command([self], &"squad_order", {"order": order})
+	else:
+		issue_squad_order(order)
+
+
 func command_move(destination: Vector2):
 	_cancel_task()
 	target_position = _get_reachable_destination(destination)
@@ -1878,7 +1982,7 @@ func _issue_context_command(mouse_position: Vector2):
 	for hit in hits:
 		var collider = hit.collider
 		if collider is Building and collider.under_construction:
-			command_build(collider)
+			request_build(collider)
 			return
 
 	var selected_resource: Node2D
@@ -1892,12 +1996,12 @@ func _issue_context_command(mouse_position: Vector2):
 				selected_resource = collider
 	if is_instance_valid(selected_resource):
 		if continuous_harvest_mode:
-			command_harvest(selected_resource)
+			request_harvest(selected_resource)
 		else:
-			command_move(selected_resource.global_position)
+			request_move(selected_resource.global_position)
 		return
 
-	command_move(mouse_position)
+	request_move(mouse_position)
 
 
 func select(additive := false):
