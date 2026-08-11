@@ -16,11 +16,13 @@ const DISCOVERY_QUERY := "SOVEREIGN_DISCOVER_V1"
 const DISCOVERY_RESPONSE := "SOVEREIGN_LOBBY_V1"
 const DISCOVERY_SCAN_INTERVAL := 1.5
 const DISCOVERY_LOBBY_TIMEOUT_MSEC := 5000
-const UNIT_STATE_SYNC_INTERVAL := 0.1
-const BUILDING_STATE_SYNC_INTERVAL := 0.5
+const UNIT_STATE_SYNC_INTERVAL := 2.0
+const BUILDING_STATE_SYNC_INTERVAL := 5.0
 const MAX_UNITS_PER_COMMAND := 128
 const MAX_BUILDINGS_PER_COMMAND := 256
 const SERVER_ENTITY_ID_START := 1000000
+const CLIENT_ENTITY_ID_BASE := 10000000000
+const CLIENT_ENTITY_ID_STRIDE := 1000000
 const NETWORK_BUILDING_KINDS: Array[String] = [
 	"residence", "warehouse", "factory", "food_factory", "mine",
 	"power_plant", "barracks", "military_factory", "government", "road",
@@ -51,6 +53,7 @@ var manual_shutdown := false
 var _unit_state_sync_accumulator := 0.0
 var _building_state_sync_accumulator := 0.0
 var _next_server_entity_id := SERVER_ENTITY_ID_START
+var _next_local_entity_sequence := 1
 var _authoritative_resource_amounts := {}
 var _world_ready_peers := {}
 var _lan_discovery_peer: PacketPeerUDP
@@ -86,11 +89,13 @@ func _process(delta: float):
 	if _building_state_sync_accumulator >= BUILDING_STATE_SYNC_INTERVAL and world.has_method("get_network_building_states"):
 		_building_state_sync_accumulator = fmod(_building_state_sync_accumulator, BUILDING_STATE_SYNC_INTERVAL)
 		_receive_building_states.rpc(world.get_network_building_states())
-		if not _authoritative_resource_amounts.is_empty() and not _all_remote_worlds_ready():
+		if not _authoritative_resource_amounts.is_empty():
 			var resource_states: Array = []
 			for record_id in _authoritative_resource_amounts:
 				resource_states.append({"record_id": int(record_id), "amount": int(_authoritative_resource_amounts[record_id])})
 			_receive_resource_states.rpc(resource_states)
+			if _all_remote_worlds_ready():
+				_authoritative_resource_amounts.clear()
 
 
 func set_local_nickname(value: String):
@@ -358,6 +363,7 @@ func request_unit_command(units: Array, action: StringName, payload: Dictionary 
 	elif multiplayer.is_server():
 		_handle_server_unit_command(1, action, unit_ids, payload)
 	else:
+		_apply_unit_command(get_local_faction_id(), action, unit_ids, payload)
 		_server_request_unit_command.rpc_id(1, action, unit_ids, payload)
 
 
@@ -369,6 +375,7 @@ func request_building_action(building: Building, action: StringName, payload: Di
 	elif multiplayer.is_server():
 		_handle_server_building_action(1, building.network_id, action, payload)
 	else:
+		_apply_building_action(building.faction_id, building.network_id, action, payload)
 		_server_request_building_action.rpc_id(1, building.network_id, action, payload)
 
 
@@ -393,15 +400,56 @@ func request_spawn_buildings(specifications: Array, builders: Array):
 	elif multiplayer.is_server():
 		_handle_server_spawn_buildings(1, specifications, builder_ids)
 	else:
-		_server_request_spawn_buildings.rpc_id(1, specifications, builder_ids)
+		var faction_id := get_local_faction_id()
+		var local_specs := _prepare_client_spawn_specifications(specifications, faction_id)
+		if local_specs.is_empty():
+			return
+		var local_world := _get_world()
+		if not is_instance_valid(local_world) or not local_world.has_method("spawn_network_buildings"):
+			return
+		local_world.spawn_network_buildings(local_specs, builder_ids)
+		_server_request_spawn_buildings.rpc_id(1, local_specs, builder_ids)
+
+
+func _prepare_client_spawn_specifications(raw_specifications: Array, faction_id: int) -> Array:
+	var world := _get_world()
+	var specifications: Array = []
+	if faction_id < 0 or not is_instance_valid(world):
+		return specifications
+	for raw_spec in raw_specifications.slice(0, MAX_BUILDINGS_PER_COMMAND):
+		if raw_spec is not Dictionary:
+			continue
+		var spec: Dictionary = raw_spec.duplicate(true)
+		var kind := str(spec.get("kind", ""))
+		var position: Variant = spec.get("position", Vector2.ZERO)
+		if kind not in NETWORK_BUILDING_KINDS or position is not Vector2 or not _is_finite_vector(position):
+			continue
+		if world.has_method("is_network_position_valid") and not world.is_network_position_valid(position):
+			continue
+		spec["kind"] = kind
+		spec["position"] = position
+		spec["rotation"] = wrapf(float(spec.get("rotation", 0.0)), -PI, PI)
+		spec["faction_id"] = faction_id
+		spec["faction_name"] = str(get_faction_slot(faction_id).get("nickname", "Игрок"))
+		spec["network_id"] = _allocate_client_entity_id()
+		spec["street_name"] = str(spec.get("street_name", "Улица")).strip_edges().left(48)
+		spec["address"] = str(spec.get("address", "")).strip_edges().left(96)
+		if world.has_method("can_spawn_network_building") and not world.can_spawn_network_building(spec):
+			continue
+		var overlaps_pending := false
+		for accepted_spec in specifications:
+			if position.distance_to(accepted_spec.get("position", Vector2.ZERO)) < 8.0:
+				overlaps_pending = true
+				break
+		if not overlaps_pending:
+			specifications.append(spec)
+	return specifications
 
 
 func replicate_resource_amount(record_id: int, amount: int):
 	if is_lan_session() and multiplayer.is_server() and record_id > 0:
 		var safe_amount := maxi(amount, 0)
-		if not _all_remote_worlds_ready():
-			_authoritative_resource_amounts[record_id] = safe_amount
-		_receive_resource_amount.rpc(record_id, safe_amount)
+		_authoritative_resource_amounts[record_id] = safe_amount
 
 
 func get_local_addresses() -> Array[String]:
@@ -658,8 +706,6 @@ func _server_world_ready():
 		return
 	_world_ready_peers[sender] = true
 	_send_full_world_state(sender)
-	if _all_remote_worlds_ready():
-		_authoritative_resource_amounts.clear()
 
 
 @rpc("authority", "call_remote", "reliable")
@@ -718,18 +764,6 @@ func _receive_building_states(states: Array):
 
 
 @rpc("authority", "call_remote", "reliable")
-func _receive_resource_amount(record_id: int, amount: int):
-	if multiplayer.is_server():
-		return
-	var world := _get_world()
-	if not is_instance_valid(world):
-		return
-	var lod_manager := world.get_node_or_null("SimulationLODManager")
-	if is_instance_valid(lod_manager) and lod_manager.has_method("update_resource_amount"):
-		lod_manager.update_resource_amount(record_id, amount)
-
-
-@rpc("authority", "call_remote", "reliable")
 func _receive_resource_states(states: Array):
 	if multiplayer.is_server():
 		return
@@ -742,6 +776,27 @@ func _receive_resource_states(states: Array):
 	for state in states:
 		if state is Dictionary:
 			lod_manager.update_resource_amount(int(state.get("record_id", 0)), int(state.get("amount", 0)))
+
+
+func _relay_unit_command(excluded_peer_id: int, faction_id: int, action: StringName, unit_ids: Array, payload: Dictionary):
+	for raw_peer_id in multiplayer.get_peers():
+		var peer_id := int(raw_peer_id)
+		if peer_id != excluded_peer_id:
+			_receive_unit_command.rpc_id(peer_id, faction_id, action, unit_ids, payload)
+
+
+func _relay_building_action(excluded_peer_id: int, faction_id: int, network_id: int, action: StringName, payload: Dictionary):
+	for raw_peer_id in multiplayer.get_peers():
+		var peer_id := int(raw_peer_id)
+		if peer_id != excluded_peer_id:
+			_receive_building_action.rpc_id(peer_id, faction_id, network_id, action, payload)
+
+
+func _relay_spawn_buildings(excluded_peer_id: int, specifications: Array, builder_ids: Array):
+	for raw_peer_id in multiplayer.get_peers():
+		var peer_id := int(raw_peer_id)
+		if peer_id != excluded_peer_id:
+			_receive_spawn_buildings.rpc_id(peer_id, specifications, builder_ids)
 
 
 func _handle_server_unit_command(sender_peer_id: int, action: StringName, raw_unit_ids: Array, payload: Dictionary):
@@ -758,7 +813,7 @@ func _handle_server_unit_command(sender_peer_id: int, action: StringName, raw_un
 	if accepted_ids.is_empty() or not _is_valid_unit_command(action, accepted_ids, payload, faction_id):
 		return
 	_apply_unit_command(faction_id, action, accepted_ids, payload)
-	_receive_unit_command.rpc(faction_id, action, accepted_ids, payload)
+	_relay_unit_command(sender_peer_id, faction_id, action, accepted_ids, payload)
 
 
 func _is_valid_unit_command(action: StringName, unit_ids: Array[int], payload: Dictionary, faction_id: int) -> bool:
@@ -840,7 +895,7 @@ func _handle_server_building_action(sender_peer_id: int, network_id: int, action
 	if faction_id < 0 or not is_instance_valid(building) or not _is_valid_building_action(building, action, payload):
 		return
 	_apply_building_action(faction_id, network_id, action, payload)
-	_receive_building_action.rpc(faction_id, network_id, action, payload)
+	_relay_building_action(sender_peer_id, faction_id, network_id, action, payload)
 
 
 func _is_valid_building_action(building: Building, action: StringName, payload: Dictionary) -> bool:
@@ -911,12 +966,24 @@ func _handle_server_spawn_buildings(sender_peer_id: int, raw_specifications: Arr
 			continue
 		if world.has_method("is_network_position_valid") and not world.is_network_position_valid(position):
 			continue
+		var network_id := int(spec.get("network_id", 0))
+		if sender_peer_id <= 1:
+			network_id = _allocate_server_entity_id()
+		elif not _is_client_entity_id_for_peer(network_id, sender_peer_id) or _network_entity_id_exists(network_id):
+			continue
+		var duplicate_id := false
+		for accepted_spec in specifications:
+			if int(accepted_spec.get("network_id", 0)) == network_id:
+				duplicate_id = true
+				break
+		if duplicate_id:
+			continue
 		spec["kind"] = kind
 		spec["position"] = position
 		spec["rotation"] = wrapf(float(spec.get("rotation", 0.0)), -PI, PI)
 		spec["faction_id"] = faction_id
 		spec["faction_name"] = str(get_faction_slot(faction_id).get("nickname", "Игрок"))
-		spec["network_id"] = _allocate_server_entity_id()
+		spec["network_id"] = network_id
 		spec["street_name"] = str(spec.get("street_name", "Улица")).strip_edges().left(48)
 		spec["address"] = str(spec.get("address", "")).strip_edges().left(96)
 		if world.has_method("can_spawn_network_building") and not world.can_spawn_network_building(spec):
@@ -937,7 +1004,7 @@ func _handle_server_spawn_buildings(sender_peer_id: int, raw_specifications: Arr
 		if is_instance_valid(builder) and builder.controller_peer_id == sender_peer_id and not builder.ai_controlled:
 			builder_ids.append(builder.network_id)
 	world.spawn_network_buildings(specifications, builder_ids)
-	_receive_spawn_buildings.rpc(specifications, builder_ids)
+	_relay_spawn_buildings(sender_peer_id, specifications, builder_ids)
 
 
 func _send_full_world_state(peer_id: int):
@@ -1019,6 +1086,25 @@ func _allocate_server_entity_id() -> int:
 	var result := _next_server_entity_id
 	_next_server_entity_id += 1
 	return result
+
+
+func _allocate_client_entity_id() -> int:
+	var peer_id := maxi(multiplayer.get_unique_id(), 2)
+	if _next_local_entity_sequence >= CLIENT_ENTITY_ID_STRIDE:
+		_next_local_entity_sequence = 1
+	var result := CLIENT_ENTITY_ID_BASE + peer_id * CLIENT_ENTITY_ID_STRIDE + _next_local_entity_sequence
+	while _network_entity_id_exists(result):
+		_next_local_entity_sequence += 1
+		if _next_local_entity_sequence >= CLIENT_ENTITY_ID_STRIDE:
+			_next_local_entity_sequence = 1
+		result = CLIENT_ENTITY_ID_BASE + peer_id * CLIENT_ENTITY_ID_STRIDE + _next_local_entity_sequence
+	_next_local_entity_sequence += 1
+	return result
+
+
+func _is_client_entity_id_for_peer(network_id: int, peer_id: int) -> bool:
+	var peer_id_prefix := CLIENT_ENTITY_ID_BASE + peer_id * CLIENT_ENTITY_ID_STRIDE
+	return network_id > peer_id_prefix and network_id < peer_id_prefix + CLIENT_ENTITY_ID_STRIDE
 
 
 func _network_entity_id_exists(network_id: int) -> bool:
@@ -1410,6 +1496,7 @@ func _reset_runtime_state():
 	_unit_state_sync_accumulator = 0.0
 	_building_state_sync_accumulator = 0.0
 	_next_server_entity_id = SERVER_ENTITY_ID_START
+	_next_local_entity_sequence = 1
 	_authoritative_resource_amounts.clear()
 	_world_ready_peers.clear()
 

@@ -114,9 +114,6 @@ var road_speed_check_timer := 0.0
 var road_segments_by_cell := {}
 var harvest_sound_players: Array[AudioStreamPlayer2D] = []
 var next_harvest_sound_player := 0
-var network_position_target := Vector2.ZERO
-var network_velocity_target := Vector2.ZERO
-var network_motion_initialized := false
 
 const PATH_CELL_SIZE := 32.0
 const PATH_MAP_SIZE := Vector2i(400, 400)
@@ -241,9 +238,6 @@ func _exit_tree():
 
 
 func _physics_process(delta: float):
-	if _is_remote_network_client():
-		_update_network_motion(delta)
-		return
 	if simulation_lod != SimulationLOD.FULL:
 		return
 	_process_food_needs(delta)
@@ -307,7 +301,7 @@ func simulate_lod(delta: float):
 	# Низкие LOD вызываются общим менеджером редко и крупными порциями времени.
 	# Узел юнита не уничтожается: здоровье, груз, приказ и ссылки на цели остаются
 	# теми же, поэтому возврат камеры не пересоздаёт и не разбрасывает людей.
-	if _is_remote_network_client() or delta <= 0.0 or simulation_lod == SimulationLOD.FULL:
+	if delta <= 0.0 or simulation_lod == SimulationLOD.FULL:
 		return
 	_process_food_needs(delta)
 	if health <= 0:
@@ -342,26 +336,14 @@ func simulate_lod(delta: float):
 
 
 func apply_network_motion(server_position: Vector2, server_velocity: Vector2):
-	network_position_target = server_position
-	network_velocity_target = server_velocity
-	if not network_motion_initialized or global_position.distance_to(server_position) > 160.0:
+	var position_error := global_position.distance_to(server_position)
+	if position_error > 96.0:
 		global_position = server_position
-	network_motion_initialized = true
-
-
-func _update_network_motion(delta: float):
-	if not network_motion_initialized or is_instance_valid(inside_building):
-		return
-	var predicted_position := network_position_target + network_velocity_target * 0.05
-	global_position = global_position.lerp(predicted_position, clampf(delta * 14.0, 0.0, 1.0))
-	velocity = network_velocity_target
-	if not network_velocity_target.is_zero_approx():
-		_set_facing_direction(network_velocity_target)
-
-
-func _is_remote_network_client() -> bool:
-	var network_manager := get_node_or_null("/root/NetworkManager")
-	return is_instance_valid(network_manager) and network_manager.is_remote_client()
+	elif position_error > 4.0:
+		global_position = global_position.lerp(server_position, 0.35)
+	velocity = server_velocity
+	if not server_velocity.is_zero_approx():
+		_set_facing_direction(server_velocity)
 
 
 func _process_food_needs(delta: float):

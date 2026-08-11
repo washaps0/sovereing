@@ -166,9 +166,6 @@ func _process(delta: float):
 	if ai_strategy_timer > 0.0:
 		return
 	ai_strategy_timer = AI_STRATEGY_INTERVAL
-	var network_manager := get_node_or_null("/root/NetworkManager")
-	if is_instance_valid(network_manager) and network_manager.is_lan_session() and not multiplayer.is_server():
-		return
 	ai_strategy_cycle += 1
 	_run_ai_strategy()
 

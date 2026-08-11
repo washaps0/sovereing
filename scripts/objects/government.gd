@@ -22,9 +22,6 @@ func _ready():
 
 func _process(delta: float):
 	super._process(delta)
-	var network_manager := get_node_or_null("/root/NetworkManager")
-	if is_instance_valid(network_manager) and network_manager.is_remote_client():
-		return
 	if placement_preview or not is_completed():
 		return
 	if migration_target > 0:
