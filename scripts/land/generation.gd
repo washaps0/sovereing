@@ -16,6 +16,7 @@ const POWER_PLANT_SCENE := preload("res://scenes/objects/buildings/power_plant.t
 const BARRACKS_SCENE := preload("res://scenes/objects/buildings/barracks.tscn")
 const MILITARY_FACTORY_SCENE := preload("res://scenes/objects/buildings/military_factory.tscn")
 const GOVERNMENT_SCENE := preload("res://scenes/objects/buildings/government.tscn")
+const LUMBERJACK_CABIN_SCENE := preload("res://scenes/objects/buildings/lumberjack_cabin.tscn")
 const ROAD_SCENE := preload("res://scenes/objects/buildings/road.tscn")
 const SPAWN_MARGIN := 320.0
 const SPAWN_CLEAR_RADIUS := 230.0
@@ -873,6 +874,8 @@ func _serialize_building(building: Building) -> Dictionary:
 		result["migration_timer"] = building.migration_timer
 		result["mobilization_target"] = building.mobilization_target
 		result["mobilization_timer"] = building.mobilization_timer
+	if building.has_method("get_forestry_save_data"):
+		result["forestry_plots"] = building.get_forestry_save_data()
 	return result
 
 
@@ -1201,6 +1204,8 @@ func _apply_network_building_state(building: Building, state: Dictionary):
 		building.migration_timer = float(state.get("migration_timer", building.migration_timer))
 		building.mobilization_target = int(state.get("mobilization_target", building.mobilization_target))
 		building.mobilization_timer = float(state.get("mobilization_timer", building.mobilization_timer))
+	if building.has_method("apply_forestry_network_state"):
+		building.apply_forestry_network_state(state.get("forestry_plots", []))
 	building.under_construction = new_under_construction
 	building.progress_bar.visible = building.under_construction
 	building._update_visuals()
@@ -1314,6 +1319,7 @@ func _get_building_scene(kind: String) -> PackedScene:
 		"barracks": return BARRACKS_SCENE
 		"military_factory": return MILITARY_FACTORY_SCENE
 		"government": return GOVERNMENT_SCENE
+		"lumberjack_cabin": return LUMBERJACK_CABIN_SCENE
 		"road": return ROAD_SCENE
 		"residence": return RESIDENCE_SCENE
 		_: return null
@@ -1386,6 +1392,7 @@ func _restore_building(data: Dictionary) -> Building:
 		"barracks": scene = BARRACKS_SCENE
 		"military_factory": scene = MILITARY_FACTORY_SCENE
 		"government": scene = GOVERNMENT_SCENE
+		"lumberjack_cabin": scene = LUMBERJACK_CABIN_SCENE
 		"road": scene = ROAD_SCENE
 		_: scene = RESIDENCE_SCENE
 	var building := scene.instantiate() as Building
@@ -1437,6 +1444,8 @@ func _restore_building(data: Dictionary) -> Building:
 		building.under_construction = false
 		building.progress_bar.visible = false
 		building.building_sprite.modulate.a = 1.0
+	if building.has_method("restore_forestry_save_data"):
+		building.restore_forestry_save_data(data.get("forestry_plots", []))
 	return building
 
 
@@ -1907,6 +1916,8 @@ func _ensure_ai_starting_plan(faction_id: int, faction_name: String):
 	_spawn_ai_building(MINE_SCENE, block_center + Vector2(0.0, 62.0), PI, faction_id, faction_name, building_id, main_street, 5)
 	building_id += 1
 	_spawn_ai_building(POWER_PLANT_SCENE, block_center + Vector2(120.0, 62.0), PI, faction_id, faction_name, building_id, main_street, 6)
+	building_id += 1
+	_spawn_ai_building(LUMBERJACK_CABIN_SCENE, block_center + Vector2(-240.0 * inward_x, 62.0), PI, faction_id, faction_name, building_id, main_street, 7)
 
 
 func _plan_ai_expansion(faction_id: int, faction_name: String):
