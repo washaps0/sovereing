@@ -1026,9 +1026,10 @@ func _get_ai_construction_priority(building: Building) -> int:
 		"power_plant": return 0
 		"food_factory": return 1
 		"mine": return 2
-		"residence": return 3
-		"road": return 4
-		_: return 5
+		"lumberjack_cabin": return 3
+		"residence": return 4
+		"road": return 5
+		_: return 6
 
 
 func _find_available_factory() -> Building:
@@ -1038,9 +1039,13 @@ func _find_available_factory() -> Building:
 	for building in _get_indexed_buildings():
 		if building is not Building or building.faction_id != faction_id or not building.is_factory() or not building.is_completed():
 			continue
-		if building.occupants.size() + _get_reserved_entry_count(building) >= building.get_worker_target() or not building.can_produce_selected_recipe():
+		if building.occupants.size() + _get_reserved_entry_count(building) >= building.get_worker_target():
 			continue
-		var priority := 0 if building.is_mine() else (1 if building.is_power_plant() else (2 if building.is_food_factory() else 3))
+		# The cabin owns its long-running forestry cycle, so it intentionally does
+		# not report a factory recipe as immediately producible.
+		if not building.is_lumberjack_cabin() and not building.can_produce_selected_recipe():
+			continue
+		var priority := 0 if building.is_mine() else (1 if building.is_power_plant() else (2 if building.is_food_factory() else (3 if building.is_lumberjack_cabin() else 4)))
 		var distance := global_position.distance_squared_to(building.global_position)
 		if priority < nearest_priority or (priority == nearest_priority and distance < nearest_distance):
 			nearest_priority = priority
@@ -2175,7 +2180,8 @@ func get_task_text() -> String:
 		Task.DELIVER_TO_WAREHOUSE: return "Несёт ресурс на склад"
 		Task.FETCH_FROM_WAREHOUSE: return "Берёт материал со склада"
 		Task.ENTER_BUILDING: return "Заходит в здание"
-		Task.FACTORY_WORK: return "Работает на заводе"
+		Task.FACTORY_WORK:
+			return "Работает в хижине дровосеков" if is_instance_valid(inside_building) and inside_building.is_lumberjack_cabin() else "Работает на заводе"
 		Task.REST: return "В казарме" if is_mobilized else "Находится дома"
 		_:
 			if continuous_harvest:

@@ -85,9 +85,22 @@ func get_factory_status_text() -> String:
 
 func _process_plot(plot: Dictionary, delta: float):
 	var tree := plot.get("tree") as Node2D
+	if not is_instance_valid(tree) and bool(plot.get("mature", false)):
+		_reset_plot_for_replanting(plot)
+		return
+	var safety_timer := float(plot.get("safety_timer", 0.0)) - delta
+	if safety_timer <= 0.0:
+		plot["safety_timer"] = 1.5
+		if not is_planting_position_safe(plot.get("position", global_position), plot):
+			_reset_plot_for_replanting(plot)
+			return
+	else:
+		plot["safety_timer"] = safety_timer
 	if not is_instance_valid(tree):
 		_spawn_plot_tree(plot)
 		tree = plot.get("tree") as Node2D
+		if not is_instance_valid(tree):
+			return
 	if not bool(plot.get("mature", false)):
 		var growth_remaining := maxf(float(plot.get("growth_remaining", tree_growth_time)) - delta, 0.0)
 		plot["growth_remaining"] = growth_remaining
@@ -135,6 +148,7 @@ func _plant_new_tree() -> bool:
 		"mature": false,
 		"variant": planting_sequence % 3,
 		"tree": null,
+		"safety_timer": 1.5,
 	}
 	planting_sequence += 1
 	forestry_plots.append(plot)
@@ -155,7 +169,7 @@ func _find_planting_position() -> Vector2:
 	return Vector2.INF
 
 
-func is_planting_position_safe(position: Vector2) -> bool:
+func is_planting_position_safe(position: Vector2, ignored_plot: Dictionary = {}) -> bool:
 	if position.x < WORLD_MARGIN or position.y < WORLD_MARGIN or position.x > WORLD_SIZE.x - WORLD_MARGIN or position.y > WORLD_SIZE.y - WORLD_MARGIN:
 		return false
 	for candidate in get_tree().get_nodes_in_group("buildings"):
@@ -164,9 +178,13 @@ func is_planting_position_safe(position: Vector2) -> bool:
 		if candidate.contains_world_point(position, planting_clearance):
 			return false
 	for plot in forestry_plots:
+		if not ignored_plot.is_empty() and is_same(plot, ignored_plot):
+			continue
 		if position.distance_squared_to(plot.get("position", Vector2.ZERO)) < planting_clearance * planting_clearance:
 			return false
 	for resource in get_tree().get_nodes_in_group("resources"):
+		if not ignored_plot.is_empty() and resource == ignored_plot.get("tree"):
+			continue
 		if resource is Node2D and is_instance_valid(resource) and position.distance_squared_to(resource.global_position) < planting_clearance * planting_clearance:
 			return false
 	var lod_manager := get_tree().get_first_node_in_group("simulation_lod_manager")
@@ -182,7 +200,7 @@ func _spawn_plot_tree(plot: Dictionary):
 	var tree := TREE_SCENE.instantiate() as Node2D
 	tree.set_meta("managed_forestry_tree", true)
 	tree.set("tree_variant", int(plot.get("variant", 0)))
-	tree.set("wood_amount", tree_wood_amount if bool(plot.get("mature", false)) else tree_wood_amount)
+	tree.set("wood_amount", tree_wood_amount)
 	container.add_child(tree)
 	tree.add_to_group("managed_forestry_trees")
 	tree.global_position = plot.get("position", global_position)
@@ -203,7 +221,11 @@ func _reset_plot_for_replanting(plot: Dictionary):
 	plot["mature"] = false
 	plot["growth_remaining"] = tree_growth_time
 	plot["harvest_timer"] = harvest_interval
-	_spawn_plot_tree(plot)
+	plot["safety_timer"] = 1.5
+	var replacement_position := _find_planting_position()
+	if replacement_position != Vector2.INF:
+		plot["position"] = replacement_position
+		_spawn_plot_tree(plot)
 
 
 func _update_sapling_scale(plot: Dictionary):
@@ -266,8 +288,9 @@ func get_forestry_save_data() -> Array:
 	var result: Array = []
 	for plot in forestry_plots:
 		var tree := plot.get("tree") as Node2D
+		var plot_position: Vector2 = plot.get("position", Vector2.ZERO)
 		result.append({
-			"position": [float(plot.get("position", Vector2.ZERO).x), float(plot.get("position", Vector2.ZERO).y)],
+			"position": [plot_position.x, plot_position.y],
 			"growth_remaining": float(plot.get("growth_remaining", tree_growth_time)),
 			"harvest_timer": float(plot.get("harvest_timer", harvest_interval)),
 			"mature": bool(plot.get("mature", false)),
@@ -293,6 +316,7 @@ func restore_forestry_save_data(raw_plots: Variant):
 			"mature": bool(raw_plot.get("mature", false)),
 			"variant": int(raw_plot.get("variant", 0)),
 			"tree": null,
+			"safety_timer": 1.5,
 		}
 		forestry_plots.append(plot)
 		_spawn_plot_tree(plot)
@@ -311,10 +335,16 @@ func apply_forestry_network_state(raw_plots: Variant):
 	for plot_index in range(raw_plots.size()):
 		var raw_plot: Dictionary = raw_plots[plot_index]
 		var plot: Dictionary = forestry_plots[plot_index]
+		var current_position: Vector2 = plot.get("position", global_position)
+		var position_data: Variant = raw_plot.get("position", [current_position.x, current_position.y])
+		var new_position: Vector2 = Vector2(float(position_data[0]), float(position_data[1])) if position_data is Array and position_data.size() >= 2 else plot.get("position", global_position)
+		var position_changed := new_position.distance_squared_to(plot.get("position", global_position)) > 0.01
+		plot["position"] = new_position
 		var was_mature := bool(plot.get("mature", false))
 		plot["growth_remaining"] = maxf(float(raw_plot.get("growth_remaining", plot.get("growth_remaining", tree_growth_time))), 0.0)
 		plot["harvest_timer"] = float(raw_plot.get("harvest_timer", plot.get("harvest_timer", harvest_interval)))
 		plot["mature"] = bool(raw_plot.get("mature", was_mature))
+		plot["variant"] = int(raw_plot.get("variant", plot.get("variant", 0)))
 		if was_mature != bool(plot.mature) or not is_instance_valid(plot.get("tree") as Node2D):
 			var old_tree := plot.get("tree") as Node2D
 			if is_instance_valid(old_tree):
@@ -323,6 +353,8 @@ func apply_forestry_network_state(raw_plots: Variant):
 			_spawn_plot_tree(plot)
 		var tree := plot.get("tree") as Node2D
 		if is_instance_valid(tree):
+			if position_changed:
+				tree.global_position = new_position
 			tree.set("wood_amount", maxi(int(raw_plot.get("wood_amount", tree_wood_amount)), 1))
 			if bool(plot.mature):
 				tree.scale = Vector2.ONE

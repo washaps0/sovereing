@@ -733,6 +733,8 @@ func get_save_data() -> Dictionary:
 		for resource in get_tree().get_nodes_in_group("resources"):
 			if not is_instance_valid(resource) or not is_ancestor_of(resource) or resource.is_depleted():
 				continue
+			if resource.has_meta("managed_forestry_tree"):
+				continue
 			if resource.is_in_group("trees"):
 				data.resources.append({"type": "tree", "position": _vector_to_data(resource.position), "variant": resource.tree_variant, "amount": resource.wood_amount})
 			elif resource.is_in_group("rocks"):
@@ -1687,6 +1689,9 @@ func _configure_ai_economy(faction_id: int):
 		if building.is_food_factory():
 			building.set_worker_target(clampi(ceili(float(population) / 3.0), 1, building.max_workers))
 			building.set_recipe(&"food")
+		elif building.is_lumberjack_cabin():
+			building.set_worker_target(clampi(ceili(float(population) / 8.0), 1, building.max_workers))
+			building.set_recipe(&"forestry")
 		elif building.is_power_plant():
 			building.set_worker_target(mini(1, building.max_workers))
 			building.set_recipe(&"electricity")
