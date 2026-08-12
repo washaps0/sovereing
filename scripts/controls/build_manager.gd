@@ -9,6 +9,7 @@ const POWER_PLANT_SCENE := preload("res://scenes/objects/buildings/power_plant.t
 const BARRACKS_SCENE := preload("res://scenes/objects/buildings/barracks.tscn")
 const MILITARY_FACTORY_SCENE := preload("res://scenes/objects/buildings/military_factory.tscn")
 const GOVERNMENT_SCENE := preload("res://scenes/objects/buildings/government.tscn")
+const LUMBERJACK_CABIN_SCENE := preload("res://scenes/objects/buildings/lumberjack_cabin.tscn")
 const ROAD_SCENE := preload("res://scenes/objects/buildings/road.tscn")
 const ROAD_PREVIEW_VALID_COLOR := Color(0.95, 0.8, 0.2, 0.8)
 const ROAD_PREVIEW_INVALID_COLOR := Color(1.0, 0.25, 0.25, 0.9)
@@ -194,6 +195,7 @@ func _create_interface():
 	_add_build_button(build_box, "Склад — 15 дерева", WAREHOUSE_SCENE)
 	_add_build_button(build_box, "Завод — 25 дерева, 10 камня", FACTORY_SCENE)
 	_add_build_button(build_box, "Пищевой завод — 20 дерева, 5 камня", FOOD_FACTORY_SCENE)
+	_add_build_button(build_box, "Хижина дровосеков — 18 дерева, 5 камня", LUMBERJACK_CABIN_SCENE)
 	_add_build_button(build_box, "Шахта — 20 дерева, 10 камня", MINE_SCENE)
 	_add_build_button(build_box, "Электростанция — 30 дерева, 15 камня", POWER_PLANT_SCENE)
 	_add_build_button(build_box, "Казарма — 25 дерева, 10 камня", BARRACKS_SCENE)
@@ -750,7 +752,7 @@ func _try_open_building_menu(point: Vector2) -> bool:
 	query.collide_with_bodies = false
 	query.collision_mask = 1
 	for hit in world.get_world_2d().direct_space_state.intersect_point(query, 32):
-		if hit.collider is Building and hit.collider.building_kind in ["warehouse", "residence", "factory", "food_factory", "mine", "power_plant", "military_factory", "barracks", "government", "road"]:
+		if hit.collider is Building and hit.collider.building_kind in ["warehouse", "residence", "factory", "food_factory", "lumberjack_cabin", "mine", "power_plant", "military_factory", "barracks", "government", "road"]:
 			_open_building_menu(hit.collider)
 			return true
 	return false

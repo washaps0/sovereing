@@ -31,7 +31,7 @@ const CLIENT_ENTITY_ID_BASE := 10000000000
 const CLIENT_ENTITY_ID_STRIDE := 1000000
 const NETWORK_BUILDING_KINDS: Array[String] = [
 	"residence", "warehouse", "factory", "food_factory", "mine",
-	"power_plant", "barracks", "military_factory", "government", "road",
+	"power_plant", "barracks", "military_factory", "government", "lumberjack_cabin", "road",
 ]
 
 var local_nickname := "Игрок"
@@ -1284,7 +1284,7 @@ func _is_valid_unit_command(action: StringName, unit_ids: Array[int], payload: D
 		&"military_plan":
 			var plan_action := StringName(payload.get("plan_action", &""))
 			var line_id := str(payload.get("line_id", "")).strip_edges()
-			if plan_action not in [&"create_front", &"set_offensive", &"start_offensive", &"attach", &"detach", &"delete"] or line_id.is_empty() or line_id.length() > 96:
+			if plan_action not in [&"create_front", &"set_offensive", &"start_offensive", &"stop_offensive", &"delete_offensive", &"attach", &"detach", &"delete"] or line_id.is_empty() or line_id.length() > 96:
 				return false
 			if unit_ids.is_empty() and plan_action in [&"create_front", &"attach", &"detach"]:
 				return false

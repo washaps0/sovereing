@@ -22,6 +22,8 @@ var world_index: Node
 @onready var front_line_button: Button = $Panel/Scroll/Content/PlatoonPlans/FrontLine
 @onready var offensive_line_button: Button = $Panel/Scroll/Content/PlatoonPlans/OffensiveLine
 @onready var start_offensive_button: Button = $Panel/Scroll/Content/PlatoonPlans/StartOffensive
+@onready var stop_offensive_button: Button = $Panel/Scroll/Content/PlatoonPlans/StopOffensive
+@onready var delete_offensive_button: Button = $Panel/Scroll/Content/PlatoonPlans/DeleteOffensive
 @onready var front_line_list: ItemList = $Panel/Scroll/Content/FrontLineList
 @onready var attach_front_button: Button = $Panel/Scroll/Content/FrontAssignments/Attach
 @onready var detach_front_button: Button = $Panel/Scroll/Content/FrontAssignments/Detach
@@ -60,10 +62,12 @@ func _ready():
 	front_line_button.pressed.connect(_begin_platoon_line.bind(&"front_line"))
 	offensive_line_button.pressed.connect(_begin_platoon_line.bind(&"offensive_line"))
 	start_offensive_button.pressed.connect(_start_selected_offensive)
+	stop_offensive_button.pressed.connect(_change_selected_offensive.bind(&"stop_offensive"))
+	delete_offensive_button.pressed.connect(_change_selected_offensive.bind(&"delete_offensive"))
 	attach_front_button.pressed.connect(_change_front_assignment.bind(&"attach"))
 	detach_front_button.pressed.connect(_change_front_assignment.bind(&"detach"))
 	delete_front_button.pressed.connect(_delete_selected_front)
-	for button in [close_button, organize_button, front_line_button, offensive_line_button, start_offensive_button, attach_front_button, detach_front_button, delete_front_button, hold_button, spread_button, watch_button, regroup_button, return_button]:
+	for button in [close_button, organize_button, front_line_button, offensive_line_button, start_offensive_button, stop_offensive_button, delete_offensive_button, attach_front_button, detach_front_button, delete_front_button, hold_button, spread_button, watch_button, regroup_button, return_button]:
 		button.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	_update_layout()
 
@@ -253,6 +257,8 @@ func _refresh_selected_platoon(platoons: Dictionary):
 	var offensive_active := bool(selected_plan.get("offensive_active", false))
 	offensive_line_button.disabled = selected_front_line_id.is_empty() or offensive_active
 	start_offensive_button.disabled = selected_plan.is_empty() or not bool(selected_plan.get("has_offensive", false)) or offensive_active
+	stop_offensive_button.disabled = selected_plan.is_empty() or not offensive_active
+	delete_offensive_button.disabled = selected_plan.is_empty() or not bool(selected_plan.get("has_offensive", false))
 	attach_front_button.disabled = selected_front_line_id.is_empty() or _get_selected_squad_commanders().is_empty() or offensive_active
 	detach_front_button.disabled = attach_front_button.disabled
 	delete_front_button.disabled = selected_front_line_id.is_empty()
@@ -376,6 +382,19 @@ func _start_selected_offensive():
 	if is_instance_valid(network_manager):
 		network_manager.request_unit_command([], &"military_plan", {
 			"plan_action": &"start_offensive",
+			"line_id": selected_front_line_id,
+		})
+		front_line_list_key = ""
+		_refresh_army()
+
+
+func _change_selected_offensive(action: StringName):
+	if selected_front_line_id.is_empty() or action not in [&"stop_offensive", &"delete_offensive"]:
+		return
+	var network_manager := get_node_or_null("/root/NetworkManager")
+	if is_instance_valid(network_manager):
+		network_manager.request_unit_command([], &"military_plan", {
+			"plan_action": action,
 			"line_id": selected_front_line_id,
 		})
 		front_line_list_key = ""

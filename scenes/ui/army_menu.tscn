@@ -83,6 +83,18 @@ size_flags_horizontal = 3
 text = "Начать наступление"
 tooltip_text = "В бой пойдут только отряды, расположенные рядом с выбранным участком наступления"
 
+[node name="StopOffensive" type="Button" parent="Panel/Scroll/Content/PlatoonPlans"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Остановить наступление"
+tooltip_text = "Вернуть атакующие отряды на ближайший участок фронта, сохранив линию наступления"
+
+[node name="DeleteOffensive" type="Button" parent="Panel/Scroll/Content/PlatoonPlans"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Удалить линию наступления"
+tooltip_text = "Остановить атаку и удалить только линию наступления, сохранив основную линию фронта"
+
 [node name="FrontLinesTitle" type="Label" parent="Panel/Scroll/Content"]
 layout_mode = 2
 text = "Планы фронта:"
@@ -109,7 +121,7 @@ text = "Открепить выбранных"
 [node name="Delete" type="Button" parent="Panel/Scroll/Content/FrontAssignments"]
 layout_mode = 2
 size_flags_horizontal = 3
-text = "Удалить линию"
+text = "Удалить линию фронта"
 
 [node name="SquadsTitle" type="Label" parent="Panel/Scroll/Content"]
 layout_mode = 2

@@ -16,6 +16,7 @@ const POWER_PLANT_SCENE := preload("res://scenes/objects/buildings/power_plant.t
 const BARRACKS_SCENE := preload("res://scenes/objects/buildings/barracks.tscn")
 const MILITARY_FACTORY_SCENE := preload("res://scenes/objects/buildings/military_factory.tscn")
 const GOVERNMENT_SCENE := preload("res://scenes/objects/buildings/government.tscn")
+const LUMBERJACK_CABIN_SCENE := preload("res://scenes/objects/buildings/lumberjack_cabin.tscn")
 const ROAD_SCENE := preload("res://scenes/objects/buildings/road.tscn")
 const SPAWN_MARGIN := 320.0
 const SPAWN_CLEAR_RADIUS := 230.0
@@ -36,6 +37,7 @@ const AI_DISTRICT_SEARCH_ATTEMPTS := 12
 const OFFENSIVE_UPDATE_INTERVAL := 0.25
 const OFFENSIVE_COMMANDER_ARRIVAL_DISTANCE := 28.0
 const OFFENSIVE_SQUAD_COHESION_DISTANCE := 140.0
+const FRONT_COMMAND_REISSUE_DISTANCE := 32.0
 
 @export var starting_unit_count := 5
 @export var unit_spawn_position := Vector2(300, 300)
@@ -281,6 +283,30 @@ func apply_military_plan_command(faction_id: int, commanders: Array[Unit], actio
 			start_plan["offensive_active"] = true
 			_send_commanders_to_military_line(attackers, _coerce_military_line_points(start_plan.get("offensive_points", [])), &"offensive_line")
 			return true
+		&"stop_offensive":
+			if not has_military_front_line(faction_id, line_id):
+				return false
+			var stop_plan: Dictionary = military_front_lines[line_id]
+			if not bool(stop_plan.get("offensive_active", false)):
+				return false
+			var stopped_squad_ids: Array = stop_plan.get("attacking_squad_ids", []).duplicate()
+			stop_plan["offensive_active"] = false
+			stop_plan["attacking_squad_ids"] = []
+			_return_squads_to_military_front(stop_plan, stopped_squad_ids)
+			return true
+		&"delete_offensive":
+			if not has_military_front_line(faction_id, line_id):
+				return false
+			var clear_plan: Dictionary = military_front_lines[line_id]
+			if not bool(clear_plan.get("has_offensive", false)):
+				return false
+			var returning_squad_ids: Array = clear_plan.get("attacking_squad_ids", []).duplicate()
+			clear_plan["offensive_active"] = false
+			clear_plan["attacking_squad_ids"] = []
+			clear_plan["has_offensive"] = false
+			clear_plan["offensive_points"] = []
+			_return_squads_to_military_front(clear_plan, returning_squad_ids)
+			return true
 		&"attach":
 			if not has_military_front_line(faction_id, line_id) or squad_ids.is_empty():
 				return false
@@ -407,16 +433,37 @@ func _redistribute_military_front(line_id: String, use_offensive: bool):
 func _send_commanders_to_military_line(commanders: Array[Unit], points: Array[Vector2], order: StringName):
 	if commanders.is_empty() or points.size() < 2:
 		return
-	for index in range(commanders.size()):
-		var ratio := 0.5 if commanders.size() == 1 else float(index) / float(commanders.size() - 1)
+	for assignment in _make_military_line_assignments(commanders, points):
+		var commander := assignment.get("commander") as Unit
+		if is_instance_valid(commander):
+			commander._command_military_move(
+				assignment.get("destination", commander.global_position),
+				order,
+				assignment.get("direction", Vector2.RIGHT)
+			)
+
+
+func _make_military_line_assignments(commanders: Array[Unit], points: Array[Vector2]) -> Array[Dictionary]:
+	var assignments: Array[Dictionary] = []
+	if commanders.is_empty() or points.size() < 2:
+		return assignments
+	var ordered_commanders: Array[Unit] = commanders.duplicate()
+	# Keep neighbouring squads neighbouring on the line. Assigning solely by
+	# squad id made distant squads cross through one another and deadlock.
+	ordered_commanders.sort_custom(func(a: Unit, b: Unit):
+		var a_ratio := float(_project_onto_military_polyline(a.global_position, points).get("ratio", 0.0))
+		var b_ratio := float(_project_onto_military_polyline(b.global_position, points).get("ratio", 0.0))
+		return a_ratio < b_ratio if not is_equal_approx(a_ratio, b_ratio) else a.squad_id < b.squad_id
+	)
+	for index in range(ordered_commanders.size()):
+		var ratio := 0.5 if ordered_commanders.size() == 1 else float(index) / float(ordered_commanders.size() - 1)
 		var sample := _sample_military_polyline(points, ratio)
-		var destination: Vector2 = sample.get("position", commanders[index].global_position)
-		var formation_direction: Vector2 = sample.get("direction", Vector2.RIGHT)
-		commanders[index]._command_military_move(
-			destination,
-			order,
-			formation_direction
-		)
+		assignments.append({
+			"commander": ordered_commanders[index],
+			"destination": sample.get("position", ordered_commanders[index].global_position),
+			"direction": sample.get("direction", Vector2.RIGHT),
+		})
+	return assignments
 
 
 func _select_local_offensive_commanders(plan: Dictionary) -> Array[Unit]:
@@ -448,6 +495,7 @@ func _update_active_military_offensives():
 		return
 	for raw_line_id in military_front_lines.keys():
 		var plan: Dictionary = military_front_lines[raw_line_id]
+		_maintain_military_front_orders(plan)
 		if not bool(plan.get("offensive_active", false)):
 			continue
 		var attackers := _get_front_squad_commanders(int(plan.get("faction_id", -1)), plan.get("attacking_squad_ids", []))
@@ -470,6 +518,45 @@ func _has_offensive_squad_arrived(commander: Unit) -> bool:
 		if unit is Unit and unit.is_mobilized and unit.squad_id == commander.squad_id and unit.global_position.distance_to(commander.global_position) > OFFENSIVE_SQUAD_COHESION_DISTANCE:
 			return false
 	return true
+
+
+func _maintain_military_front_orders(plan: Dictionary):
+	var faction_id := int(plan.get("faction_id", -1))
+	var offensive_active := bool(plan.get("offensive_active", false))
+	var squad_ids: Array = plan.get("attacking_squad_ids", []) if offensive_active else plan.get("squad_ids", [])
+	var points := _coerce_military_line_points(plan.get("offensive_points", [])) if offensive_active else _coerce_military_line_points(plan.get("front_points", []))
+	if points.size() < 2:
+		return
+	var order: StringName = &"offensive_line" if offensive_active else &"front_line"
+	var commanders := _get_front_squad_commanders(faction_id, squad_ids)
+	for commander in commanders:
+		if not is_instance_valid(commander):
+			continue
+		# Preserve every squad's assigned sector. Re-sampling all destinations on
+		# every update would move quiet parts of a long front after a local attack.
+		var projection_source := commander.target_position if commander.military_order == order else commander.global_position
+		var projection := _project_onto_military_polyline(projection_source, points)
+		var destination: Vector2 = projection.get("position", commander.global_position)
+		var sample := _sample_military_polyline(points, float(projection.get("ratio", 0.0)))
+		var lost_order := commander.military_order != order
+		var wrong_target := commander.target_position.distance_to(destination) > FRONT_COMMAND_REISSUE_DISTANCE
+		var stopped_early := commander.task != Unit.Task.MOVE and commander.global_position.distance_to(destination) > FRONT_COMMAND_REISSUE_DISTANCE
+		if lost_order or wrong_target or stopped_early:
+			commander._command_military_move(destination, order, sample.get("direction", Vector2.RIGHT))
+
+
+func _return_squads_to_military_front(plan: Dictionary, squad_ids: Array):
+	var front_points := _coerce_military_line_points(plan.get("front_points", []))
+	if front_points.size() < 2 or squad_ids.is_empty():
+		return
+	var faction_id := int(plan.get("faction_id", -1))
+	for commander in _get_front_squad_commanders(faction_id, squad_ids):
+		# Return each attacking squad to the closest part of the old front. This
+		# keeps a cancelled local offensive local and does not shift quiet sectors.
+		var projection := _project_onto_military_polyline(commander.global_position, front_points)
+		var destination: Vector2 = projection.get("position", commander.global_position)
+		var sample := _sample_military_polyline(front_points, float(projection.get("ratio", 0.0)))
+		commander._command_military_move(destination, &"front_line", sample.get("direction", Vector2.RIGHT))
 
 
 func _cancel_military_offensive(line_id: String):
@@ -606,19 +693,31 @@ func _merge_offensive_into_front(front_points: Array[Vector2], offensive_points:
 		var half_span := clampf(_get_military_polyline_length(oriented_offensive) / maxf(_get_military_polyline_length(front_points), 1.0) * 0.5, 0.03, 0.25)
 		start_ratio = maxf(center - half_span, 0.0)
 		end_ratio = minf(center + half_span, 1.0)
+	# Preserve exact junctions with the old front. The previous ratio-by-ratio
+	# replacement jumped directly from an old sample to a distant offensive end,
+	# which could leave the advanced sector looking detached from the main line.
 	var sample_count := clampi(ceili(_get_military_polyline_length(front_points) / 96.0), 12, 96)
 	var merged: Array[Vector2] = []
 	for index in range(sample_count + 1):
 		var ratio := float(index) / float(sample_count)
-		var position: Vector2
-		if ratio >= start_ratio and ratio <= end_ratio:
-			var local_ratio := (ratio - start_ratio) / maxf(end_ratio - start_ratio, 0.001)
-			position = _sample_military_polyline(oriented_offensive, local_ratio).get("position", Vector2.ZERO)
-		else:
-			position = _sample_military_polyline(front_points, ratio).get("position", Vector2.ZERO)
-		if merged.is_empty() or merged.back().distance_to(position) >= 1.0:
-			merged.append(position)
+		if ratio < start_ratio:
+			_append_unique_military_point(merged, _sample_military_polyline(front_points, ratio).get("position", Vector2.ZERO))
+	var start_anchor: Vector2 = _sample_military_polyline(front_points, start_ratio).get("position", Vector2.ZERO)
+	var end_anchor: Vector2 = _sample_military_polyline(front_points, end_ratio).get("position", Vector2.ZERO)
+	_append_unique_military_point(merged, start_anchor)
+	for point in oriented_offensive:
+		_append_unique_military_point(merged, point)
+	_append_unique_military_point(merged, end_anchor)
+	for index in range(sample_count + 1):
+		var ratio := float(index) / float(sample_count)
+		if ratio > end_ratio:
+			_append_unique_military_point(merged, _sample_military_polyline(front_points, ratio).get("position", Vector2.ZERO))
 	return merged
+
+
+func _append_unique_military_point(points: Array[Vector2], point: Vector2):
+	if points.is_empty() or points.back().distance_to(point) >= 1.0:
+		points.append(point)
 
 
 func _coerce_military_line_points(raw_points) -> Array[Vector2]:
@@ -731,6 +830,8 @@ func get_save_data() -> Dictionary:
 	else:
 		for resource in get_tree().get_nodes_in_group("resources"):
 			if not is_instance_valid(resource) or not is_ancestor_of(resource) or resource.is_depleted():
+				continue
+			if resource.has_meta("managed_forestry_tree"):
 				continue
 			if resource.is_in_group("trees"):
 				data.resources.append({"type": "tree", "position": _vector_to_data(resource.position), "variant": resource.tree_variant, "amount": resource.wood_amount})
@@ -873,6 +974,8 @@ func _serialize_building(building: Building) -> Dictionary:
 		result["migration_timer"] = building.migration_timer
 		result["mobilization_target"] = building.mobilization_target
 		result["mobilization_timer"] = building.mobilization_timer
+	if building.has_method("get_forestry_save_data"):
+		result["forestry_plots"] = building.get_forestry_save_data()
 	return result
 
 
@@ -1201,6 +1304,8 @@ func _apply_network_building_state(building: Building, state: Dictionary):
 		building.migration_timer = float(state.get("migration_timer", building.migration_timer))
 		building.mobilization_target = int(state.get("mobilization_target", building.mobilization_target))
 		building.mobilization_timer = float(state.get("mobilization_timer", building.mobilization_timer))
+	if building.has_method("apply_forestry_network_state"):
+		building.apply_forestry_network_state(state.get("forestry_plots", []))
 	building.under_construction = new_under_construction
 	building.progress_bar.visible = building.under_construction
 	building._update_visuals()
@@ -1314,6 +1419,7 @@ func _get_building_scene(kind: String) -> PackedScene:
 		"barracks": return BARRACKS_SCENE
 		"military_factory": return MILITARY_FACTORY_SCENE
 		"government": return GOVERNMENT_SCENE
+		"lumberjack_cabin": return LUMBERJACK_CABIN_SCENE
 		"road": return ROAD_SCENE
 		"residence": return RESIDENCE_SCENE
 		_: return null
@@ -1386,6 +1492,7 @@ func _restore_building(data: Dictionary) -> Building:
 		"barracks": scene = BARRACKS_SCENE
 		"military_factory": scene = MILITARY_FACTORY_SCENE
 		"government": scene = GOVERNMENT_SCENE
+		"lumberjack_cabin": scene = LUMBERJACK_CABIN_SCENE
 		"road": scene = ROAD_SCENE
 		_: scene = RESIDENCE_SCENE
 	var building := scene.instantiate() as Building
@@ -1437,6 +1544,8 @@ func _restore_building(data: Dictionary) -> Building:
 		building.under_construction = false
 		building.progress_bar.visible = false
 		building.building_sprite.modulate.a = 1.0
+	if building.has_method("restore_forestry_save_data"):
+		building.restore_forestry_save_data(data.get("forestry_plots", []))
 	return building
 
 
@@ -1678,6 +1787,9 @@ func _configure_ai_economy(faction_id: int):
 		if building.is_food_factory():
 			building.set_worker_target(clampi(ceili(float(population) / 3.0), 1, building.max_workers))
 			building.set_recipe(&"food")
+		elif building.is_lumberjack_cabin():
+			building.set_worker_target(clampi(ceili(float(population) / 8.0), 1, building.max_workers))
+			building.set_recipe(&"forestry")
 		elif building.is_power_plant():
 			building.set_worker_target(mini(1, building.max_workers))
 			building.set_recipe(&"electricity")
@@ -1907,6 +2019,8 @@ func _ensure_ai_starting_plan(faction_id: int, faction_name: String):
 	_spawn_ai_building(MINE_SCENE, block_center + Vector2(0.0, 62.0), PI, faction_id, faction_name, building_id, main_street, 5)
 	building_id += 1
 	_spawn_ai_building(POWER_PLANT_SCENE, block_center + Vector2(120.0, 62.0), PI, faction_id, faction_name, building_id, main_street, 6)
+	building_id += 1
+	_spawn_ai_building(LUMBERJACK_CABIN_SCENE, block_center + Vector2(-240.0 * inward_x, 62.0), PI, faction_id, faction_name, building_id, main_street, 7)
 
 
 func _plan_ai_expansion(faction_id: int, faction_name: String):
