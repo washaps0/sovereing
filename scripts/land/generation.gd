@@ -36,7 +36,6 @@ const AI_DISTRICT_BUILDING_X_SLOTS: Array[float] = [-176.0, -80.0, 80.0, 176.0]
 const AI_DISTRICT_SEARCH_ATTEMPTS := 12
 const OFFENSIVE_UPDATE_INTERVAL := 0.25
 const OFFENSIVE_COMMANDER_ARRIVAL_DISTANCE := 28.0
-const OFFENSIVE_SQUAD_COHESION_DISTANCE := 140.0
 const FRONT_COMMAND_REISSUE_DISTANCE := 32.0
 
 @export var starting_unit_count := 5
@@ -219,6 +218,26 @@ func get_military_front_lines(faction_id: int) -> Array[Dictionary]:
 	return result
 
 
+func find_military_front_at(faction_id: int, point: Vector2, maximum_distance := 24.0) -> Dictionary:
+	var nearest: Dictionary = {}
+	var nearest_distance := maximum_distance
+	for plan in get_military_front_lines(faction_id):
+		var front_points := _coerce_military_line_points(plan.get("front_points", []))
+		if front_points.size() < 2:
+			continue
+		var projection := _project_onto_military_polyline(point, front_points)
+		var position: Vector2 = projection.get("position", point)
+		var distance := point.distance_to(position)
+		if distance <= nearest_distance:
+			nearest_distance = distance
+			nearest = {
+				"line_id": str(plan.get("line_id", "")),
+				"position": position,
+				"squad_ids": plan.get("squad_ids", []).duplicate(),
+			}
+	return nearest
+
+
 func has_military_front_line(faction_id: int, line_id: String) -> bool:
 	if not military_front_lines.has(line_id):
 		return false
@@ -306,6 +325,26 @@ func apply_military_plan_command(faction_id: int, commanders: Array[Unit], actio
 			clear_plan["has_offensive"] = false
 			clear_plan["offensive_points"] = []
 			_return_squads_to_military_front(clear_plan, returning_squad_ids)
+			return true
+		&"return_to_front":
+			if not has_military_front_line(faction_id, line_id) or squad_ids.is_empty():
+				return false
+			var return_plan: Dictionary = military_front_lines[line_id]
+			var attached_squad_ids: Array = return_plan.get("squad_ids", [])
+			for squad_id in squad_ids:
+				if squad_id not in attached_squad_ids:
+					return false
+			var raw_preferred_point: Variant = payload.get("point", Vector2.ZERO)
+			if raw_preferred_point is not Vector2:
+				return false
+			var preferred_point: Vector2 = raw_preferred_point
+			_return_commanders_to_front(return_plan, commanders, preferred_point)
+			var active_attackers: Array = return_plan.get("attacking_squad_ids", []).duplicate()
+			for squad_id in squad_ids:
+				active_attackers.erase(squad_id)
+			return_plan["attacking_squad_ids"] = active_attackers
+			if active_attackers.is_empty():
+				return_plan["offensive_active"] = false
 			return true
 		&"attach":
 			if not has_military_front_line(faction_id, line_id) or squad_ids.is_empty():
@@ -512,12 +551,12 @@ func _update_active_military_offensives():
 
 
 func _has_offensive_squad_arrived(commander: Unit) -> bool:
-	if not is_instance_valid(commander) or commander.global_position.distance_to(commander.target_position) > OFFENSIVE_COMMANDER_ARRIVAL_DISTANCE:
+	if not is_instance_valid(commander) or commander.military_order != &"offensive_line":
 		return false
-	for unit in _get_indexed_units(commander.faction_id):
-		if unit is Unit and unit.is_mobilized and unit.squad_id == commander.squad_id and unit.global_position.distance_to(commander.global_position) > OFFENSIVE_SQUAD_COHESION_DISTANCE:
-			return false
-	return true
+	# The commander is the squad's assigned point on the operational line.
+	# Soldiers keep following and spreading around that point, but an outer
+	# formation member must not prevent the front from advancing forever.
+	return commander.global_position.distance_to(commander.target_position) <= OFFENSIVE_COMMANDER_ARRIVAL_DISTANCE
 
 
 func _maintain_military_front_orders(plan: Dictionary):
@@ -531,6 +570,10 @@ func _maintain_military_front_orders(plan: Dictionary):
 	var commanders := _get_front_squad_commanders(faction_id, squad_ids)
 	for commander in commanders:
 		if not is_instance_valid(commander):
+			continue
+		# A direct player move temporarily overrides the automatic front order.
+		# The commander returns only after an explicit click on the front line.
+		if commander.military_order == &"move":
 			continue
 		# Preserve every squad's assigned sector. Re-sampling all destinations on
 		# every update would move quiet parts of a long front after a local attack.
@@ -557,6 +600,27 @@ func _return_squads_to_military_front(plan: Dictionary, squad_ids: Array):
 		var destination: Vector2 = projection.get("position", commander.global_position)
 		var sample := _sample_military_polyline(front_points, float(projection.get("ratio", 0.0)))
 		commander._command_military_move(destination, &"front_line", sample.get("direction", Vector2.RIGHT))
+
+
+func _return_commanders_to_front(plan: Dictionary, commanders: Array[Unit], preferred_point: Vector2):
+	var front_points := _coerce_military_line_points(plan.get("front_points", []))
+	if front_points.size() < 2 or commanders.is_empty():
+		return
+	var center_projection := _project_onto_military_polyline(preferred_point, front_points)
+	var center_ratio := float(center_projection.get("ratio", 0.5))
+	var front_length := maxf(_get_military_polyline_length(front_points), 1.0)
+	var ratio_spacing := 72.0 / front_length
+	var ordered_commanders: Array[Unit] = commanders.duplicate()
+	ordered_commanders.sort_custom(func(a: Unit, b: Unit): return a.squad_id < b.squad_id)
+	for index in range(ordered_commanders.size()):
+		var centered_index := float(index) - float(ordered_commanders.size() - 1) * 0.5
+		var target_ratio := clampf(center_ratio + centered_index * ratio_spacing, 0.0, 1.0)
+		var sample := _sample_military_polyline(front_points, target_ratio)
+		ordered_commanders[index]._command_military_move(
+			sample.get("position", preferred_point),
+			&"front_line",
+			sample.get("direction", Vector2.RIGHT)
+		)
 
 
 func _cancel_military_offensive(line_id: String):

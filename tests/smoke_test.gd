@@ -198,9 +198,12 @@ func _run():
 	var rotation_roads := Node2D.new()
 	rotation_roads.name = "roads"
 	rotation_world.add_child(rotation_roads)
+	var road_navigation := WorldNavigation.new()
+	road_navigation.name = "WorldNavigation"
+	rotation_world.add_child(road_navigation)
 	var build_manager = preload("res://scripts/controls/build_manager.gd").new()
 	rotation_world.add_child(build_manager)
-	assert(build_manager.build_buttons.size() == 8)
+	assert(build_manager.build_buttons.size() == 11)
 	for build_button in build_manager.build_buttons:
 		assert(build_button.icon != null)
 		assert(build_button.alignment == HORIZONTAL_ALIGNMENT_LEFT)
@@ -225,13 +228,9 @@ func _run():
 	road_walker._update_road_movement_state(1.0)
 	assert(road_walker.is_on_road)
 	assert(is_equal_approx(road_walker._get_current_movement_speed(), road_walker.speed * Unit.ROAD_SPEED_MULTIPLIER))
-	var road_grid := AStarGrid2D.new()
-	road_grid.region = Rect2i(Vector2i.ZERO, Unit.PATH_MAP_SIZE)
-	road_grid.cell_size = Vector2.ONE * Unit.PATH_CELL_SIZE
-	road_grid.offset = Vector2.ONE * Unit.PATH_CELL_SIZE * 0.5
-	road_grid.update()
-	road_walker._apply_road_path_weights(road_grid)
-	assert(road_grid.get_point_weight_scale(road_walker._world_to_cell(road.global_position)) < 1.0)
+	road_navigation.invalidate()
+	road_navigation._ensure_grid()
+	assert(road_navigation._grid.get_point_weight_scale(road_navigation.world_to_cell(road.global_position)) < 1.0)
 	var endpoint_snap: Dictionary = build_manager._nearest_road_endpoint(Vector2(1131, 1102), 40.0)
 	assert(endpoint_snap.road == road)
 	assert(endpoint_snap.position.is_equal_approx(Vector2(1132, 1100)))

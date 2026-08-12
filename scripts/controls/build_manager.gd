@@ -1151,6 +1151,8 @@ func _get_formation_positions(origin: Vector2, drag_end: Vector2) -> Array[Vecto
 
 
 func _issue_group_context_command(point: Vector2) -> bool:
+	if _try_return_selected_commanders_to_front(point):
+		return true
 	var query := PhysicsPointQueryParameters2D.new()
 	query.position = point
 	query.collide_with_areas = true
@@ -1187,6 +1189,38 @@ func _issue_group_context_command(point: Vector2) -> bool:
 				})
 			return true
 	return false
+
+
+func _try_return_selected_commanders_to_front(point: Vector2) -> bool:
+	if not world.has_method("find_military_front_at"):
+		return false
+	var commanders: Array[Unit] = []
+	for unit in Unit.get_selected_units():
+		if unit is Unit and unit.is_mobilized and unit.is_squad_commander() and unit.can_be_controlled_locally():
+			commanders.append(unit)
+	if commanders.is_empty():
+		return false
+	var front_hit: Dictionary = world.find_military_front_at(_get_local_faction_id(), point, 24.0)
+	if front_hit.is_empty():
+		return false
+	var attached_squad_ids: Array = front_hit.get("squad_ids", [])
+	var returning_commanders: Array[Unit] = []
+	for commander in commanders:
+		if commander.squad_id in attached_squad_ids:
+			returning_commanders.append(commander)
+	if returning_commanders.is_empty():
+		return false
+	var payload := {
+		"plan_action": &"return_to_front",
+		"line_id": str(front_hit.get("line_id", "")),
+		"point": front_hit.get("position", point),
+	}
+	var network_manager := get_node_or_null("/root/NetworkManager")
+	if is_instance_valid(network_manager):
+		network_manager.request_unit_command(returning_commanders, &"military_plan", payload)
+	else:
+		world.apply_military_plan_command(_get_local_faction_id(), returning_commanders, &"return_to_front", payload)
+	return true
 
 
 func _toggle_harvest_mode():
