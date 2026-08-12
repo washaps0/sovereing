@@ -191,11 +191,11 @@ func _create_interface():
 	var title := Label.new()
 	title.text = "Строительство"
 	build_box.add_child(title)
-	_add_build_button(build_box, "Хижина дровосеков — 18 дерева, 5 камня", LUMBERJACK_CABIN_SCENE)
 	_add_build_button(build_box, "Жилой дом — 10 дерева", RESIDENCE_SCENE)
 	_add_build_button(build_box, "Склад — 15 дерева", WAREHOUSE_SCENE)
 	_add_build_button(build_box, "Завод — 25 дерева, 10 камня", FACTORY_SCENE)
 	_add_build_button(build_box, "Пищевой завод — 20 дерева, 5 камня", FOOD_FACTORY_SCENE)
+	_add_build_button(build_box, "Хижина дровосеков — 18 дерева, 5 камня", LUMBERJACK_CABIN_SCENE)
 	_add_build_button(build_box, "Шахта — 20 дерева, 10 камня", MINE_SCENE)
 	_add_build_button(build_box, "Электростанция — 30 дерева, 15 камня", POWER_PLANT_SCENE)
 	_add_build_button(build_box, "Казарма — 25 дерева, 10 камня", BARRACKS_SCENE)

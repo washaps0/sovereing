@@ -32,6 +32,11 @@ func _draw():
 			_draw_order_polyline(front_points, Color(0.15, 0.75, 1.0, 0.92), 5.0)
 		if has_offensive and offensive_points.size() >= 2:
 			var offensive_color := Color(1.0, 0.2, 0.08, 0.98) if offensive_active else Color(1.0, 0.62, 0.18, 0.72)
+			if has_front:
+				# Show both flanks of the attacked sector. Besides making the plan
+				# clearer, this guarantees that the offensive visibly joins its front.
+				_draw_front_connector(_nearest_polyline_point(front_points, offensive_points[0]), offensive_points[0], offensive_color)
+				_draw_front_connector(_nearest_polyline_point(front_points, offensive_points.back()), offensive_points.back(), offensive_color)
 			_draw_order_polyline(offensive_points, offensive_color, 5.0)
 		if has_front and offensive_active and offensive_points.size() >= 2:
 			var offensive_center := _polyline_center(offensive_points)
@@ -47,6 +52,13 @@ func _draw_order_polyline(points: Array[Vector2], color: Color, width: float):
 	draw_polyline(packed, color, width, true)
 	draw_circle(points[0], width + 2.0, color)
 	draw_circle(points.back(), width + 2.0, color)
+
+
+func _draw_front_connector(from: Vector2, to: Vector2, color: Color):
+	if from.distance_to(to) < 2.0:
+		return
+	draw_line(from, to, Color(0.02, 0.05, 0.08, 0.72), 5.0, true)
+	draw_line(from, to, Color(color, 0.58), 2.5, true)
 
 
 func _polyline_center(points: Array[Vector2]) -> Vector2:
