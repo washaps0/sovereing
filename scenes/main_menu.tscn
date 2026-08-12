@@ -1,9 +1,9 @@
-[gd_scene load_steps=3 format=3]
+[gd_scene format=3 uid="uid://dr5npno4xrs7i"]
 
-[ext_resource type="Script" path="res://scripts/ui/main_menu.gd" id="1_menu"]
+[ext_resource type="Script" uid="uid://ur573nt6k4yh" path="res://scripts/ui/main_menu.gd" id="1_menu"]
 [ext_resource type="AudioStream" uid="uid://bbq3n5reri5gd" path="res://assets/sounds/lobby_music.mp3" id="2_lobby_music"]
 
-[node name="MainMenu" type="Control"]
+[node name="MainMenu" type="Control" unique_id=942526992]
 layout_mode = 3
 anchors_preset = 15
 anchor_right = 1.0
@@ -12,6 +12,6 @@ grow_horizontal = 2
 grow_vertical = 2
 script = ExtResource("1_menu")
 
-[node name="LobbyMusic" type="AudioStreamPlayer" parent="."]
+[node name="LobbyMusic" type="AudioStreamPlayer" parent="." unique_id=469414773]
 stream = ExtResource("2_lobby_music")
 volume_db = -10.0
