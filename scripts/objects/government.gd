@@ -4,6 +4,7 @@ extends Building
 const UNIT_SCENE := preload("res://scenes/objects/unit.tscn")
 const SQUAD_SIZE := 8
 const SQUADS_PER_PLATOON := 3
+const SOLDIERS_PER_PLATOON := SQUAD_SIZE * SQUADS_PER_PLATOON
 
 @export_range(0, 10000, 1) var migration_target := 0
 @export_range(1.0, 120.0, 0.5) var migration_interval := 5.0
@@ -68,7 +69,7 @@ func get_mobilized_count() -> int:
 func get_unassigned_soldier_count() -> int:
 	var total := 0
 	for unit in _get_mobilized_units():
-		if unit.squad_id <= 0:
+		if unit.platoon_id <= 0:
 			total += 1
 	return total
 
@@ -124,8 +125,11 @@ func get_ready_rifleman_set_count() -> int:
 
 func get_equipment_status_text() -> String:
 	var mobilized := get_mobilized_count()
+	var rifle_users := 0
+	for unit in _get_mobilized_units():
+		rifle_users += 0 if unit.is_dedicated_platoon_commander() else 1
 	var ready_sets := get_ready_rifleman_set_count()
-	return "На складах — броня: %d, автоматы: %d\nВыдано — броня: %d/%d, автоматы: %d/%d\nГотовых комплектов на складах: %d" % [get_equipment_amount(&"armor"), get_equipment_amount(&"rifles"), _get_issued_equipment_count(&"armor"), mobilized, _get_issued_equipment_count(&"rifles"), mobilized, ready_sets]
+	return "На складах — броня: %d, автоматы: %d\nВыдано — броня: %d/%d, автоматы: %d/%d\nГотовых комплектов на складах: %d" % [get_equipment_amount(&"armor"), get_equipment_amount(&"rifles"), _get_issued_equipment_count(&"armor"), mobilized, _get_issued_equipment_count(&"rifles"), rifle_users, ready_sets]
 
 
 func organize_army():
@@ -133,32 +137,38 @@ func organize_army():
 	soldiers.sort_custom(func(a: Unit, b: Unit): return a.network_id < b.network_id)
 	for index in range(soldiers.size()):
 		var unit := soldiers[index]
-		var squad_index: int = index / SQUAD_SIZE
-		var platoon_index: int = squad_index / SQUADS_PER_PLATOON
-		var squad_commander_index := squad_index * SQUAD_SIZE
-		var platoon_commander_index := platoon_index * SQUAD_SIZE * SQUADS_PER_PLATOON
-		var new_squad_id := squad_index + 1
-		var new_commander_network_id := soldiers[squad_commander_index].network_id
+		var platoon_index: int = index / SOLDIERS_PER_PLATOON
+		var platoon_start := platoon_index * SOLDIERS_PER_PLATOON
+		var local_index := index - platoon_start
+		var platoon_commander_network_id := soldiers[platoon_start].network_id
+		var new_squad_id := 0
+		var new_commander_network_id := 0
+		if local_index > 0:
+			var squad_in_platoon: int = (local_index - 1) / SQUAD_SIZE
+			new_squad_id = platoon_index * SQUADS_PER_PLATOON + squad_in_platoon + 1
+			var squad_commander_index := platoon_start + 1 + squad_in_platoon * SQUAD_SIZE
+			new_commander_network_id = soldiers[squad_commander_index].network_id
 		if unit.squad_id != new_squad_id or unit.squad_commander_network_id != new_commander_network_id:
 			unit.squad_formation_offset = Vector2.ZERO
 			unit.squad_follow_active = false
 		unit.squad_independent_order = false
-		unit.squad_id = squad_index + 1
+		unit.squad_id = new_squad_id
 		unit.platoon_id = platoon_index + 1
 		unit.squad_commander_network_id = new_commander_network_id
-		unit.platoon_commander_network_id = soldiers[platoon_commander_index].network_id
-		if index % (SQUAD_SIZE * SQUADS_PER_PLATOON) == 0:
+		unit.platoon_commander_network_id = platoon_commander_network_id
+		if local_index == 0:
 			unit.military_rank = "Командир взвода"
-			unit.military_role = &"commander"
+			unit.military_role = &"platoon_commander"
 			unit.simulation_importance = 2
-		elif index % SQUAD_SIZE == 0:
+		elif (local_index - 1) % SQUAD_SIZE == 0:
 			unit.military_rank = "Командир отряда"
 			unit.military_role = &"commander"
 			unit.simulation_importance = 2
 		else:
 			unit.military_rank = "Солдат"
 			unit.military_role = &"rifleman"
-			unit.simulation_importance = maxi(unit.simulation_importance, 1)
+			unit.simulation_importance = 1
+		_apply_role_equipment(unit)
 		unit.refresh_military_visuals()
 	var current_world := get_tree().current_scene
 	if is_instance_valid(current_world) and current_world.has_method("refresh_military_front_assignments"):
@@ -196,6 +206,9 @@ func _supply_soldiers_at_base():
 
 
 func _equip_soldier(unit: Unit):
+	if unit.is_dedicated_platoon_commander():
+		_apply_role_equipment(unit)
+		return
 	var armor_equipped := unit.has_armor
 	var rifle_equipped := unit.has_rifle
 	if not armor_equipped:
@@ -203,6 +216,17 @@ func _equip_soldier(unit: Unit):
 	if not rifle_equipped:
 		rifle_equipped = _take_equipment_from_storage(&"rifles")
 	unit.set_military_equipment(armor_equipped, rifle_equipped)
+
+
+func _apply_role_equipment(unit: Unit):
+	if not unit.is_dedicated_platoon_commander():
+		return
+	var armor_equipped := unit.has_armor
+	if not armor_equipped:
+		armor_equipped = _take_equipment_from_storage(&"armor")
+	if unit.has_rifle:
+		_store_equipment(&"rifles")
+	unit.set_military_equipment(armor_equipped, false)
 
 
 func _return_soldier_equipment(unit: Unit):

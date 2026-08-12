@@ -144,12 +144,14 @@ func _refresh_army():
 		front_lines.assign(current_world.get_military_front_lines(_get_local_faction_id()))
 	var armored := 0
 	var armed := 0
+	var rifle_users := 0
 	var at_base := 0
 	for soldier in soldiers:
 		armored += 1 if soldier.has_armor else 0
 		armed += 1 if soldier.has_rifle else 0
+		rifle_users += 0 if soldier.is_dedicated_platoon_commander() else 1
 		at_base += 1 if is_instance_valid(soldier.inside_building) and soldier.inside_building.is_barracks() else 0
-	summary.text = "Мобилизовано: %d • Взводов: %d • Отрядов: %d • На базе: %d\nБроня: %d/%d • Автоматы: %d/%d" % [soldiers.size(), platoons.size(), squads.size(), at_base, armored, soldiers.size(), armed, soldiers.size()]
+	summary.text = "Мобилизовано: %d • Взводов: %d • Отрядов: %d • На базе: %d\nБроня: %d/%d • Автоматы: %d/%d" % [soldiers.size(), platoons.size(), squads.size(), at_base, armored, soldiers.size(), armed, rifle_users]
 	var new_key := _make_squad_list_key(soldiers)
 	if new_key != squad_list_key:
 		squad_list_key = new_key

@@ -177,16 +177,19 @@ func _collect_housing_warnings(warnings: Array[Dictionary], units: Array[Unit], 
 
 func _collect_army_warnings(warnings: Array[Dictionary], units: Array[Unit]):
 	var mobilized := 0
+	var rifle_users := 0
 	var without_rifles := 0
 	var without_armor := 0
 	for unit in units:
 		if not unit.is_mobilized:
 			continue
 		mobilized += 1
-		without_rifles += 0 if unit.has_rifle else 1
+		if not unit.is_dedicated_platoon_commander():
+			rifle_users += 1
+			without_rifles += 0 if unit.has_rifle else 1
 		without_armor += 0 if unit.has_armor else 1
 	if mobilized > 0 and without_rifles > 0:
-		_add_warning(warnings, 1, "%d из %d солдат без автоматов. Настройте военный завод на их производство." % [without_rifles, mobilized])
+		_add_warning(warnings, 1, "%d из %d бойцов без автоматов. Настройте военный завод на их производство." % [without_rifles, rifle_users])
 	if mobilized > 0 and without_armor > mobilized / 2:
 		_add_warning(warnings, 1, "%d из %d солдат без брони." % [without_armor, mobilized])
 

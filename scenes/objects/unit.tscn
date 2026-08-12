@@ -7,6 +7,7 @@
 [ext_resource type="Texture2D" uid="uid://djpu7qsukonqw" path="res://assets/char/weapon.png" id="5_84xcb"]
 [ext_resource type="Texture2D" uid="uid://cchmhloswm0ha" path="res://assets/char/muzzleflash.png" id="6_wxw7q"]
 [ext_resource type="Texture2D" uid="uid://ckn84ttlys3ua" path="res://assets/char/berret.png" id="7_berret"]
+[ext_resource type="Texture2D" uid="uid://bsngmbg4npe2g" path="res://assets/char/berret_green.png" id="7_wxw7q"]
 
 [sub_resource type="CircleShape2D" id="CircleShape2D_pkhve"]
 radius = 9.0
@@ -42,6 +43,11 @@ texture = ExtResource("5_84xcb")
 visible = false
 z_index = 4
 texture = ExtResource("7_berret")
+
+[node name="greenberet" type="Sprite2D" parent="." unique_id=1383795036]
+visible = false
+z_index = 4
+texture = ExtResource("7_wxw7q")
 
 [node name="muzzleflash" type="Sprite2D" parent="." unique_id=573906144]
 visible = false

@@ -1220,6 +1220,7 @@ func _apply_network_unit_state(unit: Unit, state: Dictionary):
 	unit.build_job_kind = str(state.get("build_job_kind", unit.build_job_kind))
 	unit.is_mobilized = bool(state.get("is_mobilized", unit.is_mobilized))
 	unit.military_role = StringName(state.get("military_role", unit.military_role))
+	unit.simulation_importance = 2 if unit.military_role in [&"commander", &"platoon_commander"] else (1 if unit.is_mobilized else 0)
 	unit.military_rank = str(state.get("military_rank", unit.military_rank))
 	unit.squad_id = int(state.get("squad_id", unit.squad_id))
 	unit.platoon_id = int(state.get("platoon_id", unit.platoon_id))
@@ -1510,6 +1511,11 @@ func apply_save_data(data: Dictionary):
 	for unit_data in data.get("units", []):
 		_restore_unit(unit_data)
 	_restore_military_front_lines(data.get("military_front_lines", []))
+	# Migrate older armies where the first squad commander also acted as the
+	# platoon commander. New platoons always receive a separate rear commander.
+	for building in _get_indexed_buildings("government"):
+		if building is GovernmentBuilding and building.is_completed():
+			building.organize_army()
 	Unit.continuous_harvest_mode = bool(data.get("continuous_harvest", false))
 	var camera_data: Dictionary = data.get("camera", {})
 	var camera := get_node_or_null("Camera2D") as Camera2D
@@ -1640,7 +1646,7 @@ func _restore_unit(data: Dictionary) -> Unit:
 	unit.is_mobilized = bool(data.get("is_mobilized", false))
 	unit.military_role = StringName(data.get("military_role", "rifleman"))
 	unit.military_rank = str(data.get("military_rank", "Солдат" if unit.is_mobilized else "Гражданский"))
-	unit.simulation_importance = 2 if unit.military_role == &"commander" else (1 if unit.is_mobilized else 0)
+	unit.simulation_importance = 2 if unit.military_role in [&"commander", &"platoon_commander"] else (1 if unit.is_mobilized else 0)
 	unit.squad_id = int(data.get("squad_id", 0))
 	unit.platoon_id = int(data.get("platoon_id", 0))
 	unit.squad_commander_network_id = int(data.get("squad_commander_network_id", 0))

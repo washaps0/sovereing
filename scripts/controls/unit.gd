@@ -49,11 +49,15 @@ const SQUAD_SPREAD_RADIUS := 140.0
 const SQUAD_SPREAD_MIN_DISTANCE := 36.0
 const SQUAD_DEFAULT_OFFSET_RADIUS := 78.0
 const SQUAD_LINE_DEPTH_JITTER := 18.0
+const PLATOON_COMMANDER_REAR_DISTANCE := 112.0
+const PLATOON_COMMANDER_THREAT_DISTANCE := 520.0
+const PLATOON_COMMANDER_REPATH_DISTANCE := 18.0
 const MILITARY_ROLE_TEMPLATES := {
 	&"rifleman": {"name": "Стрелок", "equipment": {&"rifles": 1, &"armor": 1}},
 	&"medic": {"name": "Медик", "equipment": {&"rifles": 1, &"armor": 1}},
 	&"grenadier": {"name": "Гранатомётчик", "equipment": {&"rifles": 1, &"armor": 1}},
 	&"commander": {"name": "Командир", "equipment": {&"rifles": 1, &"armor": 1}},
+	&"platoon_commander": {"name": "Командир взвода", "equipment": {&"armor": 1}},
 }
 
 static var selected_unit: Unit
@@ -83,6 +87,7 @@ var squad_independent_order := false
 var squad_line_direction := Vector2.ZERO
 var squad_command_timer := 0.0
 var squad_command_timeout := 0.0
+var platoon_rear_direction := Vector2.ZERO
 var has_platoon_front_line := false
 var platoon_front_start := Vector2.ZERO
 var platoon_front_end := Vector2.ZERO
@@ -137,6 +142,7 @@ const FACTION_COLORS: Array[Color] = [
 @onready var armor_sprite: Sprite2D = $armor
 @onready var weapon_sprite: Sprite2D = $weapon
 @onready var beret_sprite: Sprite2D = $beret
+@onready var green_beret_sprite: Sprite2D = $greenberet
 @onready var muzzle_flash_sprite: Sprite2D = $muzzleflash
 @onready var collision_shape: CollisionShape2D = $CollisionShape2D
 
@@ -203,7 +209,9 @@ func _update_equipment_visuals():
 	if is_instance_valid(weapon_sprite):
 		weapon_sprite.visible = has_rifle
 	if is_instance_valid(beret_sprite):
-		beret_sprite.visible = is_squad_commander()
+		beret_sprite.visible = is_squad_commander() and not is_dedicated_platoon_commander()
+	if is_instance_valid(green_beret_sprite):
+		green_beret_sprite.visible = is_dedicated_platoon_commander()
 	if is_instance_valid(muzzle_flash_sprite) and not has_rifle:
 		muzzle_flash_sprite.visible = false
 
@@ -1277,6 +1285,7 @@ func mobilize(barracks: Building = null) -> bool:
 	squad_formation_offset = Vector2.ZERO
 	squad_independent_order = false
 	squad_line_direction = Vector2.ZERO
+	platoon_rear_direction = Vector2.ZERO
 	has_platoon_front_line = false
 	has_platoon_offensive_line = false
 	_stop_following_squad_commander()
@@ -1303,6 +1312,7 @@ func demobilize():
 	squad_formation_offset = Vector2.ZERO
 	squad_independent_order = false
 	squad_line_direction = Vector2.ZERO
+	platoon_rear_direction = Vector2.ZERO
 	has_platoon_front_line = false
 	has_platoon_offensive_line = false
 	_stop_following_squad_commander()
@@ -1321,7 +1331,14 @@ func is_platoon_commander() -> bool:
 	return is_mobilized and platoon_id > 0 and network_id == platoon_commander_network_id
 
 
+func is_dedicated_platoon_commander() -> bool:
+	return is_platoon_commander() and military_role == &"platoon_commander"
+
+
 func _process_squad_leadership(delta: float):
+	if is_dedicated_platoon_commander():
+		_process_platoon_commander_position(delta)
+		return
 	if not is_squad_commander():
 		return
 	squad_command_timer -= delta
@@ -1329,6 +1346,66 @@ func _process_squad_leadership(delta: float):
 		return
 	squad_command_timer = SQUAD_COMMAND_INTERVAL
 	_broadcast_squad_follow_targets()
+
+
+func _process_platoon_commander_position(delta: float):
+	if military_order in [&"move", &"return_to_base"]:
+		return
+	squad_command_timer -= delta
+	if squad_command_timer > 0.0:
+		return
+	squad_command_timer = SQUAD_COMMAND_INTERVAL
+	var squad_commanders := _get_platoon_squad_commanders()
+	for index in range(squad_commanders.size() - 1, -1, -1):
+		if is_instance_valid(squad_commanders[index].inside_building):
+			squad_commanders.remove_at(index)
+	if squad_commanders.is_empty():
+		return
+	var center := Vector2.ZERO
+	var advance_direction := Vector2.ZERO
+	for commander in squad_commanders:
+		center += commander.global_position
+		if commander.task == Task.MOVE:
+			advance_direction += commander.global_position.direction_to(commander.target_position)
+	center /= float(squad_commanders.size())
+	var nearest_enemy := _find_nearest_enemy_to_platoon(center)
+	if is_instance_valid(nearest_enemy) and nearest_enemy.global_position.distance_to(center) <= PLATOON_COMMANDER_THREAT_DISTANCE:
+		# Keep the soldiers between the enemy and their platoon commander.
+		platoon_rear_direction = nearest_enemy.global_position.direction_to(center)
+	elif not advance_direction.is_zero_approx():
+		platoon_rear_direction = -advance_direction.normalized()
+	elif platoon_rear_direction.is_zero_approx():
+		platoon_rear_direction = center.direction_to(global_position)
+		if platoon_rear_direction.is_zero_approx():
+			platoon_rear_direction = Vector2.DOWN
+	var rear_position := center + platoon_rear_direction.normalized() * PLATOON_COMMANDER_REAR_DISTANCE
+	if is_instance_valid(inside_building):
+		_exit_current_building()
+	if global_position.distance_to(rear_position) <= 8.0:
+		velocity = Vector2.ZERO
+		task = Task.IDLE
+		target_position = rear_position
+		_set_facing_direction(global_position.direction_to(center))
+		return
+	if target_position.distance_to(rear_position) >= PLATOON_COMMANDER_REPATH_DISTANCE or task != Task.MOVE:
+		target_position = _get_reachable_destination(rear_position)
+		_calculate_path(target_position)
+		task = Task.MOVE
+		military_order = &"platoon_command"
+
+
+func _find_nearest_enemy_to_platoon(center: Vector2) -> Unit:
+	var nearest: Unit
+	var nearest_distance := INF
+	var candidates: Array = world_index.get_units() if is_instance_valid(world_index) else get_tree().get_nodes_in_group("units")
+	for candidate in candidates:
+		if candidate is not Unit or candidate.faction_id == faction_id or not candidate.is_mobilized or candidate.health <= 0:
+			continue
+		var distance := center.distance_squared_to(candidate.global_position)
+		if distance < nearest_distance:
+			nearest_distance = distance
+			nearest = candidate
+	return nearest
 
 
 func _broadcast_squad_follow_targets():
@@ -1429,6 +1506,7 @@ func _follow_squad_commander(delta: float):
 func _stop_following_squad_commander():
 	squad_follow_active = false
 	squad_command_timeout = 0.0
+	platoon_rear_direction = Vector2.ZERO
 	squad_commander_unit = null
 	velocity = Vector2.ZERO
 	if task == Task.MOVE:
@@ -1662,6 +1740,7 @@ func _command_military_hold(order: StringName, direction: Vector2):
 		return
 	squad_independent_order = false
 	squad_line_direction = Vector2.ZERO
+	platoon_rear_direction = Vector2.ZERO
 	_cancel_task()
 	velocity = Vector2.ZERO
 	target_position = global_position
@@ -2201,7 +2280,7 @@ func get_military_role_name() -> String:
 func get_military_assignment_text() -> String:
 	if not is_mobilized:
 		return "Не мобилизован"
-	var squad_text := "без отряда" if squad_id <= 0 else "отряд %d" % squad_id
+	var squad_text := "штаб взвода" if is_dedicated_platoon_commander() else ("без отряда" if squad_id <= 0 else "отряд %d" % squad_id)
 	var platoon_text := "без взвода" if platoon_id <= 0 else "взвод %d" % platoon_id
 	return "%s, %s • %s • %s" % [squad_text, platoon_text, military_rank, get_military_order_name()]
 
@@ -2209,6 +2288,7 @@ func get_military_assignment_text() -> String:
 func get_military_order_name() -> String:
 	match military_order:
 		&"move": return "движение"
+		&"platoon_command": return "командует взводом из тыла"
 		&"attack": return "наступление"
 		&"front_line": return "занимает линию фронта"
 		&"offensive_line": return "движется к линии наступления"
