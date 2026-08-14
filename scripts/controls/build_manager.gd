@@ -31,6 +31,7 @@ const STREET_NAMES: Array[String] = [
 
 var menu: PanelContainer
 var build_scroll: ScrollContainer
+var build_grid: GridContainer
 var controls_panel: PanelContainer
 var unit_panel: PanelContainer
 var unit_scroll: ScrollContainer
@@ -191,22 +192,22 @@ func _create_interface():
 	var title := Label.new()
 	title.text = "Строительство"
 	build_box.add_child(title)
-	var build_grid := GridContainer.new()
+	build_grid = GridContainer.new()
 	build_grid.columns = 2
 	build_grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	build_box.add_child(build_grid)
-	_add_build_button(build_grid, "Жилой дом — 10 дерева", RESIDENCE_SCENE)
-	_add_build_button(build_grid, "Склад — 15 дерева", WAREHOUSE_SCENE)
-	_add_build_button(build_grid, "Завод — 25 дерева, 10 камня", FACTORY_SCENE)
-	_add_build_button(build_grid, "Пищевой завод — 20 дерева, 5 камня", FOOD_FACTORY_SCENE)
-	_add_build_button(build_grid, "Хижина дровосеков — 18 дерева, 5 камня", LUMBERJACK_CABIN_SCENE)
-	_add_build_button(build_grid, "Шахта — 20 дерева, 10 камня", MINE_SCENE)
-	_add_build_button(build_grid, "Электростанция — 30 дерева, 15 камня", POWER_PLANT_SCENE)
-	_add_build_button(build_grid, "Казарма — 25 дерева, 10 камня", BARRACKS_SCENE)
-	_add_build_button(build_grid, "Военный завод — 35 дерева, 25 камня", MILITARY_FACTORY_SCENE)
-	government_build_button = _add_build_button(build_grid, "Правительство — 30 дерева, 20 камня", GOVERNMENT_SCENE)
+	_add_build_button(build_grid, "Жилой дом — 10 дерева", RESIDENCE_SCENE, "Дом\nДерево: 10")
+	_add_build_button(build_grid, "Склад — 15 дерева", WAREHOUSE_SCENE, "Склад\nДерево: 15")
+	_add_build_button(build_grid, "Завод — 25 дерева, 10 камня", FACTORY_SCENE, "Завод\nД: 25 • К: 10")
+	_add_build_button(build_grid, "Пищевой завод — 20 дерева, 5 камня", FOOD_FACTORY_SCENE, "Пищевой завод\nД: 20 • К: 5")
+	_add_build_button(build_grid, "Хижина дровосеков — 18 дерева, 5 камня", LUMBERJACK_CABIN_SCENE, "Дровосеки\nД: 18 • К: 5")
+	_add_build_button(build_grid, "Шахта — 20 дерева, 10 камня", MINE_SCENE, "Шахта\nД: 20 • К: 10")
+	_add_build_button(build_grid, "Электростанция — 30 дерева, 15 камня", POWER_PLANT_SCENE, "Электростанция\nД: 30 • К: 15")
+	_add_build_button(build_grid, "Казарма — 25 дерева, 10 камня", BARRACKS_SCENE, "Казарма\nД: 25 • К: 10")
+	_add_build_button(build_grid, "Военный завод — 35 дерева, 25 камня", MILITARY_FACTORY_SCENE, "Военный завод\nД: 35 • К: 25")
+	government_build_button = _add_build_button(build_grid, "Правительство — 30 дерева, 20 камня", GOVERNMENT_SCENE, "Правительство\nД: 30 • К: 20")
 	var road_button := Button.new()
-	road_button.text = "Дорога линией"
+	road_button.text = "Дорога\nлинией"
 	road_button.tooltip_text = "Построить несколько дорожных сегментов одной линией"
 	road_button.pressed.connect(_begin_road_mode)
 	_configure_build_button(road_button, ROAD_SCENE)
@@ -388,11 +389,11 @@ func _create_building_panel():
 	box.add_child(dismantle_button)
 
 
-func _add_build_button(box: Container, text: String, scene: PackedScene) -> Button:
+func _add_build_button(box: Container, text: String, scene: PackedScene, card_text := "") -> Button:
 	var button := Button.new()
 	button.tooltip_text = text
 	var separator_index := text.find(" — ")
-	button.text = text.left(separator_index) if separator_index >= 0 else text
+	button.text = card_text if not card_text.is_empty() else (text.left(separator_index) if separator_index >= 0 else text)
 	button.pressed.connect(_begin_building_placement.bind(scene))
 	_configure_build_button(button, scene)
 	box.add_child(button)
@@ -404,11 +405,31 @@ func _configure_build_button(button: Button, scene: PackedScene):
 	var preview := scene.instantiate() as Building
 	var sprite := preview.get_node_or_null("Sprite2D") as Sprite2D
 	if is_instance_valid(sprite):
-		button.icon = sprite.texture
+		button.set_meta(&"source_icon", sprite.texture)
+		_update_build_button_icon(button)
+	button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	button.alignment = HORIZONTAL_ALIGNMENT_CENTER
 	button.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
-	button.custom_minimum_size.y = maxf(26.0 * current_ui_scale, 22.0)
+	button.custom_minimum_size.y = maxf(54.0 * current_ui_scale, 46.0)
 	preview.free()
+
+
+func _update_build_button_icon(button: Button):
+	var source_texture := button.get_meta(&"source_icon", null) as Texture2D
+	if not is_instance_valid(source_texture):
+		return
+	var source_image := source_texture.get_image()
+	if source_image == null or source_image.is_empty():
+		button.icon = source_texture
+		return
+	var target_side := maxi(roundi(38.0 * current_ui_scale), 28)
+	var largest_side := maxi(source_image.get_width(), source_image.get_height())
+	var resize_ratio := minf(float(target_side) / maxf(float(largest_side), 1.0), 1.0)
+	var target_width := maxi(roundi(source_image.get_width() * resize_ratio), 1)
+	var target_height := maxi(roundi(source_image.get_height() * resize_ratio), 1)
+	if target_width != source_image.get_width() or target_height != source_image.get_height():
+		source_image.resize(target_width, target_height, Image.INTERPOLATE_NEAREST)
+	button.icon = ImageTexture.create_from_image(source_image)
 
 
 func _process(delta: float):
@@ -457,9 +478,11 @@ func _update_responsive_layout():
 			resource_panel.visible = false
 			unit_panel.visible = false
 			building_panel.visible = false
+			var compact_menu_width := minf(390.0 * ui_scale, available_size.x)
+			build_grid.columns = 1 if compact_menu_width < 310.0 * ui_scale else 2
 			menu.position = Vector2(margin, margin)
 			menu.custom_minimum_size = Vector2.ZERO
-			menu.size = available_size
+			menu.size = Vector2(compact_menu_width, minf(430.0 * ui_scale, available_size.y))
 			return
 
 		menu.custom_minimum_size = Vector2.ZERO
@@ -488,7 +511,7 @@ func _update_responsive_layout():
 
 	controls_panel.visible = true
 	controls_panel.position = Vector2(12, 12)
-	unit_panel.visible = true
+	unit_panel.visible = not menu.visible
 	unit_panel.position = Vector2(12, 48.0 * ui_scale + 8.0)
 	var unit_width := (UNIT_PANEL_COLLAPSED_WIDTH if not unit_open else UNIT_PANEL_EXPANDED_WIDTH) * ui_scale
 	unit_panel.custom_minimum_size.x = unit_width
@@ -499,13 +522,14 @@ func _update_responsive_layout():
 	resource_panel.size = Vector2(right_width, minf(168.0 * ui_scale, maxf(viewport_size.y - 24.0, 1.0)))
 	# Keep the construction menu close to the unit panel instead of leaving a
 	# large empty strip between them.
-	var menu_top := minf(unit_panel.position.y + unit_panel.size.y + 8.0 * ui_scale, viewport_size.y * 0.32)
+	var menu_top := 54.0 * ui_scale if menu.visible else minf(unit_panel.position.y + unit_panel.size.y + 8.0 * ui_scale, viewport_size.y * 0.32)
 	# The notification toggle occupies the bottom-left corner of the viewport.
 	var menu_bottom_margin := 54.0 * ui_scale
-	var menu_width := minf(360.0 * ui_scale, available_size.x)
+	var menu_width := minf(390.0 * ui_scale, available_size.x)
+	build_grid.columns = 1 if menu_width < 310.0 * ui_scale else 2
 	menu.position = Vector2(12.0, menu_top)
 	menu.custom_minimum_size = Vector2.ZERO
-	menu.size = Vector2(menu_width, maxf(viewport_size.y - menu_top - menu_bottom_margin, 1.0))
+	menu.size = Vector2(menu_width, minf(430.0 * ui_scale, maxf(viewport_size.y - menu_top - menu_bottom_margin, 1.0)))
 	building_panel.visible = building_open
 	if building_open:
 		building_panel.position = Vector2(viewport_size.x - right_width - 12.0, 12.0)
@@ -525,7 +549,8 @@ func _apply_interface_scale(ui_scale: float):
 		building_title.add_theme_font_size_override("font_size", maxi(roundi(16.0 * ui_scale), 11))
 	for button in build_buttons:
 		if is_instance_valid(button):
-			button.custom_minimum_size.y = maxf(26.0 * ui_scale, 22.0)
+			_update_build_button_icon(button)
+			button.custom_minimum_size.y = maxf(54.0 * ui_scale, 46.0)
 
 
 func _update_hud():
