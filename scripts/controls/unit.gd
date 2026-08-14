@@ -264,6 +264,8 @@ func _exit_tree():
 		target_tree.stop_harvest(self)
 	if is_instance_valid(inside_building):
 		inside_building.leave(self)
+	elif is_instance_valid(target_building):
+		target_building.release_entry_reservation(self)
 	_release_warehouse()
 
 
@@ -564,6 +566,8 @@ func _get_separation_force(desired_direction: Vector2) -> Vector2:
 
 
 func _follow_path() -> bool:
+	if not path_points.is_empty() and path_index >= path_points.size() and _path_endpoint_is_partial(target_position):
+		_calculate_path(target_position)
 	if path_points.is_empty() or path_index >= path_points.size():
 		return _move_toward(target_position)
 	if _move_toward(path_points[path_index], 5.0):
@@ -574,7 +578,7 @@ func _follow_path() -> bool:
 
 
 func _navigate_toward(destination: Vector2, stop_distance := 3.0) -> bool:
-	if path_destination.distance_to(destination) > 8.0:
+	if path_destination.distance_to(destination) > 8.0 or (not path_points.is_empty() and path_index >= path_points.size() and _path_endpoint_is_partial(destination)):
 		_calculate_path(destination)
 	if not path_points.is_empty() and path_index < path_points.size():
 		if _move_toward(path_points[path_index], 5.0):
@@ -601,21 +605,34 @@ func _lod_navigate_toward(destination: Vector2, delta: float, stop_distance := 3
 	# Уже рассчитанный маршрут сохраняется и проходится по тем же точкам. Новый
 	# AStar строится только при заметном изменении цели, а не на каждом LOD-тике.
 	var path_matches := path_destination.distance_to(destination) <= repath_distance
-	if not path_matches:
-		# Jobs can change their destination while already off-screen (resource ->
-		# warehouse -> construction, or home -> factory). Build a real route at
-		# that transition instead of walking straight through buildings and then
-		# becoming stuck when FULL simulation is restored.
-		_calculate_path(destination)
-		path_matches = true
-	if path_matches and not path_points.is_empty() and path_index < path_points.size():
-		while path_index < path_points.size() and remaining_time > 0.0:
-			remaining_time = _lod_move_direct(path_points[path_index], remaining_time, 5.0)
-			if global_position.distance_to(path_points[path_index]) <= 5.0:
-				path_index += 1
-			else:
-				return 0.0
-	return _lod_move_direct(destination, remaining_time, stop_distance)
+	var segment_count := 0
+	while remaining_time > 0.0 and segment_count < 8:
+		if not path_matches:
+			# Jobs can change their destination while already off-screen (resource ->
+			# warehouse -> construction, or home -> factory). Build a real route at
+			# that transition instead of walking straight through buildings and then
+			# becoming stuck when FULL simulation is restored.
+			_calculate_path(destination)
+			path_matches = true
+		if not path_points.is_empty() and path_index < path_points.size():
+			while path_index < path_points.size() and remaining_time > 0.0:
+				remaining_time = _lod_move_direct(path_points[path_index], remaining_time, 5.0)
+				if global_position.distance_to(path_points[path_index]) <= 5.01:
+					path_index += 1
+				else:
+					return 0.0
+		if not path_points.is_empty() and path_index >= path_points.size() and _path_endpoint_is_partial(destination):
+			_calculate_path(destination)
+			segment_count += 1
+			continue
+		return _lod_move_direct(destination, remaining_time, stop_distance)
+	return 0.0
+
+
+func _path_endpoint_is_partial(destination: Vector2) -> bool:
+	if path_points.is_empty():
+		return false
+	return path_points[path_points.size() - 1].distance_to(destination) > WorldNavigation.PATH_CELL_SIZE * 1.5
 
 
 func _lod_move_direct(destination: Vector2, delta: float, stop_distance: float) -> float:
@@ -950,16 +967,14 @@ func _assign_automatic_job(allow_residence: bool) -> bool:
 		# выполняется только после приказа командира через меню войск.
 		if military_order == &"return_to_base":
 			var barracks := _find_available_barracks()
-			if is_instance_valid(barracks):
-				command_enter_building(barracks)
+			if is_instance_valid(barracks) and command_enter_building(barracks):
 				return true
 		return false
 
 	# Для ИИ уже запущенная шахта/энергетика/еда важнее новой стройки.
 	# Стратегия ограничивает число мест, поэтому строители всё равно остаются.
 	var factory: Building = _find_available_factory() if ai_controlled else null
-	if is_instance_valid(factory):
-		command_enter_building(factory)
+	if is_instance_valid(factory) and command_enter_building(factory):
 		return true
 
 	var construction := _find_auto_construction()
@@ -969,8 +984,7 @@ func _assign_automatic_job(allow_residence: bool) -> bool:
 
 	if not ai_controlled:
 		factory = _find_available_factory()
-		if is_instance_valid(factory):
-			command_enter_building(factory)
+		if is_instance_valid(factory) and command_enter_building(factory):
 			return true
 
 	if ai_controlled and _assign_ai_harvest_job():
@@ -978,8 +992,7 @@ func _assign_automatic_job(allow_residence: bool) -> bool:
 
 	if allow_residence:
 		var residence := _find_available_residence()
-		if is_instance_valid(residence):
-			command_enter_building(residence)
+		if is_instance_valid(residence) and command_enter_building(residence):
 			return true
 	return false
 
@@ -1093,28 +1106,17 @@ func _find_available_barracks() -> Building:
 
 
 func _get_reserved_entry_count(building: Building) -> int:
-	if is_instance_valid(world_index):
-		return world_index.get_reserved_entry_count(building, self)
-	var reserved := 0
-	for unit in _get_indexed_units():
-		if not is_instance_valid(unit) or unit == self or unit is not Unit or unit.faction_id != faction_id:
-			continue
-		if unit.task == Task.ENTER_BUILDING and unit.target_building == building and not is_instance_valid(unit.inside_building):
-			reserved += 1
-	return reserved
+	return building.get_reserved_entry_count(self) if is_instance_valid(building) else 0
 
 
 func _process_enter_building():
-	if not is_instance_valid(target_building) or not target_building.is_completed():
-		target_building = null
-		task = Task.IDLE
+	if not _ensure_entry_reservation():
 		return
 	var entrance := target_building.get_approach_position(global_position)
 	if not _navigate_toward(entrance, 6.0):
 		return
 	if not target_building.try_enter(self):
-		target_building = null
-		task = Task.IDLE
+		_retarget_entry_building(target_building)
 		return
 	inside_building = target_building
 	global_position = inside_building.global_position
@@ -1129,17 +1131,14 @@ func _process_enter_building():
 
 
 func _lod_process_enter_building(delta: float):
-	if not is_instance_valid(target_building) or not target_building.is_completed():
-		target_building = null
-		task = Task.IDLE
+	if not _ensure_entry_reservation():
 		return
 	var entrance := target_building.get_approach_position(global_position)
 	_lod_navigate_toward(entrance, delta, 6.0)
 	if global_position.distance_to(entrance) > 6.01:
 		return
 	if not target_building.try_enter(self):
-		target_building = null
-		task = Task.IDLE
+		_retarget_entry_building(target_building)
 		return
 	inside_building = target_building
 	global_position = inside_building.global_position
@@ -1197,19 +1196,80 @@ func _process_rest(delta: float):
 	_assign_automatic_job(false)
 
 
-func command_enter_building(building: Building):
+func command_enter_building(building: Building) -> bool:
 	if not is_instance_valid(building) or building.faction_id != faction_id or not building.is_completed():
-		return
+		return false
 	if is_mobilized and not building.is_barracks():
-		return
+		return false
 	if not is_mobilized and building.is_barracks():
-		return
+		return false
+	if inside_building == building:
+		return true
+	# Check before leaving the current home/workplace. The actual reservation is
+	# then claimed synchronously, so another unit cannot observe the same slot.
+	if not building.can_reserve_entry(self):
+		return false
 	_cancel_task()
 	if building.is_factory():
 		profession = "Рабочий завода"
 	target_building = building
 	path_destination = Vector2(INF, INF)
 	task = Task.ENTER_BUILDING
+	if not building.try_reserve_entry(self):
+		target_building = null
+		task = Task.IDLE
+		idle_check_timer = 0.0
+		return false
+	return true
+
+
+func sync_entry_reservation():
+	if not is_instance_valid(target_building):
+		return
+	if task == Task.ENTER_BUILDING and not is_instance_valid(inside_building):
+		target_building.try_reserve_entry(self)
+	else:
+		target_building.release_entry_reservation(self)
+
+
+func _ensure_entry_reservation() -> bool:
+	if not is_instance_valid(target_building) or not target_building.is_completed():
+		if is_instance_valid(target_building):
+			target_building.release_entry_reservation(self)
+		target_building = null
+		velocity = Vector2.ZERO
+		idle_check_timer = 0.0
+		task = Task.IDLE
+		return false
+	if target_building.try_reserve_entry(self):
+		return true
+	_retarget_entry_building(target_building)
+	return false
+
+
+func _retarget_entry_building(failed_building: Building):
+	var needs_factory := is_instance_valid(failed_building) and failed_building.is_factory()
+	var needs_residence := is_instance_valid(failed_building) and failed_building.is_residence()
+	var needs_barracks := is_instance_valid(failed_building) and failed_building.is_barracks()
+	if is_instance_valid(failed_building):
+		failed_building.release_entry_reservation(self)
+	target_building = null
+	velocity = Vector2.ZERO
+	path_points = PackedVector2Array()
+	path_index = 0
+	path_destination = Vector2(INF, INF)
+	task = Task.IDLE
+	var replacement: Building
+	if needs_factory:
+		replacement = _find_available_factory()
+	elif needs_residence:
+		replacement = _find_available_residence()
+	elif needs_barracks:
+		replacement = _find_available_barracks()
+	if is_instance_valid(replacement) and command_enter_building(replacement):
+		return
+	# Do not keep the old 1.5-2.1 second retry delay after losing a slot.
+	idle_check_timer = 0.0
 
 
 func settle_in_residence(residence: Building) -> bool:
@@ -1967,6 +2027,7 @@ func _cancel_task():
 		target_tree.stop_harvest(self)
 	target_tree = null
 	if is_instance_valid(target_building):
+		target_building.release_entry_reservation(self)
 		target_building.release_builder(self)
 	target_building = null
 	build_queue.clear()

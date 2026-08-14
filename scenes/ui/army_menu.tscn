@@ -15,168 +15,187 @@ text = "Управление войсками (M)"
 
 [node name="Panel" type="PanelContainer" parent="."]
 visible = false
-offset_left = 814.0
-offset_top = 84.0
-offset_right = 1144.0
-offset_bottom = 554.0
+offset_left = 696.0
+offset_top = 32.0
+offset_right = 1136.0
+offset_bottom = 600.0
 
-[node name="Scroll" type="ScrollContainer" parent="Panel"]
-layout_mode = 2
-horizontal_scroll_mode = 0
-vertical_scroll_mode = 1
-
-[node name="Content" type="VBoxContainer" parent="Panel/Scroll"]
-layout_mode = 2
-size_flags_horizontal = 3
-
-[node name="Header" type="HBoxContainer" parent="Panel/Scroll/Content"]
+[node name="Root" type="VBoxContainer" parent="Panel"]
 layout_mode = 2
 
-[node name="Title" type="Label" parent="Panel/Scroll/Content/Header"]
+[node name="Header" type="HBoxContainer" parent="Panel/Root"]
+layout_mode = 2
+
+[node name="Title" type="Label" parent="Panel/Root/Header"]
 layout_mode = 2
 size_flags_horizontal = 3
 theme_override_font_sizes/font_size = 20
 text = "Войска"
 
-[node name="Close" type="Button" parent="Panel/Scroll/Content/Header"]
+[node name="Close" type="Button" parent="Panel/Root/Header"]
 layout_mode = 2
 text = "✕"
 
-[node name="Summary" type="Label" parent="Panel/Scroll/Content"]
+[node name="Summary" type="Label" parent="Panel/Root"]
 layout_mode = 2
 text = "Мобилизовано: 0"
 
-[node name="PlatoonsTitle" type="Label" parent="Panel/Scroll/Content"]
-layout_mode = 2
-text = "Взводы:"
-
-[node name="PlatoonList" type="ItemList" parent="Panel/Scroll/Content"]
-custom_minimum_size = Vector2(0, 92)
+[node name="Tabs" type="TabContainer" parent="Panel/Root"]
 layout_mode = 2
 size_flags_vertical = 3
 
-[node name="PlatoonDetails" type="Label" parent="Panel/Scroll/Content"]
-custom_minimum_size = Vector2(0, 58)
+[node name="Composition" type="VBoxContainer" parent="Panel/Root/Tabs"]
+layout_mode = 2
+
+[node name="PlatoonsTitle" type="Label" parent="Panel/Root/Tabs/Composition"]
+layout_mode = 2
+text = "Взводы"
+
+[node name="PlatoonList" type="ItemList" parent="Panel/Root/Tabs/Composition"]
+custom_minimum_size = Vector2(0, 82)
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="PlatoonDetails" type="Label" parent="Panel/Root/Tabs/Composition"]
+custom_minimum_size = Vector2(0, 50)
 layout_mode = 2
 text = "Выберите взвод"
 autowrap_mode = 2
 
-[node name="PlatoonPlans" type="GridContainer" parent="Panel/Scroll/Content"]
+[node name="SquadsTitle" type="Label" parent="Panel/Root/Tabs/Composition"]
 layout_mode = 2
-columns = 1
+text = "Отряды"
 
-[node name="FrontLine" type="Button" parent="Panel/Scroll/Content/PlatoonPlans"]
-layout_mode = 2
-size_flags_horizontal = 3
-text = "Нарисовать линию фронта"
-tooltip_text = "Зажмите ЛКМ и ведите мышь по карте — линия может быть изогнутой"
-
-[node name="OffensiveLine" type="Button" parent="Panel/Scroll/Content/PlatoonPlans"]
-layout_mode = 2
-size_flags_horizontal = 3
-text = "Нарисовать линию наступления"
-tooltip_text = "Рисует изогнутую цель наступления для выбранного плана фронта"
-
-[node name="StartOffensive" type="Button" parent="Panel/Scroll/Content/PlatoonPlans"]
-layout_mode = 2
-size_flags_horizontal = 3
-text = "Начать наступление"
-tooltip_text = "В бой пойдут только отряды, расположенные рядом с выбранным участком наступления"
-
-[node name="StopOffensive" type="Button" parent="Panel/Scroll/Content/PlatoonPlans"]
-layout_mode = 2
-size_flags_horizontal = 3
-text = "Остановить наступление"
-tooltip_text = "Вернуть атакующие отряды на ближайший участок фронта, сохранив линию наступления"
-
-[node name="DeleteOffensive" type="Button" parent="Panel/Scroll/Content/PlatoonPlans"]
-layout_mode = 2
-size_flags_horizontal = 3
-text = "Удалить линию наступления"
-tooltip_text = "Остановить атаку и удалить только линию наступления, сохранив основную линию фронта"
-
-[node name="FrontLinesTitle" type="Label" parent="Panel/Scroll/Content"]
-layout_mode = 2
-text = "Планы фронта:"
-
-[node name="FrontLineList" type="ItemList" parent="Panel/Scroll/Content"]
-custom_minimum_size = Vector2(0, 92)
+[node name="SquadList" type="ItemList" parent="Panel/Root/Tabs/Composition"]
+custom_minimum_size = Vector2(0, 106)
 layout_mode = 2
 size_flags_vertical = 3
 
-[node name="FrontAssignments" type="GridContainer" parent="Panel/Scroll/Content"]
+[node name="Details" type="Label" parent="Panel/Root/Tabs/Composition"]
+custom_minimum_size = Vector2(0, 58)
 layout_mode = 2
-columns = 2
-
-[node name="Attach" type="Button" parent="Panel/Scroll/Content/FrontAssignments"]
-layout_mode = 2
-size_flags_horizontal = 3
-text = "Прикрепить выбранных"
-
-[node name="Detach" type="Button" parent="Panel/Scroll/Content/FrontAssignments"]
-layout_mode = 2
-size_flags_horizontal = 3
-text = "Открепить выбранных"
-
-[node name="Delete" type="Button" parent="Panel/Scroll/Content/FrontAssignments"]
-layout_mode = 2
-size_flags_horizontal = 3
-text = "Удалить линию фронта"
-
-[node name="SquadsTitle" type="Label" parent="Panel/Scroll/Content"]
-layout_mode = 2
-text = "Отряды:"
-
-[node name="SquadList" type="ItemList" parent="Panel/Scroll/Content"]
-custom_minimum_size = Vector2(0, 112)
-layout_mode = 2
-size_flags_vertical = 3
-
-[node name="Details" type="Label" parent="Panel/Scroll/Content"]
-custom_minimum_size = Vector2(0, 76)
-layout_mode = 2
-size_flags_vertical = 3
 text = "Выберите отряд"
 autowrap_mode = 2
 
-[node name="Actions" type="GridContainer" parent="Panel/Scroll/Content"]
+[node name="Actions" type="GridContainer" parent="Panel/Root/Tabs/Composition"]
 layout_mode = 2
 columns = 2
 
-[node name="Organize" type="Button" parent="Panel/Scroll/Content/Actions"]
+[node name="Organize" type="Button" parent="Panel/Root/Tabs/Composition/Actions"]
 layout_mode = 2
 size_flags_horizontal = 3
-text = "Переформировать"
+text = "Переформировать армию"
 
-[node name="OrdersTitle" type="Label" parent="Panel/Scroll/Content"]
+[node name="Front" type="VBoxContainer" parent="Panel/Root/Tabs"]
 layout_mode = 2
-text = "Приказы:"
 
-[node name="Orders" type="GridContainer" parent="Panel/Scroll/Content"]
+[node name="FrontLinesTitle" type="Label" parent="Panel/Root/Tabs/Front"]
+layout_mode = 2
+text = "Планы фронта"
+
+[node name="FrontLineList" type="ItemList" parent="Panel/Root/Tabs/Front"]
+custom_minimum_size = Vector2(0, 128)
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="PlatoonDetails" type="Label" parent="Panel/Root/Tabs/Front"]
+custom_minimum_size = Vector2(0, 58)
+layout_mode = 2
+text = "Выберите взвод во вкладке «Состав»"
+autowrap_mode = 2
+
+[node name="PlatoonPlans" type="GridContainer" parent="Panel/Root/Tabs/Front"]
 layout_mode = 2
 columns = 2
 
-[node name="Hold" type="Button" parent="Panel/Scroll/Content/Orders"]
+[node name="FrontLine" type="Button" parent="Panel/Root/Tabs/Front/PlatoonPlans"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Новый фронт"
+tooltip_text = "Зажмите ЛКМ и проведите линию фронта по карте"
+
+[node name="OffensiveLine" type="Button" parent="Panel/Root/Tabs/Front/PlatoonPlans"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Линия наступления"
+tooltip_text = "Нарисовать цель наступления для выбранного плана фронта"
+
+[node name="StartOffensive" type="Button" parent="Panel/Root/Tabs/Front/PlatoonPlans"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Начать наступление"
+
+[node name="StopOffensive" type="Button" parent="Panel/Root/Tabs/Front/PlatoonPlans"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Остановить"
+
+[node name="DeleteOffensive" type="Button" parent="Panel/Root/Tabs/Front/PlatoonPlans"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Удалить наступление"
+
+[node name="AssignmentsTitle" type="Label" parent="Panel/Root/Tabs/Front"]
+layout_mode = 2
+text = "Назначение выбранных войск"
+
+[node name="FrontAssignments" type="GridContainer" parent="Panel/Root/Tabs/Front"]
+layout_mode = 2
+columns = 2
+
+[node name="Attach" type="Button" parent="Panel/Root/Tabs/Front/FrontAssignments"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Прикрепить"
+
+[node name="Detach" type="Button" parent="Panel/Root/Tabs/Front/FrontAssignments"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Открепить"
+
+[node name="Delete" type="Button" parent="Panel/Root/Tabs/Front/FrontAssignments"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Удалить фронт"
+
+[node name="Commands" type="VBoxContainer" parent="Panel/Root/Tabs"]
+layout_mode = 2
+
+[node name="Hint" type="Label" parent="Panel/Root/Tabs/Commands"]
+layout_mode = 2
+text = "Приказ выбранному отряду"
+
+[node name="Details" type="Label" parent="Panel/Root/Tabs/Commands"]
+custom_minimum_size = Vector2(0, 74)
+layout_mode = 2
+text = "Выберите отряд во вкладке «Состав»"
+autowrap_mode = 2
+
+[node name="Orders" type="GridContainer" parent="Panel/Root/Tabs/Commands"]
+layout_mode = 2
+columns = 2
+
+[node name="Hold" type="Button" parent="Panel/Root/Tabs/Commands/Orders"]
 layout_mode = 2
 size_flags_horizontal = 3
 text = "Удерживать"
 
-[node name="Spread" type="Button" parent="Panel/Scroll/Content/Orders"]
+[node name="Spread" type="Button" parent="Panel/Root/Tabs/Commands/Orders"]
 layout_mode = 2
 size_flags_horizontal = 3
-text = "Рассредоточить"
+text = "Рассредоточиться"
 
-[node name="Watch" type="Button" parent="Panel/Scroll/Content/Orders"]
+[node name="Watch" type="Button" parent="Panel/Root/Tabs/Commands/Orders"]
 layout_mode = 2
 size_flags_horizontal = 3
 text = "Сектора обзора"
 
-[node name="Regroup" type="Button" parent="Panel/Scroll/Content/Orders"]
+[node name="Regroup" type="Button" parent="Panel/Root/Tabs/Commands/Orders"]
 layout_mode = 2
 size_flags_horizontal = 3
 text = "Собраться"
 
-[node name="ReturnToBase" type="Button" parent="Panel/Scroll/Content/Orders"]
+[node name="ReturnToBase" type="Button" parent="Panel/Root/Tabs/Commands/Orders"]
 layout_mode = 2
 size_flags_horizontal = 3
 text = "На базу"

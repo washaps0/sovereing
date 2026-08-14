@@ -7,11 +7,17 @@ const ROAD_PATH_WEIGHT := 1.0 / 1.5
 const ROAD_PATH_MARGIN := 8.0
 const BUILDING_AVOIDANCE_WEIGHT := 9.0
 const MAX_CACHED_PATHS := 768
+const PATH_CHUNK_CELLS := 16
+const PATH_LOOKAHEAD_CHUNKS := 2
+const MAX_CACHED_CHUNK_PATHS := 256
 
 var _grid: AStarGrid2D
+var _chunk_grid: AStarGrid2D
 var _dirty := true
 var _path_cache := {}
 var _path_cache_order: Array[Vector4i] = []
+var _chunk_path_cache := {}
+var _chunk_path_cache_order: Array[Vector4i] = []
 var _road_segments_by_cell := {}
 var _world_index: Node
 
@@ -25,6 +31,8 @@ func invalidate():
 	_dirty = true
 	_path_cache.clear()
 	_path_cache_order.clear()
+	_chunk_path_cache.clear()
+	_chunk_path_cache_order.clear()
 
 
 func find_path(from_position: Vector2, destination: Vector2) -> PackedVector2Array:
@@ -39,7 +47,8 @@ func find_path(from_position: Vector2, destination: Vector2) -> PackedVector2Arr
 	if _path_cache.has(cache_key):
 		var cached_path: PackedVector2Array = _path_cache[cache_key]
 		return cached_path
-	var result := _grid.get_point_path(start, finish)
+	var detailed_finish := _get_detailed_path_finish(start, finish)
+	var result := _grid.get_point_path(start, detailed_finish)
 	_path_cache[cache_key] = result
 	_path_cache_order.append(cache_key)
 	if _path_cache_order.size() > MAX_CACHED_PATHS:
@@ -59,12 +68,21 @@ func world_to_cell(point: Vector2) -> Vector2i:
 	return Vector2i(floori(point.x / PATH_CELL_SIZE), floori(point.y / PATH_CELL_SIZE))
 
 
+func cell_to_chunk(cell: Vector2i) -> Vector2i:
+	return Vector2i(
+		floori(float(cell.x) / float(PATH_CHUNK_CELLS)),
+		floori(float(cell.y) / float(PATH_CHUNK_CELLS))
+	)
+
+
 func _ensure_grid():
 	if not _dirty and _grid != null:
 		return
 	_dirty = false
 	_path_cache.clear()
 	_path_cache_order.clear()
+	_chunk_path_cache.clear()
+	_chunk_path_cache_order.clear()
 	_road_segments_by_cell.clear()
 	_grid = AStarGrid2D.new()
 	_grid.region = Rect2i(Vector2i.ZERO, PATH_MAP_SIZE)
@@ -74,6 +92,84 @@ func _ensure_grid():
 	_grid.update()
 	_apply_road_weights()
 	_apply_building_weights()
+	_build_chunk_grid()
+
+
+func _build_chunk_grid():
+	_chunk_grid = AStarGrid2D.new()
+	var chunk_map_size := Vector2i(
+		ceili(float(PATH_MAP_SIZE.x) / float(PATH_CHUNK_CELLS)),
+		ceili(float(PATH_MAP_SIZE.y) / float(PATH_CHUNK_CELLS))
+	)
+	_chunk_grid.region = Rect2i(Vector2i.ZERO, chunk_map_size)
+	_chunk_grid.cell_size = Vector2.ONE
+	_chunk_grid.offset = Vector2.ONE * 0.5
+	_chunk_grid.diagonal_mode = AStarGrid2D.DIAGONAL_MODE_ONLY_IF_NO_OBSTACLES
+	_chunk_grid.update()
+
+	# Each coarse point summarizes a 16x16-cell sector. The mean keeps dense
+	# obstacles expensive, while the minimum lets a road corridor influence the
+	# sector-level route before the detailed path is requested.
+	for chunk_x in range(chunk_map_size.x):
+		for chunk_y in range(chunk_map_size.y):
+			var chunk := Vector2i(chunk_x, chunk_y)
+			var first := chunk * PATH_CHUNK_CELLS
+			var last := (first + Vector2i.ONE * PATH_CHUNK_CELLS).min(PATH_MAP_SIZE)
+			var total_weight := 0.0
+			var minimum_weight := INF
+			var cell_count := 0
+			for x in range(first.x, last.x):
+				for y in range(first.y, last.y):
+					var weight := _grid.get_point_weight_scale(Vector2i(x, y))
+					total_weight += weight
+					minimum_weight = minf(minimum_weight, weight)
+					cell_count += 1
+			var average_weight := total_weight / maxf(float(cell_count), 1.0)
+			_chunk_grid.set_point_weight_scale(chunk, maxf((average_weight + minimum_weight) * 0.5, 0.01))
+
+
+func _get_detailed_path_finish(start: Vector2i, finish: Vector2i) -> Vector2i:
+	var start_chunk := cell_to_chunk(start)
+	var finish_chunk := cell_to_chunk(finish)
+	if start_chunk.distance_squared_to(finish_chunk) <= 2:
+		return finish
+	var chunk_path := _get_chunk_path(start_chunk, finish_chunk)
+	if chunk_path.size() <= PATH_LOOKAHEAD_CHUNKS + 1:
+		return finish
+	var raw_waypoint := chunk_path[PATH_LOOKAHEAD_CHUNKS]
+	var waypoint_chunk := Vector2i(floori(raw_waypoint.x), floori(raw_waypoint.y))
+	return _find_chunk_waypoint(waypoint_chunk)
+
+
+func _get_chunk_path(start: Vector2i, finish: Vector2i) -> PackedVector2Array:
+	if _chunk_grid == null or not _chunk_grid.region.has_point(start) or not _chunk_grid.region.has_point(finish):
+		return PackedVector2Array()
+	var cache_key := Vector4i(start.x, start.y, finish.x, finish.y)
+	if _chunk_path_cache.has(cache_key):
+		return _chunk_path_cache[cache_key]
+	var result := _chunk_grid.get_point_path(start, finish)
+	_chunk_path_cache[cache_key] = result
+	_chunk_path_cache_order.append(cache_key)
+	if _chunk_path_cache_order.size() > MAX_CACHED_CHUNK_PATHS:
+		_chunk_path_cache.erase(_chunk_path_cache_order.pop_front())
+	return result
+
+
+func _find_chunk_waypoint(chunk: Vector2i) -> Vector2i:
+	var first := chunk * PATH_CHUNK_CELLS
+	var last := (first + Vector2i.ONE * PATH_CHUNK_CELLS).min(PATH_MAP_SIZE)
+	var center := Vector2(first + last - Vector2i.ONE) * 0.5
+	var best := Vector2i(center.round())
+	var best_score := INF
+	for x in range(first.x, last.x):
+		for y in range(first.y, last.y):
+			var cell := Vector2i(x, y)
+			var weight := _grid.get_point_weight_scale(cell)
+			var score := weight * float(PATH_CHUNK_CELLS * PATH_CHUNK_CELLS) + Vector2(cell).distance_squared_to(center)
+			if score < best_score:
+				best_score = score
+				best = cell
+	return best
 
 
 func _apply_road_weights():
@@ -134,8 +230,8 @@ func _get_collision_bounds(collision: CollisionShape2D, half_size: Vector2, marg
 
 
 func _get_buildings() -> Array:
-	if is_instance_valid(_world_index):
-		return _world_index.get_buildings()
+	if is_instance_valid(_world_index) and _world_index.has_method("get_all_buildings_view"):
+		return _world_index.get_all_buildings_view()
 	var result: Array[Building] = []
 	for candidate in get_tree().get_nodes_in_group("buildings"):
 		if candidate is Building and get_parent().is_ancestor_of(candidate):

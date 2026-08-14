@@ -128,6 +128,7 @@ var storage_limits := {}
 var under_construction := false
 var assigned_workers: Array[Unit] = []
 var occupants: Array[Unit] = []
+var entry_reservations: Array[Unit] = []
 var progress_bar: WorldProgressBar
 var address := ""
 var address_label: Label
@@ -180,6 +181,7 @@ func _exit_tree():
 		if is_instance_valid(unit):
 			unit.force_exit_building(self)
 	occupants.clear()
+	entry_reservations.clear()
 
 
 func dismantle():
@@ -199,6 +201,7 @@ func _process(delta: float):
 		_cleanup_workers()
 		_cleanup_builders()
 		_cleanup_occupants()
+		_cleanup_entry_reservations()
 	if not is_equal_approx(last_overlay_rotation, rotation):
 		last_overlay_rotation = rotation
 		_update_overlay_orientation()
@@ -642,25 +645,80 @@ func take_resource(resource_type: StringName, amount: int) -> int:
 	return taken
 
 
+func get_entry_capacity() -> int:
+	return get_worker_target() if is_factory() else max_occupants
+
+
+func can_reserve_entry(unit: Unit) -> bool:
+	_cleanup_occupants()
+	_cleanup_entry_reservations()
+	if not _can_accept_entry_unit(unit):
+		return false
+	if unit in occupants or unit in entry_reservations:
+		return true
+	return occupants.size() + entry_reservations.size() < get_entry_capacity()
+
+
+func try_reserve_entry(unit: Unit) -> bool:
+	if not can_reserve_entry(unit):
+		return false
+	if unit not in occupants and unit not in entry_reservations:
+		entry_reservations.append(unit)
+	return true
+
+
+func release_entry_reservation(unit: Unit):
+	entry_reservations.erase(unit)
+
+
+func has_entry_reservation(unit: Unit) -> bool:
+	_cleanup_entry_reservations()
+	return unit in entry_reservations
+
+
+func get_reserved_entry_count(excluded_unit: Unit = null) -> int:
+	_cleanup_entry_reservations()
+	var result := entry_reservations.size()
+	if is_instance_valid(excluded_unit) and excluded_unit in entry_reservations:
+		result -= 1
+	return maxi(result, 0)
+
+
 func try_enter(unit: Unit) -> bool:
 	_cleanup_occupants()
+	_cleanup_entry_reservations()
+	if not _can_accept_entry_unit(unit):
+		return false
+	if unit in occupants:
+		release_entry_reservation(unit)
+		return true
+	var has_reservation := unit in entry_reservations
+	var capacity := get_entry_capacity()
+	if occupants.size() >= capacity:
+		return false
+	# An unreserved direct entrant must not steal a slot already promised to a
+	# unit that is walking here. Save restoration and migration still work when
+	# there are genuinely free, unreserved places.
+	if not has_reservation and occupants.size() + entry_reservations.size() >= capacity:
+		return false
+	release_entry_reservation(unit)
+	occupants.append(unit)
+	return true
+
+
+func _can_accept_entry_unit(unit: Unit) -> bool:
 	if not is_instance_valid(unit) or unit.faction_id != faction_id or placement_preview or not is_completed() or (not is_factory() and not is_residence() and not is_barracks()):
 		return false
 	if is_barracks() and not unit.is_mobilized:
 		return false
 	if is_residence() and unit.is_mobilized:
 		return false
-	if unit in occupants:
-		return true
-	var capacity := get_worker_target() if is_factory() else max_occupants
-	if occupants.size() >= capacity:
-		return false
-	occupants.append(unit)
 	return true
 
 
 func leave(unit: Unit):
 	occupants.erase(unit)
+	release_entry_reservation(unit)
 
 
 func get_worker_target() -> int:
@@ -677,6 +735,7 @@ func set_worker_target(value: int):
 			unit.force_exit_building(self)
 		else:
 			occupants.pop_back()
+	_cleanup_entry_reservations()
 
 
 func get_recipe() -> Dictionary:
@@ -910,6 +969,16 @@ func _cleanup_occupants():
 	for index in range(occupants.size() - 1, -1, -1):
 		if not is_instance_valid(occupants[index]):
 			occupants.remove_at(index)
+
+
+func _cleanup_entry_reservations():
+	for index in range(entry_reservations.size() - 1, -1, -1):
+		var unit := entry_reservations[index]
+		if not is_instance_valid(unit) or unit.is_queued_for_deletion() or unit.task != Unit.Task.ENTER_BUILDING or unit.target_building != self or is_instance_valid(unit.inside_building):
+			entry_reservations.remove_at(index)
+	var available_slots := maxi(get_entry_capacity() - occupants.size(), 0)
+	while entry_reservations.size() > available_slots:
+		entry_reservations.pop_back()
 
 
 func _update_visuals():

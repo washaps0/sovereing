@@ -296,7 +296,7 @@ func _find_barracks_for_soldier() -> Building:
 	for building in _get_indexed_buildings("barracks"):
 		if not _is_in_same_world(building) or building is not Building or building.faction_id != faction_id or not building.is_barracks() or not building.is_completed():
 			continue
-		if building.occupants.size() >= building.max_occupants:
+		if building.occupants.size() + building.get_reserved_entry_count() >= building.max_occupants:
 			continue
 		var distance := global_position.distance_squared_to(building.global_position)
 		if distance < nearest_distance:
@@ -379,7 +379,7 @@ func _find_residence_for_migrant() -> Building:
 	for building in _get_indexed_buildings("residence"):
 		if not _is_in_same_world(building) or building is not Building or building.faction_id != faction_id or not building.is_residence() or not building.is_completed():
 			continue
-		if building.occupants.size() >= building.max_occupants:
+		if building.occupants.size() + building.get_reserved_entry_count() >= building.max_occupants:
 			continue
 		var distance := global_position.distance_squared_to(building.global_position)
 		if distance < nearest_distance:

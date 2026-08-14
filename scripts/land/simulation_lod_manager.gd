@@ -16,11 +16,13 @@ const ROCK_SCENE := preload("res://scenes/objects/rock.tscn")
 @export var render_margin := 160.0
 @export var reduced_margin := 720.0
 @export var strategic_margin := 2400.0
+@export_range(0.1, 2.0, 0.05) var full_simulation_min_zoom := 0.65
 @export var reduced_tick_interval := 0.12
 @export var strategic_tick_interval := 0.4
 @export var background_tick_interval := 2.0
 @export_range(1, 64, 1) var object_load_budget_per_frame := 24
 @export_range(8, 512, 8) var lod_unit_budget_per_level_per_frame := 192
+@export_range(0.1, 4.0, 0.1) var lod_time_budget_per_level_msec := 1.0
 
 var camera: Camera2D
 var _clock := 0.0
@@ -87,14 +89,24 @@ func _tick_lod_bucket(level: int, interval: float, delta: float):
 	)
 	var requested := int(floor(_lod_tick_credits[level]))
 	var update_count := mini(requested, mini(lod_unit_budget_per_level_per_frame, bucket.size()))
-	for _update_index in range(update_count):
+	var processed := 0
+	var started_usec := Time.get_ticks_usec()
+	for update_index in range(update_count):
+		# Path requests and job selection are much more expensive than an indoor
+		# production tick. A small wall-clock budget prevents a group of newly idle
+		# citizens from turning one frame into a visible hitch.
+		if update_index > 0 and update_index % 8 == 0:
+			var elapsed_msec := float(Time.get_ticks_usec() - started_usec) / 1000.0
+			if elapsed_msec >= lod_time_budget_per_level_msec:
+				break
 		var cursor := _lod_tick_cursors[level] % bucket.size()
 		_lod_tick_cursors[level] = (cursor + 1) % bucket.size()
 		var unit = bucket[cursor]
+		processed += 1
 		if not is_instance_valid(unit) or unit.simulation_lod != level:
 			continue
 		_simulate_pending_time(unit)
-	_lod_tick_credits[level] = maxf(_lod_tick_credits[level] - update_count, 0.0)
+	_lod_tick_credits[level] = maxf(_lod_tick_credits[level] - processed, 0.0)
 
 
 func _simulate_pending_time(unit: Unit):
@@ -130,7 +142,7 @@ func _refresh_lods(initial: bool, elapsed: float):
 	_current_render_rect = render_rect
 	_unit_chunks.clear()
 
-	var units: Array = _world_index.get_units() if is_instance_valid(_world_index) else get_tree().get_nodes_in_group("units")
+	var units: Array = _world_index.get_all_units_view() if is_instance_valid(_world_index) and _world_index.has_method("get_all_units_view") else get_tree().get_nodes_in_group("units")
 	for candidate in units:
 		if candidate is not Unit or not get_parent().is_ancestor_of(candidate):
 			continue
@@ -215,11 +227,41 @@ func _process_pending_object_loads():
 		_pending_object_load_index = 0
 
 
-func _get_desired_lod(_unit: Unit, _render_rect: Rect2, _reduced_rect: Rect2, _strategic_rect: Rect2, _local_faction_id: int) -> int:
-	# LOD is visual-only. Every unit keeps the regular physics/task pipeline so
-	# construction, hauling, factory work, formations and movement behave exactly
-	# the same with or without the camera. The manager only changes visibility.
-	return Unit.SimulationLOD.FULL
+func _get_desired_lod(unit: Unit, render_rect: Rect2, reduced_rect: Rect2, strategic_rect: Rect2, local_faction_id: int) -> int:
+	# Indoor work has no movement or collision. Production, hunger, rest and job
+	# selection remain exact when advanced with a coarser delta.
+	if is_instance_valid(unit.inside_building):
+		return Unit.SimulationLOD.STRATEGIC
+
+	# Only visible citizens need CharacterBody2D collision and per-physics-frame
+	# presentation. Every lower level keeps the same persistent Unit state and is
+	# advanced by the central scheduler in bounded time slices. At strategic zoom
+	# rendered units keep a reduced tick because their collision is not perceptible.
+	var detailed_view := not is_instance_valid(camera) or minf(absf(camera.zoom.x), absf(camera.zoom.y)) >= full_simulation_min_zoom
+	if detailed_view and render_rect.has_point(unit.global_position):
+		return Unit.SimulationLOD.FULL
+
+	var desired_lod := Unit.SimulationLOD.BACKGROUND
+	if render_rect.has_point(unit.global_position) or reduced_rect.has_point(unit.global_position):
+		desired_lod = Unit.SimulationLOD.REDUCED
+	elif strategic_rect.has_point(unit.global_position):
+		desired_lod = Unit.SimulationLOD.STRATEGIC
+
+	# Activity matters more than distance. Travelling, hauling, building and
+	# formation following retain a responsive tick even at the edge of the map.
+	if unit.selected or unit.has_lod_focus_in(render_rect) or unit.needs_frequent_offscreen_simulation():
+		desired_lod = mini(desired_lod, Unit.SimulationLOD.REDUCED)
+	elif unit.needs_reliable_offscreen_simulation():
+		desired_lod = mini(desired_lod, Unit.SimulationLOD.STRATEGIC)
+
+	# Local citizens and commanders are scheduled ahead of inactive remote units,
+	# without ever enabling off-screen physics solely because they are important.
+	var importance := unit.simulation_importance
+	if unit.faction_id == local_faction_id:
+		importance += 1
+	if importance > 0:
+		desired_lod = maxi(desired_lod - importance, Unit.SimulationLOD.REDUCED)
+	return desired_lod
 
 
 func _update_unit_lod(unit: Unit, desired_lod: int, render_enabled: bool, initial: bool, elapsed: float):
@@ -310,6 +352,7 @@ func register_resource_data(resource_kind: String, position: Vector2, variant: i
 	_resource_records_by_id[record_id] = record
 	if is_instance_valid(existing_node):
 		existing_node.set("lod_record_id", record_id)
+		existing_node.set("lod_manager", self)
 	return record_id
 
 
@@ -470,6 +513,7 @@ func _materialize_resource(record: Dictionary) -> Node2D:
 		get_parent().get_node("rocks").add_child(resource)
 	resource.global_position = record.get("position", Vector2.ZERO)
 	resource.lod_record_id = int(record.get("id", 0))
+	resource.lod_manager = self
 	record["node"] = resource
 	return resource
 
@@ -482,7 +526,7 @@ func _sync_resource_record(record: Dictionary):
 
 
 func _update_buildings(active_rect: Rect2, load_candidates: Array[Dictionary]):
-	var buildings: Array = _world_index.get_buildings() if is_instance_valid(_world_index) else get_tree().get_nodes_in_group("buildings")
+	var buildings: Array = _world_index.get_all_buildings_view() if is_instance_valid(_world_index) and _world_index.has_method("get_all_buildings_view") else get_tree().get_nodes_in_group("buildings")
 	for candidate in buildings:
 		if candidate is not Building or not get_parent().is_ancestor_of(candidate):
 			continue

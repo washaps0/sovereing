@@ -12,30 +12,33 @@ var world_index: Node
 
 @onready var launcher: Button = $Launcher
 @onready var panel: PanelContainer = $Panel
-@onready var actions: GridContainer = $Panel/Scroll/Content/Actions
-@onready var orders: GridContainer = $Panel/Scroll/Content/Orders
-@onready var title: Label = $Panel/Scroll/Content/Header/Title
-@onready var close_button: Button = $Panel/Scroll/Content/Header/Close
-@onready var summary: Label = $Panel/Scroll/Content/Summary
-@onready var platoon_list: ItemList = $Panel/Scroll/Content/PlatoonList
-@onready var platoon_details: Label = $Panel/Scroll/Content/PlatoonDetails
-@onready var front_line_button: Button = $Panel/Scroll/Content/PlatoonPlans/FrontLine
-@onready var offensive_line_button: Button = $Panel/Scroll/Content/PlatoonPlans/OffensiveLine
-@onready var start_offensive_button: Button = $Panel/Scroll/Content/PlatoonPlans/StartOffensive
-@onready var stop_offensive_button: Button = $Panel/Scroll/Content/PlatoonPlans/StopOffensive
-@onready var delete_offensive_button: Button = $Panel/Scroll/Content/PlatoonPlans/DeleteOffensive
-@onready var front_line_list: ItemList = $Panel/Scroll/Content/FrontLineList
-@onready var attach_front_button: Button = $Panel/Scroll/Content/FrontAssignments/Attach
-@onready var detach_front_button: Button = $Panel/Scroll/Content/FrontAssignments/Detach
-@onready var delete_front_button: Button = $Panel/Scroll/Content/FrontAssignments/Delete
-@onready var squad_list: ItemList = $Panel/Scroll/Content/SquadList
-@onready var details: Label = $Panel/Scroll/Content/Details
-@onready var organize_button: Button = $Panel/Scroll/Content/Actions/Organize
-@onready var hold_button: Button = $Panel/Scroll/Content/Orders/Hold
-@onready var spread_button: Button = $Panel/Scroll/Content/Orders/Spread
-@onready var watch_button: Button = $Panel/Scroll/Content/Orders/Watch
-@onready var regroup_button: Button = $Panel/Scroll/Content/Orders/Regroup
-@onready var return_button: Button = $Panel/Scroll/Content/Orders/ReturnToBase
+@onready var tabs: TabContainer = $Panel/Root/Tabs
+@onready var actions: GridContainer = $Panel/Root/Tabs/Composition/Actions
+@onready var orders: GridContainer = $Panel/Root/Tabs/Commands/Orders
+@onready var title: Label = $Panel/Root/Header/Title
+@onready var close_button: Button = $Panel/Root/Header/Close
+@onready var summary: Label = $Panel/Root/Summary
+@onready var platoon_list: ItemList = $Panel/Root/Tabs/Composition/PlatoonList
+@onready var platoon_details: Label = $Panel/Root/Tabs/Composition/PlatoonDetails
+@onready var front_platoon_details: Label = $Panel/Root/Tabs/Front/PlatoonDetails
+@onready var front_line_button: Button = $Panel/Root/Tabs/Front/PlatoonPlans/FrontLine
+@onready var offensive_line_button: Button = $Panel/Root/Tabs/Front/PlatoonPlans/OffensiveLine
+@onready var start_offensive_button: Button = $Panel/Root/Tabs/Front/PlatoonPlans/StartOffensive
+@onready var stop_offensive_button: Button = $Panel/Root/Tabs/Front/PlatoonPlans/StopOffensive
+@onready var delete_offensive_button: Button = $Panel/Root/Tabs/Front/PlatoonPlans/DeleteOffensive
+@onready var front_line_list: ItemList = $Panel/Root/Tabs/Front/FrontLineList
+@onready var attach_front_button: Button = $Panel/Root/Tabs/Front/FrontAssignments/Attach
+@onready var detach_front_button: Button = $Panel/Root/Tabs/Front/FrontAssignments/Detach
+@onready var delete_front_button: Button = $Panel/Root/Tabs/Front/FrontAssignments/Delete
+@onready var squad_list: ItemList = $Panel/Root/Tabs/Composition/SquadList
+@onready var details: Label = $Panel/Root/Tabs/Composition/Details
+@onready var command_details: Label = $Panel/Root/Tabs/Commands/Details
+@onready var organize_button: Button = $Panel/Root/Tabs/Composition/Actions/Organize
+@onready var hold_button: Button = $Panel/Root/Tabs/Commands/Orders/Hold
+@onready var spread_button: Button = $Panel/Root/Tabs/Commands/Orders/Spread
+@onready var watch_button: Button = $Panel/Root/Tabs/Commands/Orders/Watch
+@onready var regroup_button: Button = $Panel/Root/Tabs/Commands/Orders/Regroup
+@onready var return_button: Button = $Panel/Root/Tabs/Commands/Orders/ReturnToBase
 
 
 func _ready():
@@ -45,6 +48,9 @@ func _ready():
 	var interface_theme := SovereignUITheme.create_theme(current_ui_scale)
 	launcher.theme = interface_theme
 	panel.theme = interface_theme
+	tabs.set_tab_title(0, "Состав")
+	tabs.set_tab_title(1, "Фронт")
+	tabs.set_tab_title(2, "Приказы")
 	launcher.pressed.connect(toggle_menu)
 	close_button.pressed.connect(close_menu)
 	platoon_list.item_selected.connect(_on_platoon_selected)
@@ -117,20 +123,22 @@ func _update_layout():
 	launcher.position = Vector2(maxf((viewport_size.x - launcher.size.x) * 0.5, 8.0), maxf(viewport_size.y - launcher.size.y - 8.0, 8.0))
 	if not panel.visible:
 		return
-	var panel_width := minf(330.0 * ui_scale, maxf(viewport_size.x - 16.0, 1.0))
-	var panel_height := minf(590.0 * ui_scale, maxf(viewport_size.y - 80.0, 1.0))
+	var panel_width := minf(440.0 * ui_scale, maxf(viewport_size.x - 16.0, 1.0))
+	var panel_height := minf(610.0 * ui_scale, maxf(viewport_size.y - 16.0, 1.0))
 	var panel_size := Vector2(panel_width, panel_height)
 	panel.custom_minimum_size = Vector2.ZERO
 	panel.position = Vector2(maxf(viewport_size.x - panel_size.x - 8.0, 8.0), maxf((viewport_size.y - panel_size.y) * 0.5, 8.0))
 	panel.size = panel_size
-	actions.columns = 1
-	orders.columns = 1 if panel_size.x < 260.0 else 2
-	var list_height := 76.0 if compact else 112.0
+	actions.columns = 2
+	orders.columns = 1 if panel_size.x < 300.0 else 2
+	var list_height := 72.0 if compact else 106.0
 	squad_list.custom_minimum_size.y = list_height * ui_scale
-	platoon_list.custom_minimum_size.y = (64.0 if compact else 92.0) * ui_scale
-	front_line_list.custom_minimum_size.y = (64.0 if compact else 92.0) * ui_scale
-	details.custom_minimum_size.y = (58.0 if compact else 76.0) * ui_scale
-	platoon_details.custom_minimum_size.y = (48.0 if compact else 58.0) * ui_scale
+	platoon_list.custom_minimum_size.y = (56.0 if compact else 82.0) * ui_scale
+	front_line_list.custom_minimum_size.y = (92.0 if compact else 128.0) * ui_scale
+	details.custom_minimum_size.y = (50.0 if compact else 58.0) * ui_scale
+	command_details.custom_minimum_size.y = (58.0 if compact else 74.0) * ui_scale
+	platoon_details.custom_minimum_size.y = (44.0 if compact else 50.0) * ui_scale
+	front_platoon_details.custom_minimum_size.y = platoon_details.custom_minimum_size.y
 	title.add_theme_font_size_override("font_size", maxi(roundi(17.0 * ui_scale), 12))
 
 
@@ -236,6 +244,7 @@ func _refresh_selected_squad(squads: Dictionary):
 	organize_button.disabled = not is_instance_valid(_find_local_government())
 	if not has_squad:
 		details.text = "Отряды пока не сформированы. Мобилизуйте людей и нажмите «Переформировать»."
+		command_details.text = details.text
 		return
 	var commander := _find_squad_commander(members)
 	var armored := 0
@@ -248,6 +257,7 @@ func _refresh_selected_squad(squads: Dictionary):
 	var order_text := commander.get_military_order_name() if is_instance_valid(commander) else "нет командира"
 	var commander_name := commander.unit_name if is_instance_valid(commander) else "не назначен"
 	details.text = "Командир: %s • приказ: %s\nНа базе: %d/%d • броня: %d/%d • автоматы: %d/%d" % [commander_name, order_text, at_base, members.size(), armored, members.size(), armed, members.size()]
+	command_details.text = details.text
 
 
 func _refresh_selected_platoon(platoons: Dictionary):
@@ -266,6 +276,7 @@ func _refresh_selected_platoon(platoons: Dictionary):
 	delete_front_button.disabled = selected_front_line_id.is_empty()
 	if not has_platoon:
 		platoon_details.text = "Взводы пока не сформированы."
+		front_platoon_details.text = platoon_details.text
 		return
 	var squad_count := _group_soldiers_by_squad(members).size()
 	if selected_platoon_id == 0:
@@ -273,6 +284,7 @@ func _refresh_selected_platoon(platoons: Dictionary):
 	else:
 		var commander := commanders[0]
 		platoon_details.text = "Командир взвода: %s • отрядов: %d\nМожно прикрепить весь взвод к выбранной линии." % [commander.unit_name, squad_count]
+	front_platoon_details.text = platoon_details.text
 
 
 func _on_platoon_selected(index: int):

@@ -8,7 +8,6 @@ var _buildings: Array[Building] = []
 var _units_by_faction := {}
 var _buildings_by_faction := {}
 var _buildings_by_kind := {}
-var _reservation_counts := {}
 var _carried_to_building := {}
 var _reservation_cache_msec := -1000
 const RESERVATION_CACHE_INTERVAL_MSEC := 150
@@ -65,6 +64,12 @@ func get_units(faction_id := -1) -> Array[Unit]:
 	return result
 
 
+# Hot systems that already validate entries can iterate the registry directly.
+# This avoids allocating and filling a temporary array on every LOD refresh.
+func get_all_units_view() -> Array[Unit]:
+	return _units
+
+
 func get_buildings(faction_id := -1, building_kind := "") -> Array[Building]:
 	var source: Array
 	if not building_kind.is_empty():
@@ -83,14 +88,14 @@ func get_buildings(faction_id := -1, building_kind := "") -> Array[Building]:
 	return result
 
 
+func get_all_buildings_view() -> Array[Building]:
+	return _buildings
+
+
 func get_reserved_entry_count(building: Building, excluded_unit: Unit = null) -> int:
 	if not is_instance_valid(building):
 		return 0
-	_rebuild_reservation_cache_if_needed()
-	var reserved := int(_reservation_counts.get(building.get_instance_id(), 0))
-	if is_instance_valid(excluded_unit) and excluded_unit.task == Unit.Task.ENTER_BUILDING and excluded_unit.target_building == building and not is_instance_valid(excluded_unit.inside_building):
-		reserved = maxi(reserved - 1, 0)
-	return reserved
+	return building.get_reserved_entry_count(excluded_unit)
 
 
 func get_carried_to_building(building: Building, resource_type: StringName, excluded_unit: Unit = null) -> int:
@@ -110,14 +115,11 @@ func _rebuild_reservation_cache_if_needed():
 	if now_msec - _reservation_cache_msec < RESERVATION_CACHE_INTERVAL_MSEC:
 		return
 	_reservation_cache_msec = now_msec
-	_reservation_counts.clear()
 	_carried_to_building.clear()
 	for unit in _units:
 		if not is_instance_valid(unit) or not is_instance_valid(unit.target_building):
 			continue
 		var building_id := int(unit.target_building.get_instance_id())
-		if unit.task == Unit.Task.ENTER_BUILDING and not is_instance_valid(unit.inside_building):
-			_reservation_counts[building_id] = int(_reservation_counts.get(building_id, 0)) + 1
 		var wood_key := Vector2i(building_id, 0)
 		var stone_key := Vector2i(building_id, 1)
 		_carried_to_building[wood_key] = int(_carried_to_building.get(wood_key, 0)) + unit.carried_wood

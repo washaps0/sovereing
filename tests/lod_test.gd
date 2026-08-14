@@ -8,11 +8,15 @@ func _init():
 func _run():
 	await _test_coarse_unit_movement()
 	await _test_coarse_route_movement()
+	await _test_hierarchical_pathing()
+	await _test_activity_driven_lod_selection()
+	await _test_atomic_building_entry_reservations()
 	await _test_coarse_harvest()
 	await _test_lod_catch_up_stays_sliced()
 	await _test_local_front_advance()
+	await _test_folded_front_advance_stays_local_and_smooth()
 	await _test_harvester_returns_while_offscreen()
-	await _test_offscreen_construction_uses_full_simulation()
+	await _test_offscreen_construction_uses_coarse_simulation()
 	await _test_streamed_world()
 	print("LOD_TEST_OK")
 	quit()
@@ -79,6 +83,121 @@ func _test_coarse_route_movement():
 	await process_frame
 
 
+func _test_hierarchical_pathing():
+	var world := Node2D.new()
+	for node_name in ["trees", "rocks", "roads", "buildings"]:
+		var container := Node2D.new()
+		container.name = node_name
+		world.add_child(container)
+	var navigation := WorldNavigation.new()
+	navigation.name = "WorldNavigation"
+	world.add_child(navigation)
+	root.add_child(world)
+	await process_frame
+
+	var start := Vector2(32, 32)
+	var destination := Vector2(12000, 12000)
+	var first_path := navigation.find_path(start, destination)
+	assert(not first_path.is_empty())
+	assert(first_path[first_path.size() - 1].distance_to(destination) > WorldNavigation.PATH_CELL_SIZE * 1.5)
+	var second_path := navigation.find_path(first_path[first_path.size() - 1], destination)
+	assert(not second_path.is_empty())
+	assert(second_path[second_path.size() - 1].distance_to(destination) < first_path[first_path.size() - 1].distance_to(destination))
+
+	var unit := preload("res://scenes/objects/unit.tscn").instantiate() as Unit
+	unit.position = start
+	unit.speed = 1000.0
+	world.add_child(unit)
+	unit.command_move(destination)
+	unit.set_simulation_lod(Unit.SimulationLOD.STRATEGIC, false)
+	for simulation_step in range(4):
+		unit.simulate_lod(20.0)
+		if unit.task == Unit.Task.IDLE:
+			break
+	assert(unit.global_position.distance_to(destination) <= 3.01)
+	assert(unit.task == Unit.Task.IDLE)
+	world.queue_free()
+	await process_frame
+
+
+func _test_activity_driven_lod_selection():
+	var holder := Node2D.new()
+	root.add_child(holder)
+	var manager := SimulationLODManager.new()
+	holder.add_child(manager)
+	var unit := preload("res://scenes/objects/unit.tscn").instantiate() as Unit
+	holder.add_child(unit)
+	var render_rect := Rect2(Vector2(-100, -100), Vector2(200, 200))
+	var reduced_rect := render_rect.grow(500.0)
+	var strategic_rect := render_rect.grow(2000.0)
+
+	unit.position = Vector2.ZERO
+	assert(manager._get_desired_lod(unit, render_rect, reduced_rect, strategic_rect, 0) == Unit.SimulationLOD.FULL)
+	var strategic_camera := Camera2D.new()
+	strategic_camera.zoom = Vector2.ONE * 0.2
+	holder.add_child(strategic_camera)
+	manager.camera = strategic_camera
+	assert(manager._get_desired_lod(unit, render_rect, reduced_rect, strategic_rect, 0) == Unit.SimulationLOD.REDUCED)
+	manager.camera = null
+	unit.position = Vector2(5000, 5000)
+	unit.faction_id = 3
+	assert(manager._get_desired_lod(unit, render_rect, reduced_rect, strategic_rect, 0) == Unit.SimulationLOD.BACKGROUND)
+	unit.ai_controlled = true
+	assert(manager._get_desired_lod(unit, render_rect, reduced_rect, strategic_rect, 0) == Unit.SimulationLOD.STRATEGIC)
+	unit.ai_controlled = false
+	unit.task = Unit.Task.MOVE
+	unit.target_position = Vector2(6000, 5000)
+	assert(manager._get_desired_lod(unit, render_rect, reduced_rect, strategic_rect, 0) == Unit.SimulationLOD.REDUCED)
+	var residence := preload("res://scenes/objects/buildings/residence.tscn").instantiate() as Building
+	holder.add_child(residence)
+	unit.inside_building = residence
+	assert(manager._get_desired_lod(unit, render_rect, reduced_rect, strategic_rect, 0) == Unit.SimulationLOD.STRATEGIC)
+	unit.position = Vector2.ZERO
+	assert(manager._get_desired_lod(unit, render_rect, reduced_rect, strategic_rect, 0) == Unit.SimulationLOD.STRATEGIC)
+	holder.queue_free()
+	await process_frame
+
+
+func _test_atomic_building_entry_reservations():
+	var world := Node2D.new()
+	root.add_child(world)
+	var index := WorldIndex.new()
+	index.name = "WorldIndex"
+	world.add_child(index)
+	var buildings := Node2D.new()
+	buildings.name = "buildings"
+	world.add_child(buildings)
+	var residences: Array[Building] = []
+	for position_x in [0.0, 300.0, 600.0]:
+		var residence := preload("res://scenes/objects/buildings/residence.tscn").instantiate() as Building
+		residence.position = Vector2(position_x, 0.0)
+		residence.max_occupants = 1
+		buildings.add_child(residence)
+		residences.append(residence)
+	var first_unit := preload("res://scenes/objects/unit.tscn").instantiate() as Unit
+	var second_unit := preload("res://scenes/objects/unit.tscn").instantiate() as Unit
+	world.add_child(first_unit)
+	world.add_child(second_unit)
+	await process_frame
+	# Both decisions happen in the same frame. The old 150 ms cache sent both
+	# units to the first residence because it did not see the first assignment.
+	assert(first_unit._assign_automatic_job(true))
+	assert(second_unit._assign_automatic_job(true))
+	assert(first_unit.target_building == residences[0])
+	assert(second_unit.target_building == residences[1])
+	assert(residences[0].get_reserved_entry_count() == 1)
+	assert(residences[1].get_reserved_entry_count() == 1)
+	# If capacity changes while a unit is travelling, it switches to another
+	# building immediately instead of waiting for the idle retry timer.
+	residences[0].max_occupants = 0
+	first_unit._process_enter_building()
+	assert(first_unit.target_building == residences[2])
+	assert(first_unit.task == Unit.Task.ENTER_BUILDING)
+	assert(residences[2].get_reserved_entry_count() == 1)
+	world.queue_free()
+	await process_frame
+
+
 func _test_local_front_advance():
 	var world = preload("res://scripts/land/generation.gd").new()
 	world.generate_world_on_ready = false
@@ -96,7 +215,7 @@ func _test_local_front_advance():
 	for point in advanced:
 		if point.y < 400.0:
 			northern_x = maxf(northern_x, point.x)
-		if point.y > 700.0 and point.y < 900.0:
+		if point.y >= 700.0 and point.y <= 900.0:
 			southern_x = maxf(southern_x, point.x)
 	assert(northern_x < 1.0)
 	assert(southern_x > 180.0)
@@ -118,6 +237,38 @@ func _test_local_front_advance():
 	})
 	assert(local_attackers.size() == 1)
 	assert(local_attackers[0].squad_id == 3)
+	world.queue_free()
+	await process_frame
+
+
+func _test_folded_front_advance_stays_local_and_smooth():
+	var world = preload("res://scripts/land/generation.gd").new()
+	world.generate_world_on_ready = false
+	root.add_child(world)
+	# The two sides of this U are close enough that independent nearest-point
+	# projections used to replace the whole bend with one diagonal attack line.
+	var folded_front: Array[Vector2] = [
+		Vector2(0, 0),
+		Vector2(0, 800),
+		Vector2(300, 800),
+		Vector2(300, 0),
+	]
+	var offensive: Array[Vector2] = [
+		Vector2(40, 300),
+		Vector2(150, 360),
+		Vector2(260, 500),
+	]
+	var advanced := world._merge_offensive_into_front(folded_front, offensive)
+	assert(advanced[0].distance_to(folded_front[0]) < 1.0)
+	assert(advanced.back().distance_to(folded_front.back()) < 1.0)
+	assert(not world._military_polyline_has_self_intersection(advanced))
+	var kept_folded_corner := false
+	for point in advanced:
+		if point.distance_to(Vector2(300, 800)) < 64.0:
+			kept_folded_corner = true
+	for index in range(advanced.size() - 1):
+		assert(advanced[index].distance_to(advanced[index + 1]) <= 50.0)
+	assert(kept_folded_corner)
 	world.queue_free()
 	await process_frame
 
@@ -185,7 +336,7 @@ func _test_harvester_returns_while_offscreen():
 	await process_frame
 
 
-func _test_offscreen_construction_uses_full_simulation():
+func _test_offscreen_construction_uses_coarse_simulation():
 	var world := Node2D.new()
 	for node_name in ["trees", "rocks", "roads", "buildings"]:
 		var container := Node2D.new()
@@ -202,9 +353,6 @@ func _test_offscreen_construction_uses_full_simulation():
 	construction.position = Vector2(1200, 1200)
 	construction.build_time = 0.2
 	world.get_node("buildings").add_child(construction)
-	construction.begin_construction()
-	construction.delivered_wood = construction.wood_required
-	construction.delivered_stone = construction.stone_required
 	var builder := preload("res://scenes/objects/unit.tscn").instantiate() as Unit
 	builder.position = construction.get_approach_position(Vector2(1100, 1200))
 	builder.food_timer = 10000.0
@@ -212,12 +360,16 @@ func _test_offscreen_construction_uses_full_simulation():
 	root.add_child(world)
 	await process_frame
 	await process_frame
+	construction.begin_construction()
+	construction.delivered_wood = construction.wood_required
+	construction.delivered_stone = construction.stone_required
 	builder.command_build(construction)
 	for frame_index in range(30):
 		await physics_frame
 		if construction.is_completed():
 			break
-	assert(builder.simulation_lod == Unit.SimulationLOD.FULL)
+	assert(builder.simulation_lod != Unit.SimulationLOD.FULL)
+	assert(not builder.is_physics_processing())
 	assert(not builder.visible)
 	assert(construction.is_completed())
 	world.queue_free()
@@ -274,12 +426,13 @@ func _test_streamed_world():
 	assert(unit.simulation_lod == Unit.SimulationLOD.FULL)
 	camera.position = Vector2(12000, 12000)
 	lod_manager._refresh_lods(false, 1.0)
+	lod_manager._process_pending_object_loads()
 	assert(distant_tree.visible)
 	assert(unit.simulation_lod == Unit.SimulationLOD.FULL)
 	lod_manager._refresh_lods(false, 1.1)
 	assert(unit.simulation_lod == Unit.SimulationLOD.FULL)
 	lod_manager._refresh_lods(false, 1.0)
-	assert(unit.simulation_lod == Unit.SimulationLOD.FULL)
+	assert(unit.simulation_lod == Unit.SimulationLOD.STRATEGIC)
 	assert(not unit.visible)
 	camera.position = Vector2.ZERO
 	lod_manager._refresh_lods(false, 0.2)

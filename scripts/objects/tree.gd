@@ -19,6 +19,7 @@ var harvest_progress := {}
 var progress_bar: WorldProgressBar
 var lod_active := true
 var lod_record_id := 0
+var lod_manager: Node
 
 @onready var tree_sprite: Sprite2D = $Sprite2D
 
@@ -109,9 +110,22 @@ func harvest(amount: int, source_faction_id := -1) -> int:
 func _sync_lod_amount(source_faction_id := -1):
 	if lod_record_id <= 0:
 		return
-	var manager := get_tree().get_first_node_in_group("simulation_lod_manager")
+	var manager := _get_lod_manager()
 	if is_instance_valid(manager) and manager.has_method("update_resource_amount"):
 		manager.update_resource_amount(lod_record_id, wood_amount, source_faction_id)
+
+
+func _get_lod_manager() -> Node:
+	if is_instance_valid(lod_manager):
+		return lod_manager
+	var ancestor := get_parent()
+	while is_instance_valid(ancestor):
+		var candidate := ancestor.get_node_or_null("SimulationLODManager")
+		if is_instance_valid(candidate):
+			lod_manager = candidate
+			return lod_manager
+		ancestor = ancestor.get_parent()
+	return null
 
 
 func is_depleted() -> bool:

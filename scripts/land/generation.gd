@@ -37,6 +37,11 @@ const AI_DISTRICT_SEARCH_ATTEMPTS := 12
 const OFFENSIVE_UPDATE_INTERVAL := 0.25
 const OFFENSIVE_COMMANDER_ARRIVAL_DISTANCE := 28.0
 const FRONT_COMMAND_REISSUE_DISTANCE := 32.0
+const MILITARY_LINE_POINT_SPACING := 48.0
+const MILITARY_LINE_BLEND_DISTANCE := 96.0
+const MILITARY_LINE_SMOOTH_PASSES := 3
+const MILITARY_LINE_MAX_SAMPLES := 384
+const MILITARY_LINE_GEOMETRY_VERSION := 1
 
 @export var starting_unit_count := 5
 @export var unit_spawn_position := Vector2(300, 300)
@@ -254,7 +259,7 @@ func apply_military_plan_command(faction_id: int, commanders: Array[Unit], actio
 			squad_ids.append(commander.squad_id)
 	match action:
 		&"create_front":
-			var front_points := _coerce_military_line_points(payload.get("points", []))
+			var front_points := _prepare_military_line(payload.get("points", []), MILITARY_LINE_SMOOTH_PASSES)
 			if front_points.size() < 2 or squad_ids.is_empty():
 				return false
 			_detach_squads_from_other_fronts(faction_id, squad_ids, line_id)
@@ -275,7 +280,7 @@ func apply_military_plan_command(faction_id: int, commanders: Array[Unit], actio
 		&"set_offensive":
 			if not has_military_front_line(faction_id, line_id):
 				return false
-			var offensive_points := _coerce_military_line_points(payload.get("points", []))
+			var offensive_points := _prepare_military_line(payload.get("points", []), MILITARY_LINE_SMOOTH_PASSES)
 			if offensive_points.size() < 2:
 				return false
 			var offensive_plan: Dictionary = military_front_lines[line_id]
@@ -736,14 +741,94 @@ func _project_onto_military_polyline(point: Vector2, points: Array[Vector2]) -> 
 	return {"position": nearest_position, "ratio": nearest_walked / total_length}
 
 
+func _project_onto_military_polyline_range(point: Vector2, points: Array[Vector2], minimum_ratio: float, maximum_ratio: float) -> Dictionary:
+	if points.is_empty():
+		return {"position": point, "ratio": 0.0}
+	var total_length := _get_military_polyline_length(points)
+	if total_length <= 0.001:
+		return {"position": points[0], "ratio": 0.0}
+	var range_start := clampf(minimum_ratio, 0.0, 1.0)
+	var range_end := clampf(maximum_ratio, range_start, 1.0)
+	var nearest_position: Vector2 = _sample_military_polyline(points, range_start).get("position", points[0])
+	var nearest_distance := INF
+	var nearest_walked := range_start * total_length
+	var walked := 0.0
+	for index in range(points.size() - 1):
+		var start := points[index]
+		var finish := points[index + 1]
+		var segment := finish - start
+		var segment_length := segment.length()
+		if segment_length <= 0.001:
+			continue
+		var segment_start_ratio := walked / total_length
+		var segment_end_ratio := (walked + segment_length) / total_length
+		var overlap_start := maxf(segment_start_ratio, range_start)
+		var overlap_end := minf(segment_end_ratio, range_end)
+		if overlap_start <= overlap_end:
+			var local_minimum := clampf((overlap_start * total_length - walked) / segment_length, 0.0, 1.0)
+			var local_maximum := clampf((overlap_end * total_length - walked) / segment_length, local_minimum, 1.0)
+			var local_ratio := clampf((point - start).dot(segment) / segment.length_squared(), local_minimum, local_maximum)
+			var candidate := start + segment * local_ratio
+			var distance := point.distance_squared_to(candidate)
+			if distance < nearest_distance:
+				nearest_distance = distance
+				nearest_position = candidate
+				nearest_walked = walked + segment_length * local_ratio
+		walked += segment_length
+	return {"position": nearest_position, "ratio": nearest_walked / total_length}
+
+
+func _get_local_offensive_projections(front_points: Array[Vector2], offensive_points: Array[Vector2]) -> Array[Dictionary]:
+	var first_projection := _project_onto_military_polyline(offensive_points[0], front_points)
+	var last_projection := _project_onto_military_polyline(offensive_points.back(), front_points)
+	var front_length := maxf(_get_military_polyline_length(front_points), 1.0)
+	var offensive_ratio := _get_military_polyline_length(offensive_points) / front_length
+	# On a folded front the globally closest points can belong to remote sectors.
+	# Keep both flanks of one offensive within a local arc of the front, so a
+	# short advance cannot accidentally consume a huge U-shaped section.
+	var maximum_span := clampf(offensive_ratio * 1.35 + 0.06, 0.12, 0.45)
+	if absf(float(first_projection.get("ratio", 0.0)) - float(last_projection.get("ratio", 0.0))) <= maximum_span:
+		return [first_projection, last_projection]
+	var first_ratio := float(first_projection.get("ratio", 0.0))
+	var last_near_first := _project_onto_military_polyline_range(
+		offensive_points.back(),
+		front_points,
+		first_ratio - maximum_span,
+		first_ratio + maximum_span
+	)
+	var last_ratio := float(last_projection.get("ratio", 0.0))
+	var first_near_last := _project_onto_military_polyline_range(
+		offensive_points[0],
+		front_points,
+		last_ratio - maximum_span,
+		last_ratio + maximum_span
+	)
+	var first_anchor: Vector2 = first_projection.get("position", offensive_points[0])
+	var last_near_first_anchor: Vector2 = last_near_first.get("position", offensive_points.back())
+	var first_near_last_anchor: Vector2 = first_near_last.get("position", offensive_points[0])
+	var last_anchor: Vector2 = last_projection.get("position", offensive_points.back())
+	var anchor_first_score: float = offensive_points[0].distance_squared_to(first_anchor) \
+		+ offensive_points.back().distance_squared_to(last_near_first_anchor)
+	var anchor_last_score: float = offensive_points[0].distance_squared_to(first_near_last_anchor) \
+		+ offensive_points.back().distance_squared_to(last_anchor)
+	if anchor_last_score < anchor_first_score:
+		return [first_near_last, last_projection]
+	return [first_projection, last_near_first]
+
+
 func _merge_offensive_into_front(front_points: Array[Vector2], offensive_points: Array[Vector2]) -> Array[Vector2]:
 	if front_points.size() < 2 or offensive_points.size() < 2:
 		return front_points
-	var first_projection := _project_onto_military_polyline(offensive_points[0], front_points)
-	var last_projection := _project_onto_military_polyline(offensive_points.back(), front_points)
+	var stable_front := _resample_military_polyline(_erase_military_polyline_loops(front_points), MILITARY_LINE_POINT_SPACING)
+	var smooth_offensive := _prepare_military_line(offensive_points, MILITARY_LINE_SMOOTH_PASSES)
+	if stable_front.size() < 2 or smooth_offensive.size() < 2:
+		return front_points
+	var projections := _get_local_offensive_projections(stable_front, smooth_offensive)
+	var first_projection: Dictionary = projections[0]
+	var last_projection: Dictionary = projections[1]
 	var start_ratio := float(first_projection.get("ratio", 0.0))
 	var end_ratio := float(last_projection.get("ratio", 1.0))
-	var oriented_offensive: Array[Vector2] = offensive_points.duplicate()
+	var oriented_offensive: Array[Vector2] = smooth_offensive.duplicate()
 	if start_ratio > end_ratio:
 		var swap := start_ratio
 		start_ratio = end_ratio
@@ -754,29 +839,120 @@ func _merge_offensive_into_front(front_points: Array[Vector2], offensive_points:
 	# front or producing a zero-width advance.
 	if end_ratio - start_ratio < 0.02:
 		var center := (start_ratio + end_ratio) * 0.5
-		var half_span := clampf(_get_military_polyline_length(oriented_offensive) / maxf(_get_military_polyline_length(front_points), 1.0) * 0.5, 0.03, 0.25)
+		var half_span := clampf(_get_military_polyline_length(oriented_offensive) / maxf(_get_military_polyline_length(stable_front), 1.0) * 0.5, 0.03, 0.25)
 		start_ratio = maxf(center - half_span, 0.0)
 		end_ratio = minf(center + half_span, 1.0)
-	# Preserve exact junctions with the old front. The previous ratio-by-ratio
-	# replacement jumped directly from an old sample to a distant offensive end,
-	# which could leave the advanced sector looking detached from the main line.
-	var sample_count := clampi(ceili(_get_military_polyline_length(front_points) / 96.0), 12, 96)
+	# Blend across a short piece of the old front on both sides. Smoothing only
+	# the inserted local section preserves quiet sectors while removing the long
+	# diagonal connectors and sharp V-shaped corners created by direct insertion.
+	var front_length := maxf(_get_military_polyline_length(stable_front), 1.0)
+	var blend_ratio := minf(MILITARY_LINE_BLEND_DISTANCE / front_length, 0.12)
+	var blend_start_ratio := maxf(start_ratio - blend_ratio, 0.0)
+	var blend_end_ratio := minf(end_ratio + blend_ratio, 1.0)
+	var sample_count := clampi(ceili(front_length / MILITARY_LINE_POINT_SPACING), 1, MILITARY_LINE_MAX_SAMPLES)
 	var merged: Array[Vector2] = []
 	for index in range(sample_count + 1):
 		var ratio := float(index) / float(sample_count)
-		if ratio < start_ratio:
-			_append_unique_military_point(merged, _sample_military_polyline(front_points, ratio).get("position", Vector2.ZERO))
-	var start_anchor: Vector2 = _sample_military_polyline(front_points, start_ratio).get("position", Vector2.ZERO)
-	var end_anchor: Vector2 = _sample_military_polyline(front_points, end_ratio).get("position", Vector2.ZERO)
-	_append_unique_military_point(merged, start_anchor)
+		if ratio < blend_start_ratio:
+			_append_unique_military_point(merged, _sample_military_polyline(stable_front, ratio).get("position", Vector2.ZERO))
+	var transition: Array[Vector2] = []
+	_append_unique_military_point(transition, _sample_military_polyline(stable_front, blend_start_ratio).get("position", Vector2.ZERO))
+	_append_unique_military_point(transition, _sample_military_polyline(stable_front, start_ratio).get("position", Vector2.ZERO))
 	for point in oriented_offensive:
+		_append_unique_military_point(transition, point)
+	_append_unique_military_point(transition, _sample_military_polyline(stable_front, end_ratio).get("position", Vector2.ZERO))
+	_append_unique_military_point(transition, _sample_military_polyline(stable_front, blend_end_ratio).get("position", Vector2.ZERO))
+	transition = _prepare_military_line(transition, MILITARY_LINE_SMOOTH_PASSES)
+	for point in transition:
 		_append_unique_military_point(merged, point)
-	_append_unique_military_point(merged, end_anchor)
 	for index in range(sample_count + 1):
 		var ratio := float(index) / float(sample_count)
-		if ratio > end_ratio:
-			_append_unique_military_point(merged, _sample_military_polyline(front_points, ratio).get("position", Vector2.ZERO))
-	return merged
+		if ratio > blend_end_ratio:
+			_append_unique_military_point(merged, _sample_military_polyline(stable_front, ratio).get("position", Vector2.ZERO))
+	return _resample_military_polyline(_erase_military_polyline_loops(merged), MILITARY_LINE_POINT_SPACING)
+
+
+func _prepare_military_line(raw_points, smooth_passes: int) -> Array[Vector2]:
+	var points := _coerce_military_line_points(raw_points)
+	if points.size() < 2:
+		return points
+	points = _erase_military_polyline_loops(points)
+	points = _resample_military_polyline(points, MILITARY_LINE_POINT_SPACING)
+	points = _smooth_military_polyline(points, smooth_passes)
+	points = _erase_military_polyline_loops(points)
+	return _resample_military_polyline(points, MILITARY_LINE_POINT_SPACING)
+
+
+func _resample_military_polyline(points: Array[Vector2], spacing: float) -> Array[Vector2]:
+	if points.size() < 2:
+		return points.duplicate()
+	var total_length := _get_military_polyline_length(points)
+	if total_length <= 0.001:
+		return [points[0]]
+	var sample_count := clampi(ceili(total_length / maxf(spacing, 1.0)), 1, MILITARY_LINE_MAX_SAMPLES)
+	var result: Array[Vector2] = []
+	for index in range(sample_count + 1):
+		var ratio := float(index) / float(sample_count)
+		_append_unique_military_point(result, _sample_military_polyline(points, ratio).get("position", points[0]))
+	return result
+
+
+func _smooth_military_polyline(points: Array[Vector2], passes: int) -> Array[Vector2]:
+	var result: Array[Vector2] = points.duplicate()
+	if result.size() < 3:
+		return result
+	for pass_index in range(maxi(passes, 0)):
+		var smoothed: Array[Vector2] = [result[0]]
+		for index in range(1, result.size() - 1):
+			var neighbour_center := (result[index - 1] + result[index + 1]) * 0.5
+			smoothed.append(result[index].lerp(neighbour_center, 0.45))
+		smoothed.append(result.back())
+		result = smoothed
+	return result
+
+
+func _erase_military_polyline_loops(points: Array[Vector2]) -> Array[Vector2]:
+	var result: Array[Vector2] = points.duplicate()
+	var iteration := 0
+	var changed := true
+	while changed and result.size() >= 4 and iteration < 16:
+		changed = false
+		iteration += 1
+		for first_index in range(result.size() - 1):
+			for second_index in range(first_index + 2, result.size() - 1):
+				var intersection = Geometry2D.segment_intersects_segment(
+					result[first_index],
+					result[first_index + 1],
+					result[second_index],
+					result[second_index + 1]
+				)
+				if intersection is not Vector2:
+					continue
+				var clean: Array[Vector2] = []
+				for prefix_index in range(first_index + 1):
+					_append_unique_military_point(clean, result[prefix_index])
+				_append_unique_military_point(clean, intersection)
+				for suffix_index in range(second_index + 1, result.size()):
+					_append_unique_military_point(clean, result[suffix_index])
+				result = clean
+				changed = true
+				break
+			if changed:
+				break
+	return result
+
+
+func _military_polyline_has_self_intersection(points: Array[Vector2]) -> bool:
+	for first_index in range(points.size() - 1):
+		for second_index in range(first_index + 2, points.size() - 1):
+			if Geometry2D.segment_intersects_segment(
+				points[first_index],
+				points[first_index + 1],
+				points[second_index],
+				points[second_index + 1]
+			) is Vector2:
+				return true
+	return false
 
 
 func _append_unique_military_point(points: Array[Vector2], point: Vector2):
@@ -827,13 +1003,16 @@ func _serialize_military_front_lines() -> Array:
 	return result
 
 
-func _restore_military_front_lines(raw_plans: Array):
+func _restore_military_front_lines(raw_plans: Array, smooth_legacy_geometry := false):
 	military_front_lines.clear()
 	for raw_plan in raw_plans:
 		if raw_plan is not Dictionary:
 			continue
 		var line_id := str(raw_plan.get("line_id", "")).strip_edges().left(96)
-		var front_points := _coerce_military_line_points(raw_plan.get("front_points", []))
+		var front_points := _prepare_military_line(raw_plan.get("front_points", []), MILITARY_LINE_SMOOTH_PASSES) \
+			if smooth_legacy_geometry else _coerce_military_line_points(raw_plan.get("front_points", []))
+		var offensive_points := _prepare_military_line(raw_plan.get("offensive_points", []), MILITARY_LINE_SMOOTH_PASSES) \
+			if smooth_legacy_geometry else _coerce_military_line_points(raw_plan.get("offensive_points", []))
 		if line_id.is_empty() or front_points.size() < 2:
 			continue
 		military_front_lines[line_id] = {
@@ -841,7 +1020,7 @@ func _restore_military_front_lines(raw_plans: Array):
 			"faction_id": int(raw_plan.get("faction_id", -1)),
 			"name": str(raw_plan.get("name", "Линия фронта")),
 			"front_points": front_points,
-			"offensive_points": _coerce_military_line_points(raw_plan.get("offensive_points", [])),
+			"offensive_points": offensive_points,
 			"has_offensive": bool(raw_plan.get("has_offensive", false)),
 			"offensive_active": bool(raw_plan.get("offensive_active", false)),
 			"attacking_squad_ids": raw_plan.get("attacking_squad_ids", []).duplicate(),
@@ -880,6 +1059,7 @@ func get_save_data() -> Dictionary:
 		"units": [],
 		"session_slots": [],
 		"military_front_lines": _serialize_military_front_lines(),
+		"military_line_geometry_version": MILITARY_LINE_GEOMETRY_VERSION,
 		"continuous_harvest": Unit.continuous_harvest_mode,
 	}
 	var network_manager := get_node_or_null("/root/NetworkManager")
@@ -1194,6 +1374,7 @@ func apply_network_unit_state_deltas(states: Array, authoritative_faction_ids: A
 
 
 func _apply_network_unit_state(unit: Unit, state: Dictionary):
+	var previous_target_building := unit.target_building
 	unit.configure_faction(
 		int(state.get("faction_id", unit.faction_id)),
 		int(state.get("controller_peer_id", unit.controller_peer_id)),
@@ -1240,6 +1421,8 @@ func _apply_network_unit_state(unit: Unit, state: Dictionary):
 	unit.has_rifle = bool(state.get("has_rifle", unit.has_rifle))
 	unit.facing_direction = _data_to_vector(state.get("facing_direction", [0, 1]))
 	unit.target_building = _find_building_by_network_id(int(state.get("target_building_network_id", 0)), unit.faction_id)
+	if is_instance_valid(previous_target_building) and previous_target_building != unit.target_building:
+		previous_target_building.release_entry_reservation(unit)
 	unit.target_warehouse = _find_building_by_network_id(int(state.get("target_warehouse_network_id", 0)), unit.faction_id)
 	if unit.task == Unit.Task.HARVEST:
 		var resource_target := _resolve_network_resource_target(state, unit)
@@ -1261,6 +1444,7 @@ func _apply_network_unit_state(unit: Unit, state: Dictionary):
 		previous_inside_building.leave(unit)
 	if is_instance_valid(unit.inside_building) and unit not in unit.inside_building.occupants:
 		unit.inside_building.occupants.append(unit)
+	unit.sync_entry_reservation()
 	unit.apply_network_motion(
 		_data_to_vector(state.get("position", [0, 0])),
 		_data_to_vector(state.get("velocity", [0, 0]))
@@ -1510,7 +1694,8 @@ func apply_save_data(data: Dictionary):
 		_restore_building(building_data)
 	for unit_data in data.get("units", []):
 		_restore_unit(unit_data)
-	_restore_military_front_lines(data.get("military_front_lines", []))
+	var smooth_legacy_fronts := int(data.get("military_line_geometry_version", 0)) < MILITARY_LINE_GEOMETRY_VERSION
+	_restore_military_front_lines(data.get("military_front_lines", []), smooth_legacy_fronts)
 	# Migrate older armies where the first squad commander also acted as the
 	# platoon commander. New platoons always receive a separate rear commander.
 	for building in _get_indexed_buildings("government"):

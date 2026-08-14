@@ -180,7 +180,7 @@ func _create_interface():
 	menu.clip_contents = true
 	add_child(menu)
 	build_scroll = ScrollContainer.new()
-	build_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	build_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	build_scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
 	build_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	build_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -191,21 +191,26 @@ func _create_interface():
 	var title := Label.new()
 	title.text = "Строительство"
 	build_box.add_child(title)
-	_add_build_button(build_box, "Жилой дом — 10 дерева", RESIDENCE_SCENE)
-	_add_build_button(build_box, "Склад — 15 дерева", WAREHOUSE_SCENE)
-	_add_build_button(build_box, "Завод — 25 дерева, 10 камня", FACTORY_SCENE)
-	_add_build_button(build_box, "Пищевой завод — 20 дерева, 5 камня", FOOD_FACTORY_SCENE)
-	_add_build_button(build_box, "Хижина дровосеков — 18 дерева, 5 камня", LUMBERJACK_CABIN_SCENE)
-	_add_build_button(build_box, "Шахта — 20 дерева, 10 камня", MINE_SCENE)
-	_add_build_button(build_box, "Электростанция — 30 дерева, 15 камня", POWER_PLANT_SCENE)
-	_add_build_button(build_box, "Казарма — 25 дерева, 10 камня", BARRACKS_SCENE)
-	_add_build_button(build_box, "Военный завод — 35 дерева, 25 камня", MILITARY_FACTORY_SCENE)
-	government_build_button = _add_build_button(build_box, "Правительство — 30 дерева, 20 камня", GOVERNMENT_SCENE)
+	var build_grid := GridContainer.new()
+	build_grid.columns = 2
+	build_grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	build_box.add_child(build_grid)
+	_add_build_button(build_grid, "Жилой дом — 10 дерева", RESIDENCE_SCENE)
+	_add_build_button(build_grid, "Склад — 15 дерева", WAREHOUSE_SCENE)
+	_add_build_button(build_grid, "Завод — 25 дерева, 10 камня", FACTORY_SCENE)
+	_add_build_button(build_grid, "Пищевой завод — 20 дерева, 5 камня", FOOD_FACTORY_SCENE)
+	_add_build_button(build_grid, "Хижина дровосеков — 18 дерева, 5 камня", LUMBERJACK_CABIN_SCENE)
+	_add_build_button(build_grid, "Шахта — 20 дерева, 10 камня", MINE_SCENE)
+	_add_build_button(build_grid, "Электростанция — 30 дерева, 15 камня", POWER_PLANT_SCENE)
+	_add_build_button(build_grid, "Казарма — 25 дерева, 10 камня", BARRACKS_SCENE)
+	_add_build_button(build_grid, "Военный завод — 35 дерева, 25 камня", MILITARY_FACTORY_SCENE)
+	government_build_button = _add_build_button(build_grid, "Правительство — 30 дерева, 20 камня", GOVERNMENT_SCENE)
 	var road_button := Button.new()
-	road_button.text = "Построить дорогу линией"
+	road_button.text = "Дорога линией"
+	road_button.tooltip_text = "Построить несколько дорожных сегментов одной линией"
 	road_button.pressed.connect(_begin_road_mode)
 	_configure_build_button(road_button, ROAD_SCENE)
-	build_box.add_child(road_button)
+	build_grid.add_child(road_button)
 	build_buttons.append(road_button)
 	_create_building_panel()
 
@@ -220,7 +225,7 @@ func _create_building_panel():
 	building_panel.clip_contents = true
 	add_child(building_panel)
 	building_scroll = ScrollContainer.new()
-	building_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	building_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	building_scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
 	building_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	building_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -254,29 +259,30 @@ func _create_building_panel():
 	warehouse_settings = VBoxContainer.new()
 	box.add_child(warehouse_settings)
 	var quota_hint := Label.new()
-	quota_hint.text = "Квоты хранения (всего 300). Увеличение одной квоты автоматически уменьшает свободные квоты остальных."
+	quota_hint.text = "Квота / запас. Общий лимит склада — 300."
 	quota_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	warehouse_settings.add_child(quota_hint)
 	for resource_type in Building.RESOURCE_TYPES:
-		var row := VBoxContainer.new()
+		var row := HBoxContainer.new()
 		warehouse_settings.add_child(row)
-		var row_header := HBoxContainer.new()
-		row.add_child(row_header)
 		var label := Label.new()
 		label.text = Building.RESOURCE_NAMES[resource_type]
-		label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		row_header.add_child(label)
-		var value_label := Label.new()
-		value_label.add_theme_color_override("font_color", SovereignUITheme.ACCENT_BRIGHT)
-		row_header.add_child(value_label)
+		label.custom_minimum_size.x = 76.0 * current_ui_scale
+		label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+		row.add_child(label)
 		var slider := HSlider.new()
 		slider.min_value = 0
 		slider.max_value = 300
 		slider.step = 1
-		slider.custom_minimum_size = Vector2(0, 16)
+		slider.custom_minimum_size = Vector2(80.0 * current_ui_scale, 18.0 * current_ui_scale)
 		slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		slider.value_changed.connect(_on_storage_quota_changed.bind(resource_type))
 		row.add_child(slider)
+		var value_label := Label.new()
+		value_label.custom_minimum_size.x = 68.0 * current_ui_scale
+		value_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		value_label.add_theme_color_override("font_color", SovereignUITheme.ACCENT_BRIGHT)
+		row.add_child(value_label)
 		quota_sliders[resource_type] = slider
 		quota_value_labels[resource_type] = value_label
 
@@ -382,9 +388,11 @@ func _create_building_panel():
 	box.add_child(dismantle_button)
 
 
-func _add_build_button(box: VBoxContainer, text: String, scene: PackedScene) -> Button:
+func _add_build_button(box: Container, text: String, scene: PackedScene) -> Button:
 	var button := Button.new()
-	button.text = text
+	button.tooltip_text = text
+	var separator_index := text.find(" — ")
+	button.text = text.left(separator_index) if separator_index >= 0 else text
 	button.pressed.connect(_begin_building_placement.bind(scene))
 	_configure_build_button(button, scene)
 	box.add_child(button)
@@ -397,7 +405,7 @@ func _configure_build_button(button: Button, scene: PackedScene):
 	var sprite := preview.get_node_or_null("Sprite2D") as Sprite2D
 	if is_instance_valid(sprite):
 		button.icon = sprite.texture
-	button.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	button.alignment = HORIZONTAL_ALIGNMENT_CENTER
 	button.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	button.custom_minimum_size.y = maxf(26.0 * current_ui_scale, 22.0)
 	preview.free()
@@ -441,7 +449,7 @@ func _update_responsive_layout():
 	var unit_open := is_instance_valid(Unit.get_selected_unit())
 	var margin := 8.0
 	var available_size := Vector2(maxf(viewport_size.x - margin * 2.0, 1.0), maxf(viewport_size.y - margin * 2.0, 1.0))
-	var right_width := minf(290.0 * ui_scale, available_size.x)
+	var right_width := minf(360.0 * ui_scale, available_size.x * 0.44)
 
 	if narrow:
 		controls_panel.visible = false
@@ -475,7 +483,7 @@ func _update_responsive_layout():
 			resource_panel.visible = true
 			resource_panel.position = Vector2(viewport_size.x - right_width - margin, margin)
 			resource_panel.custom_minimum_size = Vector2.ZERO
-			resource_panel.size = Vector2(right_width, minf(205.0 * ui_scale, available_size.y))
+			resource_panel.size = Vector2(right_width, minf(168.0 * ui_scale, available_size.y))
 		return
 
 	controls_panel.visible = true
@@ -484,26 +492,25 @@ func _update_responsive_layout():
 	unit_panel.position = Vector2(12, 48.0 * ui_scale + 8.0)
 	var unit_width := (UNIT_PANEL_COLLAPSED_WIDTH if not unit_open else UNIT_PANEL_EXPANDED_WIDTH) * ui_scale
 	unit_panel.custom_minimum_size.x = unit_width
-	unit_panel.size = Vector2(unit_width, minf((178.0 if unit_open else 34.0) * ui_scale, available_size.y))
-	resource_panel.visible = true
+	unit_panel.size = Vector2(unit_width, minf((142.0 if unit_open else 34.0) * ui_scale, available_size.y))
+	resource_panel.visible = not building_open
 	resource_panel.position = Vector2(viewport_size.x - right_width - 12.0, 12.0)
 	resource_panel.custom_minimum_size = Vector2.ZERO
-	resource_panel.size = Vector2(right_width, minf(205.0 * ui_scale, maxf(viewport_size.y - 24.0, 1.0)))
+	resource_panel.size = Vector2(right_width, minf(168.0 * ui_scale, maxf(viewport_size.y - 24.0, 1.0)))
 	# Keep the construction menu close to the unit panel instead of leaving a
 	# large empty strip between them.
 	var menu_top := minf(unit_panel.position.y + unit_panel.size.y + 8.0 * ui_scale, viewport_size.y * 0.32)
 	# The notification toggle occupies the bottom-left corner of the viewport.
 	var menu_bottom_margin := 54.0 * ui_scale
-	var menu_width := minf(285.0 * ui_scale, available_size.x)
+	var menu_width := minf(360.0 * ui_scale, available_size.x)
 	menu.position = Vector2(12.0, menu_top)
 	menu.custom_minimum_size = Vector2.ZERO
 	menu.size = Vector2(menu_width, maxf(viewport_size.y - menu_top - menu_bottom_margin, 1.0))
 	building_panel.visible = building_open
 	if building_open:
-		var building_top := resource_panel.position.y + resource_panel.size.y + 6.0
-		building_panel.position = Vector2(viewport_size.x - right_width - 12.0, building_top)
+		building_panel.position = Vector2(viewport_size.x - right_width - 12.0, 12.0)
 		building_panel.custom_minimum_size = Vector2.ZERO
-		building_panel.size = Vector2(right_width, maxf(viewport_size.y - building_top - 8.0, 1.0))
+		building_panel.size = Vector2(right_width, maxf(viewport_size.y - 24.0, 1.0))
 
 
 func _apply_interface_scale(ui_scale: float):
@@ -525,11 +532,14 @@ func _update_hud():
 	var selected_units := Unit.get_selected_units()
 	if selected_units.size() == 1:
 		var unit := selected_units[0]
-		unit_status.text = "Имя: %s\nФракция: %s\nЗдоровье: %d/%d\nПитание: %s\nПрофессия: %s\nАрмия: %s\nСнаряжение: %s\nСейчас: %s\nГруз: дерево %d, камень %d (%d/%d)\nПроизведено предметов: %d" % [unit.unit_name, unit.faction_name, unit.health, unit.max_health, unit.get_food_status_text(), unit.get_profession_text(), unit.get_military_assignment_text(), unit.get_military_equipment_text(), unit.get_task_text(), unit.carried_wood, unit.carried_stone, unit.get_carried_total(), unit.carry_capacity, unit.produced_items]
+		unit_status.text = "%s — %s\nЗдоровье %d/%d • питание: %s\nСейчас: %s\nАрмия: %s • %s\nГруз: дерево %d, камень %d (%d/%d)" % [unit.unit_name, unit.get_profession_text(), unit.health, unit.max_health, unit.get_food_status_text(), unit.get_task_text(), unit.get_military_assignment_text(), unit.get_military_equipment_text(), unit.carried_wood, unit.carried_stone, unit.get_carried_total(), unit.carry_capacity]
+		unit_status.tooltip_text = "Фракция: %s • произведено предметов: %d" % [unit.faction_name, unit.produced_items]
 	elif selected_units.size() > 1:
 		unit_status.text = "Выбрано юнитов: %d" % selected_units.size()
+		unit_status.tooltip_text = ""
 	else:
 		unit_status.text = "Юнит не выбран"
+		unit_status.tooltip_text = ""
 	_set_unit_panel_collapsed(selected_units.is_empty())
 	var wood := 0
 	var stone := 0
@@ -585,7 +595,8 @@ func _update_hud():
 		elif building is Building and building.faction_id == local_faction_id and building.is_barracks() and building.is_completed():
 			army_capacity += building.max_occupants
 	var food_per_minute := ceili(float(population) * 60.0 / Unit.FOOD_CONSUMPTION_INTERVAL)
-	resource_status.text = "%s\nРесурсы: %d/%d\nДерево %d | Камень %d | Железо %d | Уголь %d\nДоски %d | Инструменты %d\nЕда %d | Расход %d/мин\nБроня %d | Автоматы %d\nЭлектричество %d/%d\nНаселение %d/%d | Дома %d\nАрмия %d/%d\nДобыча %d | Производство %d" % [_get_local_faction_name(), wood + stone + iron + coal + planks + tools + food + armor + rifles, total_capacity, wood, stone, iron, coal, planks, tools, food, food_per_minute, armor, rifles, electricity, electricity_capacity, population, housing_capacity, residence_count, mobilized, army_capacity, workers, factory_workers]
+	resource_status.text = "%s • запасы %d/%d\nСырьё: дерево %d • камень %d • железо %d • уголь %d\nМатериалы: доски %d • инструменты %d\nСнабжение: еда %d (−%d/мин) • электричество %d/%d\nНаселение %d/%d • дома %d • армия %d/%d\nРабота: добыча %d • производство %d" % [_get_local_faction_name(), wood + stone + iron + coal + planks + tools + food + armor + rifles, total_capacity, wood, stone, iron, coal, planks, tools, food, food_per_minute, electricity, electricity_capacity, population, housing_capacity, residence_count, mobilized, army_capacity, workers, factory_workers]
+	resource_status.tooltip_text = "Военное снабжение: броня %d • автоматы %d" % [armor, rifles]
 	if is_instance_valid(government_build_button):
 		government_build_button.disabled = has_government
 		government_build_button.tooltip_text = "У фракции уже есть правительство" if has_government else ""
@@ -644,7 +655,8 @@ func _update_building_panel():
 			slider.editable = editable
 			slider.value = current_limit
 			var value_label: Label = quota_value_labels[resource_type]
-			value_label.text = "квота %d  •  есть %d" % [current_limit, stored_amount]
+			value_label.text = "%d / %d" % [current_limit, stored_amount]
+			value_label.tooltip_text = "Квота: %d • на складе: %d" % [current_limit, stored_amount]
 		updating_building_controls = false
 	elif factory_settings.visible:
 		building_status.text = "Работают %d/%d (вместимость %d) | рецепт: %s" % [building.occupants.size(), building.get_worker_target(), building.max_workers, building.get_recipe_name(building.selected_recipe)]
@@ -722,19 +734,20 @@ func _sync_factory_recipe_controls(building: Building):
 			recipe_picker.add_item(Building.FACTORY_RECIPES[recipe_type]["name"])
 			recipe_picker.set_item_metadata(recipe_picker.item_count - 1, recipe_type)
 		updating_building_controls = was_updating
-	var hint_lines := PackedStringArray()
-	for recipe_type in recipe_types:
-		var recipe: Dictionary = Building.FACTORY_RECIPES[recipe_type]
-		var input_parts := PackedStringArray()
-		for resource_type in recipe["inputs"]:
-			input_parts.append("%d %s" % [int(recipe["inputs"][resource_type]), str(Building.RESOURCE_NAMES[resource_type]).to_lower()])
-		var inputs_text := "без сырья" if input_parts.is_empty() else " + ".join(input_parts)
-		var output_parts := PackedStringArray()
-		var outputs: Dictionary = recipe.get("outputs", {recipe.get("output", &"planks"): int(recipe.get("amount", 1))})
-		for resource_type in outputs:
-			output_parts.append("%d %s" % [int(outputs[resource_type]), str(Building.RESOURCE_NAMES[resource_type]).to_lower()])
-		hint_lines.append("%s: %s → %s за %.1f с" % [recipe["name"], inputs_text, " + ".join(output_parts), float(recipe["time"])])
-	recipe_hint.text = "\n".join(hint_lines)
+	var selected_type: StringName = building.selected_recipe
+	if not Building.FACTORY_RECIPES.has(selected_type):
+		recipe_hint.text = ""
+		return
+	var recipe: Dictionary = Building.FACTORY_RECIPES[selected_type]
+	var input_parts := PackedStringArray()
+	for resource_type in recipe["inputs"]:
+		input_parts.append("%d %s" % [int(recipe["inputs"][resource_type]), str(Building.RESOURCE_NAMES[resource_type]).to_lower()])
+	var inputs_text := "без сырья" if input_parts.is_empty() else " + ".join(input_parts)
+	var output_parts := PackedStringArray()
+	var outputs: Dictionary = recipe.get("outputs", {recipe.get("output", &"planks"): int(recipe.get("amount", 1))})
+	for resource_type in outputs:
+		output_parts.append("%d %s" % [int(outputs[resource_type]), str(Building.RESOURCE_NAMES[resource_type]).to_lower()])
+	recipe_hint.text = "%s → %s за %.1f с" % [inputs_text, " + ".join(output_parts), float(recipe["time"])]
 
 
 func _select_resident(unit: Unit):
